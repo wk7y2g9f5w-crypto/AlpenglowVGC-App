@@ -12,3 +12,6 @@ api/__pycache__/
 # Env / secrets
 .env
 *.key
+
+# CI secrets (distribution private key, p12 password) - never commit
+.ci/

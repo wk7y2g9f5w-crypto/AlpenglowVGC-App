@@ -1,0 +1,73 @@
+workflows:
+  ios-testflight:
+    name: iOS TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      vars:
+        BUNDLE_ID: com.alpenglowvgc.alpenglowVgc
+        APP_STORE_CONNECT_ISSUER_ID: 8dfd5f59-cef0-467e-8f8e-97041f1dc74c
+        APP_STORE_CONNECT_KEY_ID: N23J3595AT
+        # The three vars below must be added in Codemagic as ENCRYPTED
+        # environment variables (App settings > Environment variables):
+        #   APP_STORE_CONNECT_PRIVATE_KEY = contents of the App Store Connect .p8 file
+        #   CERTIFICATE_PRIVATE_KEY       = persistent distribution private key (PEM)
+        #   P12_PASSWORD                  = password for the p12 container
+    scripts:
+      - name: Set up keychain
+        script: |
+          keychain initialize
+
+      - name: Fetch signing files
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create \
+            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+            --certificate-key @env:CERTIFICATE_PRIVATE_KEY \
+            --p12-password @env:P12_PASSWORD
+
+      - name: Add signing certificate to keychain
+        script: |
+          keychain add-certificates --certificate-password @env:P12_PASSWORD
+
+      - name: Verify signing identity
+        script: |
+          echo "Valid code signing identities in keychain:"
+          security find-identity -v -p codesigning
+
+      - name: Configure Xcode code signing
+        script: |
+          xcode-project use-profiles \
+            --project "app/ios/Runner.xcodeproj" \
+            --export-options-plist "$HOME/export_options.plist"
+
+      - name: Verify Xcode project signing settings
+        script: |
+          echo "CODE_SIGN settings after use-profiles:"
+          grep -E "CODE_SIGN_IDENTITY|CODE_SIGN_STYLE" app/ios/Runner.xcodeproj/project.pbxproj | sort | uniq -c
+
+      - name: Build IPA
+        script: |
+          cd app
+          flutter pub get
+          flutter build ipa --release \
+            --export-options-plist="$HOME/export_options.plist" \
+            --build-number=$BUILD_NUMBER
+
+      - name: Publish to App Store Connect
+        script: |
+          IPA=$(find app/build/ios/ipa -name "*.ipa" | head -n 1)
+          echo "Uploading $IPA"
+          app-store-connect publish "$IPA" \
+            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+            --submit-to-testflight
+    artifacts:
+      - app/build/ios/ipa/*.ipa
