@@ -302,6 +302,33 @@ async def health() -> dict:
 
 
 # --------------------------------------------------------------------------
+# OAuth intermediary redirect (mobile login)
+# --------------------------------------------------------------------------
+# Discord does not accept custom URL schemes (myapp://...) as OAuth redirect
+# URIs. Register this https URL in the Discord Developer Portal instead; it
+# bounces the browser back into the app via the custom scheme, preserving
+# the query string (?code=... / ?error=...).
+OAUTH_APP_REDIRECT = os.environ.get(
+    "OAUTH_APP_REDIRECT", "com.alpenglow.vgc.app://oauth-callback"
+)
+
+
+@app.get("/oauth/callback")
+async def oauth_callback(request: Request):
+    """Bounce Discord's OAuth response back into the mobile app.
+
+    No auth required — this is a plain browser redirect. The redirect target
+    is server-controlled (OAUTH_APP_REDIRECT); only the query string is
+    passed through, so this cannot be abused as an open redirect.
+    """
+    from fastapi.responses import RedirectResponse
+
+    qs = str(request.query_params)
+    target = f"{OAUTH_APP_REDIRECT}?{qs}" if qs else OAUTH_APP_REDIRECT
+    return RedirectResponse(url=target, status_code=302)
+
+
+# --------------------------------------------------------------------------
 # Tournaments
 # --------------------------------------------------------------------------
 @app.get("/api/tournaments")

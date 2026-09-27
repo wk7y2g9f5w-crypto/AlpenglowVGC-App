@@ -101,6 +101,27 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), {"ok": True})
 
+    def test_oauth_callback_redirects_to_app(self):
+        r = self.client.get("/oauth/callback?code=abc123&state=xyz",
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 302)
+        loc = r.headers["location"]
+        self.assertTrue(loc.startswith("com.alpenglow.vgc.app://oauth-callback?"),
+                        loc)
+        self.assertIn("code=abc123", loc)
+        self.assertIn("state=xyz", loc)
+
+    def test_oauth_callback_error_passthrough(self):
+        r = self.client.get("/oauth/callback?error=access_denied",
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 302)
+        self.assertIn("error=access_denied", r.headers["location"])
+
+    def test_oauth_callback_no_auth_needed(self):
+        # No Authorization header — the browser bounce must work anonymous.
+        r = self.client.get("/oauth/callback", follow_redirects=False)
+        self.assertEqual(r.status_code, 302)
+
     def test_no_token_401(self):
         r = self.client.get("/api/tournaments")
         self.assertEqual(r.status_code, 401)
