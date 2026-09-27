@@ -54,6 +54,12 @@ workflows:
         script: |
           echo "CODE_SIGN settings after use-profiles:"
           grep -E "CODE_SIGN_IDENTITY|CODE_SIGN_STYLE" app/ios/Runner.xcodeproj/project.pbxproj | sort | uniq -c
+          echo ""
+          echo "Resolved build settings for Runner (Release):"
+          xcodebuild -project app/ios/Runner.xcodeproj \
+            -target Runner \
+            -configuration Release \
+            -showBuildSettings 2>/dev/null | grep -E "CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|PROVISIONING_PROFILE_SPECIFIER|DEVELOPMENT_TEAM|PRODUCT_BUNDLE_IDENTIFIER" | sort -u
 
       - name: Build IPA
         script: |
