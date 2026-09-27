@@ -32,7 +32,7 @@ workflows:
             --key-id "$APP_STORE_CONNECT_KEY_ID" \
             --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
             --certificate-key @env:CERTIFICATE_PRIVATE_KEY \
-            --p12-password @env:P12_PASSWORD
+            --p12-password "$P12_PASSWORD"
 
       - name: Add signing certificate to keychain
         script: |
