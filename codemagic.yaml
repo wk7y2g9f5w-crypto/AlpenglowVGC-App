@@ -69,7 +69,6 @@ workflows:
           echo "Uploading $IPA"
           app-store-connect publish \
             --path "$IPA" \
-            --testflight \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
             --key-id "$APP_STORE_CONNECT_KEY_ID" \
             --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY
