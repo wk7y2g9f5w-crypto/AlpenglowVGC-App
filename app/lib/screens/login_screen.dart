@@ -158,7 +158,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 const SizedBox(height: 32),
                 if (_configured)
                   SizedBox(
-                    width: double.Infinity,
+                    width: double.infinity,
                     child: ElevatedButton.icon(
                       onPressed: _busy ? null : _login,
                       icon: _busy
