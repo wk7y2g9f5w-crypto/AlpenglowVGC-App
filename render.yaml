@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: alpenglow-vgc
+    runtime: python
+    plan: starter
+    buildCommand: "pip install -r api/requirements.txt -r bot/requirements.txt"
+    startCommand: "bash start.sh"
+    disk:
+      name: vgc-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: BOT_DIR
+        value: "/opt/render/project/src/bot"
+      - key: DB_PATH
+        value: "/data/tournament_bot.db"
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GUILD_ID
+        sync: false
