@@ -63,7 +63,12 @@ class _LoginScreenState extends State<LoginScreen> {
         'code_challenge_method': 'S256',
       });
 
-      final callbackScheme = Uri.parse(redirectUri).scheme;
+	      // The OAuth result always returns via the app's custom URL scheme:
+        // the https redirect URI bounces through the server back to it.
+      const callbackScheme = String.fromEnvironment(
+        'APP_URL_SCHEME',
+        defaultValue: 'com.alpenglow.vgc.app',
+      );
       final result = await FlutterWebAuth2.authenticate(
         url: authorizeUrl.toString(),
         callbackUrlScheme: callbackScheme,
