@@ -10,7 +10,7 @@ workflows:
       xcode: latest
       cocoapods: default
       vars:
-        BUNDLE_ID: com.alpenglowvgc.alpenglowVgc
+        BUNDLE_ID: com.alpenglowvgc.alpenglowvgc
         APP_STORE_CONNECT_ISSUER_ID: 8dfd5f59-cef0-467e-8f8e-97041f1dc74c
         APP_STORE_CONNECT_KEY_ID: N23J3595AT
         # The three vars below must be added in Codemagic as ENCRYPTED
