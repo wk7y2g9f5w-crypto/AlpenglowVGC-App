@@ -63,7 +63,7 @@ workflows:
             --export-options-plist="$HOME/export_options.plist" \
             --build-number=$BUILD_NUMBER
 
-     - name: Publish to App Store Connect
+      - name: Publish to App Store Connect
         script: |
           IPA=$(find app/build/ios/ipa -name "*.ipa" | head -n 1)
           echo "Uploading $IPA"
