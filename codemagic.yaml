@@ -5,7 +5,7 @@ workflows:
     max_build_duration: 60
     environment:
           groups:
-        - signing
+            - signing
       flutter: stable
       xcode: latest
       cocoapods: default
