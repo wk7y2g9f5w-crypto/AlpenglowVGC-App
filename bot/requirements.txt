@@ -2,3 +2,4 @@
 discord.py>=2.4        # Discord API (slash commands, buttons, modals, embeds)
 aiosqlite>=0.19        # async SQLite storage
 python-dotenv>=1.0     # .env config loading
+aioapns>=4.0        # Apple Push Notification service (test + live sends)

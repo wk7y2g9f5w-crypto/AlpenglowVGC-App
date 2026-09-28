@@ -15,6 +15,7 @@ from discord.ext import commands
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src import db
+from src import push
 from src import teesheet as ts
 
 MAX_HANDLE_LEN = 32
@@ -118,6 +119,57 @@ class Profile(commands.Cog):
         await interaction.response.send_message(
             f"✅ Your timezone is now **{tz_name}**. Times you enter in "
             f"`/tee_time create` will be read as your local time.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="notify_test",
+        description="Send a test push notification to your registered devices",
+    )
+    async def notify_test(self, interaction: discord.Interaction):
+        pid = str(interaction.user.id)
+        rows = await db._fetchall(
+            self.bot.db_path,
+            "SELECT push_token, platform FROM devices WHERE discord_id = ?",
+            (pid,),
+        )
+        if not rows:
+            await interaction.response.send_message(
+                "❌ No devices registered. Open the Alpenglow VGC app, allow "
+                "notifications, and sign in — it registers this device "
+                "automatically.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        sender = push.get_sender()
+        if not sender.configured:
+            await interaction.followup.send(
+                "⚠️ The server has no APNs credentials yet — add "
+                "`APNS_KEY_P8`, `APNS_KEY_ID`, and `APNS_TEAM_ID` in the "
+                "Render dashboard, then deploy. Your device *is* registered "
+                f"({len(rows)} token(s)), so you'll get pushes once that's "
+                "done.",
+                ephemeral=True,
+            )
+            return
+        ok, gone, failed = 0, 0, 0
+        for r in rows:
+            outcome = await sender.send(
+                r["push_token"], "⛳ Alpenglow VGC",
+                "Test notification — you're all set!",
+                {"type": "test"})
+            if outcome == "ok":
+                ok += 1
+            elif outcome == "unregistered":
+                gone += 1
+                await db.unregister_device(self.bot.db_path, pid,
+                                           r["push_token"])
+            else:
+                failed += 1
+        await interaction.followup.send(
+            f"📲 Test push: **{ok}** delivered, **{gone}** stale token(s) "
+            f"removed, **{failed}** failed. Check your phone!",
             ephemeral=True,
         )
 

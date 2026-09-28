@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
 
@@ -120,6 +121,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 32),
           const Divider(),
           const SizedBox(height: 8),
+          Text(
+            'Notifications',
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          const SizedBox(height: 4),
+          _NotificationPrefs(
+              auth: widget.auth, settings: widget.settings),
+          const SizedBox(height: 32),
+          const Divider(),
+          const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: () async {
               final confirm = await showDialog<bool>(
@@ -146,6 +157,90 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Push-notification toggles, one per event kind. All default on server-side.
+class _NotificationPrefs extends StatefulWidget {
+  final AuthService auth;
+  final SettingsService settings;
+
+  const _NotificationPrefs({required this.auth, required this.settings});
+
+  @override
+  State<_NotificationPrefs> createState() => _NotificationPrefsState();
+}
+
+class _NotificationPrefsState extends State<_NotificationPrefs> {
+  static const _labels = [
+    ('tournament_starts', 'Tournament starts', 'When a tournament begins'),
+    ('round_starts', 'Round starts', 'When each round opens for scoring'),
+    ('ace', 'Hole-in-one', 'Someone aces a hole'),
+    ('albatross', 'Albatross', 'Someone goes 3-under on a hole'),
+    ('top3_changes', 'Top 3 changes', 'The leaderboard top 3 reorders'),
+  ];
+
+  ApiClient get _api => ApiClient(
+      baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
+
+  Map<String, bool>? _prefs;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final prefs = await _api.getNotificationPrefs();
+      if (mounted) setState(() => _prefs = prefs);
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Could not load preferences.');
+    }
+  }
+
+  Future<void> _toggle(String key, bool value) async {
+    final prev = Map<String, bool>.from(_prefs ?? {});
+    setState(() => _prefs = {...prev, key: value});
+    try {
+      final updated = await _api.updateNotificationPrefs({key: value});
+      if (mounted) setState(() => _prefs = {...prev, ...updated});
+    } catch (_) {
+      if (mounted) {
+        setState(() => _prefs = prev);
+        showSnack(context, 'Could not save — try again.');
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Text(_error!, style: const TextStyle(color: Colors.grey)),
+      );
+    }
+    if (_prefs == null) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 12),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    return Column(
+      children: [
+        for (final (key, title, subtitle) in _labels)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(title),
+            subtitle: Text(subtitle),
+            value: _prefs![key] ?? true,
+            onChanged: (v) => _toggle(key, v),
+          ),
+      ],
     );
   }
 }

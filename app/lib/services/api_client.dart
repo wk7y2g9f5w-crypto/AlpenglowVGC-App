@@ -118,8 +118,9 @@ class ApiClient {
     return _decode(res);
   }
 
-  Future<dynamic> _delete(String path) async {
-    final res = await http.delete(_uri(path), headers: _headers);
+  Future<dynamic> _delete(String path,
+      [Map<String, String>? query]) async {
+    final res = await http.delete(_uri(path, query), headers: _headers);
     return _decode(res);
   }
 
@@ -349,5 +350,80 @@ class ApiClient {
   Future<Map<String, dynamic>> getMyStats() async {
     final body = await _get('/api/players/me/stats');
     return (body as Map<String, dynamic>? ?? {});
+  }
+
+  // --- Push notifications --------------------------------------------------
+
+  Future<void> registerDevice(String pushToken) async {
+    await _post('/api/devices/register',
+        {'push_token': pushToken, 'platform': 'ios'});
+  }
+
+  Future<void> unregisterDevice(String pushToken) async {
+    await _delete('/api/devices', {'push_token': pushToken});
+  }
+
+  Future<Map<String, bool>> getNotificationPrefs() async {
+    final body = await _get('/api/notifications/prefs');
+    final map = body as Map<String, dynamic>? ?? {};
+    return {
+      for (final k in [
+        'tournament_starts',
+        'round_starts',
+        'ace',
+        'albatross',
+        'top3_changes'
+      ])
+        k: map[k] == true,
+    };
+  }
+
+  Future<Map<String, bool>> updateNotificationPrefs(
+      Map<String, bool> prefs) async {
+    final body = await _put('/api/notifications/prefs', prefs);
+    final map = body as Map<String, dynamic>? ?? {};
+    return {
+      for (final k in prefs.keys) k: map[k] == true,
+    };
+  }
+
+  // --- Casual tee times ----------------------------------------------------
+
+  Future<List<CasualTeeTime>> getCasualTeeTimes() async {
+    final body = await _get('/api/casual-tee-times');
+    final list = (body as Map<String, dynamic>)['tee_times'] as List? ?? [];
+    return list
+        .map((e) => CasualTeeTime.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<CasualTeeTime> getCasualTeeTime(String id) async {
+    final body = await _get('/api/casual-tee-times/$id');
+    return CasualTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<CasualTeeTime> createCasualTeeTime(Map<String, dynamic> payload) async {
+    final body = await _post('/api/casual-tee-times', payload);
+    return CasualTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<CasualTeeTime> updateCasualTeeTime(
+      String id, Map<String, dynamic> payload) async {
+    final body = await _put('/api/casual-tee-times/$id', payload);
+    return CasualTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<void> deleteCasualTeeTime(String id) async {
+    await _delete('/api/casual-tee-times/$id');
+  }
+
+  Future<CasualTeeTime> joinCasualTeeTime(String id) async {
+    final body = await _post('/api/casual-tee-times/$id/join');
+    return CasualTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<CasualTeeTime> leaveCasualTeeTime(String id) async {
+    final body = await _post('/api/casual-tee-times/$id/leave');
+    return CasualTeeTime.fromJson(body as Map<String, dynamic>);
   }
 }

@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'screens/casual_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/tournaments_screen.dart';
 import 'services/auth.dart';
+import 'services/push.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,10 +31,18 @@ class AlpenglowApp extends StatefulWidget {
 }
 
 class _AlpenglowAppState extends State<AlpenglowApp> {
+  bool _wasLoggedIn = false;
+
   @override
   void initState() {
     super.initState();
+    _wasLoggedIn = widget.auth.isLoggedIn;
     widget.auth.addListener(_onAuthChanged);
+    // Returning session (token in secure storage): make sure this
+    // device's push token is registered with the server.
+    if (_wasLoggedIn) {
+      PushService.onLogin(widget.auth, widget.settings);
+    }
   }
 
   @override
@@ -42,6 +52,15 @@ class _AlpenglowAppState extends State<AlpenglowApp> {
   }
 
   void _onAuthChanged() {
+    final now = widget.auth.isLoggedIn;
+    if (now && !_wasLoggedIn) {
+      // Fresh login: ask for notification permission once, then
+      // register this device for pushes.
+      PushService.onLogin(widget.auth, widget.settings);
+    } else if (!now && _wasLoggedIn) {
+      PushService.onLogout(widget.auth, widget.settings);
+    }
+    _wasLoggedIn = now;
     if (mounted) setState(() {});
   }
 
@@ -77,6 +96,7 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     final pages = [
       TournamentsScreen(auth: widget.auth, settings: widget.settings),
+      CasualScreen(auth: widget.auth, settings: widget.settings),
       ProfileScreen(auth: widget.auth, settings: widget.settings),
       SettingsScreen(auth: widget.auth, settings: widget.settings),
     ];
@@ -88,6 +108,7 @@ class _HomeShellState extends State<HomeShell> {
         destinations: const [
           NavigationDestination(
               icon: Icon(Icons.emoji_events), label: 'Tournaments'),
+          NavigationDestination(icon: Icon(Icons.golf_course), label: 'Casual'),
           NavigationDestination(icon: Icon(Icons.person), label: 'Profile'),
           NavigationDestination(
               icon: Icon(Icons.settings), label: 'Settings'),

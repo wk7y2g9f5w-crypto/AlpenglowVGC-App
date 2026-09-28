@@ -45,6 +45,8 @@ from src import config  # noqa: E402
 from src import scoring_logic as sl  # noqa: E402
 from src import leaderboard_render as lr  # noqa: E402
 from src import golfplus_courses as gc  # noqa: E402
+from src import push as push_mod  # noqa: E402
+from src import score_events  # noqa: E402
 from src.cogs.teetimes import parse_in_tz  # noqa: E402  (pure helper, no Discord I/O)
 from src.cogs.stats import _parse_pars  # noqa: E402  (pure helper, no Discord I/O)
 
@@ -654,6 +656,8 @@ class TournamentCreate(BaseModel):
 # --------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     import aiosqlite
 
     if not os.path.exists(DB_PATH):
@@ -666,7 +670,24 @@ async def lifespan(app: FastAPI):
     tables = {r[0] for r in rows}
     if "players" not in tables:
         raise RuntimeError(f"{DB_PATH} is missing the players table")
-    yield
+
+    # Push-notification engine: drain the push outbox and fire
+    # tournament/round-start notifications once a minute.
+    async def _push_loop():
+        while True:
+            try:
+                await push_mod.check_starts(DB_PATH)
+                await push_mod.drain_push_outbox(DB_PATH)
+            except Exception:
+                logging.getLogger("vgc.push").exception(
+                    "push background loop error")
+            await asyncio.sleep(60)
+
+    task = asyncio.create_task(_push_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
 
 
 app = FastAPI(title="Alpenglow VGC companion API", version="1.0.0", lifespan=lifespan)
@@ -1507,6 +1528,11 @@ async def put_scorecard(
             round_number=body.round_number,
         )
     card = await db.get_scorecard(DB_PATH, card_id)
+    # Notable scoring events (ace / albatross / top-3 movement) queue
+    # pushes; never allowed to break the save itself.
+    await score_events.detect_score_events(
+        DB_PATH, t["id"], body.player_discord_id, existing, card
+    )
     # The Discord leaderboard board refreshes off this: the bot can't see
     # API writes, so the outbox drain picks it up (~1 min) and re-renders.
     # Partial saves enqueue too — the drain coalesces them per tournament.
@@ -1514,6 +1540,199 @@ async def put_scorecard(
         DB_PATH, "scorecard_submitted", {"tournament_id": t["id"]}
     )
     return {"card": _card_json(card, t.get("pars"))}
+
+
+# --------------------------------------------------------------------------
+# Casual tee times — ad-hoc rounds outside tournaments. No membership
+# limits: a player may join any number of casual tee times.
+# --------------------------------------------------------------------------
+class CasualTeeTimeCreate(BaseModel):
+    label: str
+    course: str
+    tee_position: str = "middle"
+    pin_position: str = "white"
+    wind_strength: str = "moderate"
+    green_speed: str = "pro"
+    starts_at: str = ""  # ISO-8601
+    max_players: int = 4
+    notes: str = ""
+
+    @field_validator("label", "course")
+    @classmethod
+    def _nonempty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("must not be empty")
+        return v
+
+    @field_validator("tee_position")
+    @classmethod
+    def _tee(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("front", "middle", "back"):
+            raise ValueError(f"Unknown tee position '{v}'")
+        return v
+
+    @field_validator("pin_position")
+    @classmethod
+    def _pin(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("black", "white", "red"):
+            raise ValueError(f"Unknown pin position '{v}'")
+        return v
+
+    @field_validator("wind_strength")
+    @classmethod
+    def _wind(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("low", "moderate", "severe"):
+            raise ValueError(f"Unknown wind strength '{v}'")
+        return v
+
+    @field_validator("green_speed")
+    @classmethod
+    def _green(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("veryfast", "pro"):
+            raise ValueError(f"Unknown green speed '{v}'")
+        return v
+
+    @field_validator("max_players")
+    @classmethod
+    def _cap(cls, v: int) -> int:
+        if not 1 <= v <= 8:
+            raise ValueError("max_players must be 1-8")
+        return v
+
+
+class CasualTeeTimeUpdate(BaseModel):
+    label: str | None = None
+    course: str | None = None
+    tee_position: str | None = None
+    pin_position: str | None = None
+    wind_strength: str | None = None
+    green_speed: str | None = None
+    starts_at: str | None = None
+    max_players: int | None = None
+    notes: str | None = None
+
+
+async def _casual_json(db_path, tt: dict) -> dict:
+    players = []
+    for pid in tt.get("players", []):
+        p = await db.get_player(db_path, pid)
+        players.append({
+            "discord_id": pid,
+            "display_name": db.display_name_of(p, pid),
+        })
+    return {
+        "id": tt["id"],
+        "creator_discord_id": tt["creator_discord_id"],
+        "label": tt["label"],
+        "course": tt["course"],
+        "pars": tt["pars"],
+        "tee_position": tt["tee_position"],
+        "pin_position": tt["pin_position"],
+        "wind_strength": tt["wind_strength"],
+        "green_speed": tt["green_speed"],
+        "starts_at": tt["starts_at"],
+        "max_players": tt["max_players"],
+        "notes": tt["notes"],
+        "created_at": tt["created_at"],
+        "players": players,
+    }
+
+
+async def _casual_or_404(tt_id: str) -> dict:
+    tt = await db.get_casual_tee_time(DB_PATH, tt_id)
+    if tt is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Casual tee time not found.")
+    return tt
+
+
+@app.get("/api/casual-tee-times")
+async def list_casual_tee_times(user: CurrentUser) -> dict:
+    tts = await db.list_casual_tee_times(DB_PATH)
+    return {"tee_times": [await _casual_json(DB_PATH, tt) for tt in tts]}
+
+
+@app.post("/api/casual-tee-times")
+async def create_casual_tee_time(body: CasualTeeTimeCreate,
+                                user: CurrentUser) -> dict:
+    # Pars auto-fill from the course database, like tournaments.
+    auto = gc.course_pars(body.course.strip(), 18)
+    if not auto:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Unknown course — pick one from the course list.",
+        )
+    pars = ",".join(str(x) for x in auto)
+    tt_id = await db.create_casual_tee_time(
+        DB_PATH, user["discord_id"], body.label.strip(), body.course.strip(),
+        pars, tee_position=body.tee_position, pin_position=body.pin_position,
+        wind_strength=body.wind_strength, green_speed=body.green_speed,
+        starts_at=body.starts_at.strip(), max_players=body.max_players,
+        notes=body.notes.strip(),
+    )
+    tt = await _casual_or_404(tt_id)
+    return await _casual_json(DB_PATH, tt)
+
+
+@app.get("/api/casual-tee-times/{tt_id}")
+async def get_casual_tee_time(tt_id: str, user: CurrentUser) -> dict:
+    return await _casual_json(DB_PATH, await _casual_or_404(tt_id))
+
+
+@app.patch("/api/casual-tee-times/{tt_id}")
+async def update_casual_tee_time(tt_id: str, body: CasualTeeTimeUpdate,
+                                user: CurrentUser) -> dict:
+    tt = await _casual_or_404(tt_id)
+    crew = await fetch_crew_status(user["discord_id"])
+    if tt["creator_discord_id"] != user["discord_id"] and not crew:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only the creator or crew can edit this.")
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "course" in fields:
+        auto = gc.course_pars(fields["course"].strip(), 18)
+        if not auto:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Unknown course — pick one from the course list.")
+        fields["pars"] = ",".join(str(x) for x in auto)
+    await db.update_casual_tee_time(DB_PATH, tt_id, fields)
+    return await _casual_json(DB_PATH, await _casual_or_404(tt_id))
+
+
+@app.delete("/api/casual-tee-times/{tt_id}")
+async def delete_casual_tee_time(tt_id: str, user: CurrentUser) -> dict:
+    tt = await _casual_or_404(tt_id)
+    crew = await fetch_crew_status(user["discord_id"])
+    if tt["creator_discord_id"] != user["discord_id"] and not crew:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only the creator or crew can delete this.")
+    await db.delete_casual_tee_time(DB_PATH, tt_id)
+    return {"ok": True}
+
+
+@app.post("/api/casual-tee-times/{tt_id}/join")
+async def join_casual_tee_time(tt_id: str, user: CurrentUser) -> dict:
+    ok, reason = await db.join_casual_tee_time(DB_PATH, tt_id,
+                                               user["discord_id"])
+    if not ok and reason == "not_found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Casual tee time not found.")
+    if not ok and reason == "full":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="This tee time is full.")
+    return await _casual_json(DB_PATH, await _casual_or_404(tt_id))
+
+
+@app.post("/api/casual-tee-times/{tt_id}/leave")
+async def leave_casual_tee_time(tt_id: str, user: CurrentUser) -> dict:
+    await _casual_or_404(tt_id)
+    await db.leave_casual_tee_time(DB_PATH, tt_id, user["discord_id"])
+    return await _casual_json(DB_PATH, await _casual_or_404(tt_id))
 
 
 # --------------------------------------------------------------------------
@@ -1717,6 +1936,61 @@ async def update_me(body: PlayerUpdate, user: CurrentUser) -> dict:
         # Empty string -> NULL (unlink), like the bot's /unlink_golfplus.
         await db.set_golfplus_handle(DB_PATH, pid, handle or None)
     return _profile_json(await db.get_player(DB_PATH, pid))
+
+
+# --------------------------------------------------------------------------
+# Push notifications: device registration + per-user prefs
+# --------------------------------------------------------------------------
+class DeviceRegister(BaseModel):
+    push_token: str
+    platform: str = "ios"
+
+    @field_validator("push_token")
+    @classmethod
+    def _token_ok(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 16:
+            raise ValueError("push_token looks invalid")
+        return v
+
+
+@app.post("/api/devices/register")
+async def register_device(body: DeviceRegister,
+                          user: CurrentUser) -> dict:
+    await db.register_device(DB_PATH, user["discord_id"], body.push_token,
+                             body.platform)
+    return {"ok": True}
+
+
+@app.delete("/api/devices")
+async def unregister_device(push_token: str, user: CurrentUser) -> dict:
+    await db.unregister_device(DB_PATH, user["discord_id"], push_token)
+    return {"ok": True}
+
+
+class NotificationPrefsUpdate(BaseModel):
+    tournament_starts: bool | None = None
+    round_starts: bool | None = None
+    ace: bool | None = None
+    albatross: bool | None = None
+    top3_changes: bool | None = None
+
+
+@app.get("/api/notifications/prefs")
+async def get_notification_prefs(user: CurrentUser) -> dict:
+    return await db.get_notification_prefs(DB_PATH, user["discord_id"])
+
+
+@app.put("/api/notifications/prefs")
+async def put_notification_prefs(body: NotificationPrefsUpdate,
+                                 user: CurrentUser) -> dict:
+    current = await db.get_notification_prefs(DB_PATH, user["discord_id"])
+    merged = {
+        k: (current[k] if v is None else v)
+        for k, v in body.model_dump().items()
+    }
+    return await db.set_notification_prefs(DB_PATH, user["discord_id"],
+                                           merged)
 
 
 @app.get("/api/players/me/stats")

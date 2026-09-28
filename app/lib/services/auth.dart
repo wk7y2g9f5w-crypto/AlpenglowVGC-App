@@ -7,6 +7,7 @@ class SettingsService extends ChangeNotifier {
   static const _kBaseUrl = 'base_url';
   static const _kClientId = 'discord_client_id';
   static const _kRedirectUri = 'discord_redirect_uri';
+  static const _kPushAsked = 'push_permission_asked';
 
   static const defaultBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -43,6 +44,14 @@ class SettingsService extends ChangeNotifier {
 
   Future<void> setRedirectUri(String v) async {
     await _prefs.setString(_kRedirectUri, v.trim());
+    notifyListeners();
+  }
+
+  /// True once we've shown the iOS notification permission prompt.
+  bool get pushPermissionAsked => _prefs.getBool(_kPushAsked) ?? false;
+
+  Future<void> setPushPermissionAsked(bool v) async {
+    await _prefs.setBool(_kPushAsked, v);
     notifyListeners();
   }
 }

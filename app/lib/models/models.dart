@@ -352,3 +352,82 @@ class GolfCourse {
             .toList(growable: false),
       );
 }
+
+/// A casual (non-tournament) tee time. Anyone can create one; anyone can
+/// join any number of them — no one-round-per-player rule here.
+class CasualTeeTime {
+  final String id;
+  final String creatorDiscordId;
+  final String label;
+  final String course;
+  final String teePosition;
+  final String pinPosition;
+  final String windStrength;
+  final String greenSpeed;
+  final String startsAt;
+  final int maxPlayers;
+  final String notes;
+  final List<CasualPlayer> players;
+
+  CasualTeeTime({
+    required this.id,
+    required this.creatorDiscordId,
+    required this.label,
+    required this.course,
+    required this.teePosition,
+    required this.pinPosition,
+    required this.windStrength,
+    required this.greenSpeed,
+    required this.startsAt,
+    required this.maxPlayers,
+    required this.notes,
+    required this.players,
+  });
+
+  factory CasualTeeTime.fromJson(Map<String, dynamic> j) => CasualTeeTime(
+        id: j['id'].toString(),
+        creatorDiscordId: (j['creator_discord_id'] ?? '').toString(),
+        label: (j['label'] ?? '').toString(),
+        course: (j['course'] ?? '').toString(),
+        teePosition: (j['tee_position'] ?? 'middle').toString(),
+        pinPosition: (j['pin_position'] ?? 'white').toString(),
+        windStrength: (j['wind_strength'] ?? 'moderate').toString(),
+        greenSpeed: (j['green_speed'] ?? 'pro').toString(),
+        startsAt: (j['starts_at'] ?? '').toString(),
+        maxPlayers: (j['max_players'] as num?)?.toInt() ?? 4,
+        notes: (j['notes'] ?? '').toString(),
+        players: ((j['players'] as List?) ?? [])
+            .map((e) => CasualPlayer.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+
+  bool isIn(String discordId) =>
+      players.any((p) => p.discordId == discordId);
+
+  bool get isFull => players.length >= maxPlayers;
+
+  String get settingsSummary {
+    final parts = <String>[
+      '${_capWord(teePosition)} tees',
+      '${_capWord(pinPosition)} pins',
+      '${_capWord(windStrength)} wind',
+      greenSpeed == 'veryfast' ? 'Very fast greens' : 'Pro greens',
+    ];
+    return parts.join(' · ');
+  }
+}
+
+class CasualPlayer {
+  final String discordId;
+  final String displayName;
+
+  CasualPlayer({required this.discordId, required this.displayName});
+
+  factory CasualPlayer.fromJson(Map<String, dynamic> j) => CasualPlayer(
+        discordId: j['discord_id'].toString(),
+        displayName: (j['display_name'] ?? j['discord_id']).toString(),
+      );
+}
+
+String _capWord(String s) =>
+    s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);

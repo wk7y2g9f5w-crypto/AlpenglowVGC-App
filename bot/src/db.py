@@ -192,6 +192,77 @@ CREATE TABLE IF NOT EXISTS outbox(
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_kind ON outbox(kind);
+
+-- Push notifications (APNs). Devices register their push token via the
+-- companion app; notification_prefs holds per-user toggles (all default
+-- on). push_outbox is drained by a background loop that sends via APNs.
+CREATE TABLE IF NOT EXISTS devices(
+  discord_id TEXT NOT NULL,
+  push_token TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT 'ios',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (discord_id, push_token)
+);
+CREATE INDEX IF NOT EXISTS idx_devices_discord ON devices(discord_id);
+CREATE TABLE IF NOT EXISTS notification_prefs(
+  discord_id TEXT PRIMARY KEY,
+  tournament_starts INTEGER NOT NULL DEFAULT 1,
+  round_starts INTEGER NOT NULL DEFAULT 1,
+  ace INTEGER NOT NULL DEFAULT 1,
+  albatross INTEGER NOT NULL DEFAULT 1,
+  top3_changes INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_outbox(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  discord_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  data_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_push_outbox_unsent ON push_outbox(sent_at);
+-- Dedup for one-shot notifications (tournament/round starts).
+CREATE TABLE IF NOT EXISTS push_sent_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  ref_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(kind, ref_id)
+);
+-- Last-known top-3 (player discord_ids in order) per tournament, used to
+-- detect top-3 leaderboard changes worth notifying about.
+CREATE TABLE IF NOT EXISTS leaderboard_snapshots(
+  tournament_id TEXT PRIMARY KEY,
+  top3_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL
+);
+
+-- Casual tee times: free-form rounds outside tournaments. No membership
+-- limits — a player may join any number of them.
+CREATE TABLE IF NOT EXISTS casual_tee_times(
+  id TEXT PRIMARY KEY,
+  creator_discord_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  course TEXT NOT NULL,
+  pars TEXT NOT NULL,
+  tee_position TEXT NOT NULL DEFAULT 'middle',
+  pin_position TEXT NOT NULL DEFAULT 'white',
+  wind_strength TEXT NOT NULL DEFAULT 'moderate',
+  green_speed TEXT NOT NULL DEFAULT 'medium',
+  starts_at TEXT NOT NULL,
+  max_players INTEGER NOT NULL DEFAULT 4,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS casual_tee_time_players(
+  tee_time_id TEXT NOT NULL,
+  discord_id TEXT NOT NULL,
+  joined_at TEXT NOT NULL,
+  PRIMARY KEY (tee_time_id, discord_id)
+);
+CREATE INDEX IF NOT EXISTS idx_casual_players_discord ON casual_tee_time_players(discord_id);
 """
 
 
@@ -1846,3 +1917,303 @@ async def ack_outbox(db_path, ids: list[int]) -> None:
         "DELETE FROM outbox WHERE id IN (%s)" % ",".join("?" for _ in ids),
         tuple(ids),
     )
+
+
+# ------------------------------------------------------------------- push notifications
+PREF_KEYS = ("tournament_starts", "round_starts", "ace", "albatross",
+             "top3_changes")
+
+
+async def register_device(db_path, discord_id: str, push_token: str,
+                          platform: str = "ios") -> None:
+    await _execute(
+        db_path,
+        "INSERT INTO devices (discord_id, push_token, platform, updated_at)"
+        " VALUES (?,?,?,?)"
+        " ON CONFLICT(discord_id, push_token) DO UPDATE SET"
+        " platform=excluded.platform, updated_at=excluded.updated_at",
+        (discord_id, push_token, platform, utcnow_iso()),
+    )
+
+
+async def unregister_device(db_path, discord_id: str,
+                            push_token: str) -> None:
+    await _execute(
+        db_path,
+        "DELETE FROM devices WHERE discord_id = ? AND push_token = ?",
+        (discord_id, push_token),
+    )
+
+
+async def get_notification_prefs(db_path, discord_id: str) -> dict:
+    row = await _fetchone(
+        db_path,
+        "SELECT * FROM notification_prefs WHERE discord_id = ?",
+        (discord_id,),
+    )
+    if row is None:
+        return {k: True for k in PREF_KEYS}
+    return {k: bool(row[k]) for k in PREF_KEYS}
+
+
+async def set_notification_prefs(db_path, discord_id: str,
+                                 prefs: dict) -> dict:
+    clean = {k: (1 if prefs.get(k, True) else 0) for k in PREF_KEYS}
+    await _execute(
+        db_path,
+        "INSERT INTO notification_prefs (discord_id, tournament_starts,"
+        " round_starts, ace, albatross, top3_changes, updated_at)"
+        " VALUES (?,?,?,?,?,?,?)"
+        " ON CONFLICT(discord_id) DO UPDATE SET"
+        " tournament_starts=excluded.tournament_starts,"
+        " round_starts=excluded.round_starts, ace=excluded.ace,"
+        " albatross=excluded.albatross, top3_changes=excluded.top3_changes,"
+        " updated_at=excluded.updated_at",
+        (discord_id, clean["tournament_starts"], clean["round_starts"],
+         clean["ace"], clean["albatross"], clean["top3_changes"],
+         utcnow_iso()),
+    )
+    return await get_notification_prefs(db_path, discord_id)
+
+
+async def enqueue_push(db_path, discord_id: str, title: str, body: str,
+                       data: dict | None = None) -> int:
+    """Queue a push notification; returns the outbox row id."""
+    lastrowid, _ = await _execute(
+        db_path,
+        "INSERT INTO push_outbox (discord_id, title, body, data_json,"
+        " created_at) VALUES (?,?,?,?,?)",
+        (discord_id, title, body, json.dumps(data or {}), utcnow_iso()),
+    )
+    return lastrowid
+
+
+async def poll_push_outbox(db_path, limit: int = 50) -> list[dict]:
+    rows = await _fetchall(
+        db_path,
+        "SELECT * FROM push_outbox WHERE sent_at IS NULL"
+        " ORDER BY id ASC LIMIT ?",
+        (limit,),
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["data"] = json.loads(d.get("data_json") or "{}")
+        except (ValueError, TypeError):
+            d["data"] = {}
+        out.append(d)
+    return out
+
+
+async def ack_push_outbox(db_path, ids: list[int]) -> None:
+    if not ids:
+        return
+    now = utcnow_iso()
+    await _execute(
+        db_path,
+        "UPDATE push_outbox SET sent_at = ? WHERE id IN (%s)"
+        % ",".join("?" for _ in ids),
+        (now, *ids),
+    )
+
+
+async def push_was_sent(db_path, kind: str, ref_id: str) -> bool:
+    row = await _fetchone(
+        db_path,
+        "SELECT 1 FROM push_sent_log WHERE kind = ? AND ref_id = ?",
+        (kind, ref_id),
+    )
+    return row is not None
+
+
+async def mark_push_sent(db_path, kind: str, ref_id: str) -> None:
+    await _execute(
+        db_path,
+        "INSERT OR IGNORE INTO push_sent_log (kind, ref_id, created_at)"
+        " VALUES (?,?,?)",
+        (kind, ref_id, utcnow_iso()),
+    )
+
+
+async def get_leaderboard_snapshot(db_path, tournament_id: str) -> list[str]:
+    row = await _fetchone(
+        db_path,
+        "SELECT top3_json FROM leaderboard_snapshots WHERE tournament_id = ?",
+        (tournament_id,),
+    )
+    if row is None:
+        return []
+    try:
+        return json.loads(row["top3_json"] or "[]")
+    except (ValueError, TypeError):
+        return []
+
+
+async def set_leaderboard_snapshot(db_path, tournament_id: str,
+                                   top3: list[str]) -> None:
+    await _execute(
+        db_path,
+        "INSERT INTO leaderboard_snapshots (tournament_id, top3_json,"
+        " updated_at) VALUES (?,?,?)"
+        " ON CONFLICT(tournament_id) DO UPDATE SET"
+        " top3_json=excluded.top3_json, updated_at=excluded.updated_at",
+        (tournament_id, json.dumps(top3), utcnow_iso()),
+    )
+
+
+async def notify_tournament_players(db_path, tournament_id: str, pref_key: str,
+                                    title: str, body: str,
+                                    data: dict | None = None,
+                                    exclude: set[str] | None = None) -> int:
+    """Enqueue a push for every registered player with the pref enabled.
+
+    Returns the number of pushes enqueued.
+    """
+    rows = await _fetchall(
+        db_path,
+        "SELECT player_discord_id FROM registrations WHERE tournament_id = ?",
+        (tournament_id,),
+    )
+    exclude = exclude or set()
+    n = 0
+    for r in rows:
+        pid = r["player_discord_id"]
+        if pid in exclude:
+            continue
+        prefs = await get_notification_prefs(db_path, pid)
+        if not prefs.get(pref_key, True):
+            continue
+        dev = await _fetchone(
+            db_path, "SELECT 1 FROM devices WHERE discord_id = ?", (pid,))
+        if dev is None:
+            continue
+        await enqueue_push(db_path, pid, title, body, data)
+        n += 1
+    return n
+
+
+# ------------------------------------------------------------------- casual tee times
+async def create_casual_tee_time(
+    db_path, creator_discord_id: str, label: str, course: str, pars: str,
+    tee_position: str = "middle", pin_position: str = "white",
+    wind_strength: str = "moderate", green_speed: str = "medium",
+    starts_at: str = "", max_players: int = 4, notes: str = "",
+) -> str:
+    import uuid
+    tt_id = uuid.uuid4().hex[:12]
+    await _execute(
+        db_path,
+        "INSERT INTO casual_tee_times (id, creator_discord_id, label, course,"
+        " pars, tee_position, pin_position, wind_strength, green_speed,"
+        " starts_at, max_players, notes, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tt_id, creator_discord_id, label, course, pars, tee_position,
+         pin_position, wind_strength, green_speed, starts_at, max_players,
+         notes, utcnow_iso()),
+    )
+    await _execute(
+        db_path,
+        "INSERT OR IGNORE INTO casual_tee_time_players"
+        " (tee_time_id, discord_id, joined_at) VALUES (?,?,?)",
+        (tt_id, creator_discord_id, utcnow_iso()),
+    )
+    return tt_id
+
+
+async def list_casual_tee_times(db_path, upcoming_only: bool = True,
+                                limit: int = 100) -> list[dict]:
+    if upcoming_only:
+        rows = await _fetchall(
+            db_path,
+            "SELECT * FROM casual_tee_times WHERE starts_at >= ?"
+            " ORDER BY starts_at ASC LIMIT ?",
+            (utcnow_iso(), limit),
+        )
+    else:
+        rows = await _fetchall(
+            db_path,
+            "SELECT * FROM casual_tee_times ORDER BY starts_at DESC LIMIT ?",
+            (limit,),
+        )
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["players"] = await list_casual_tee_time_players(db_path, d["id"])
+        out.append(d)
+    return out
+
+
+async def get_casual_tee_time(db_path, tt_id: str) -> dict | None:
+    row = await _fetchone(
+        db_path, "SELECT * FROM casual_tee_times WHERE id = ?", (tt_id,))
+    if row is None:
+        return None
+    d = dict(row)
+    d["players"] = await list_casual_tee_time_players(db_path, tt_id)
+    return d
+
+
+async def list_casual_tee_time_players(db_path, tt_id: str) -> list[str]:
+    rows = await _fetchall(
+        db_path,
+        "SELECT discord_id FROM casual_tee_time_players"
+        " WHERE tee_time_id = ? ORDER BY joined_at ASC",
+        (tt_id,),
+    )
+    return [r["discord_id"] for r in rows]
+
+
+async def join_casual_tee_time(db_path, tt_id: str,
+                               discord_id: str) -> tuple[bool, str]:
+    """No membership limits — a player may join any number of casual
+    tee times. Returns (ok, reason)."""
+    tt = await get_casual_tee_time(db_path, tt_id)
+    if tt is None:
+        return False, "not_found"
+    if discord_id in tt["players"]:
+        return True, "already_in"
+    if len(tt["players"]) >= (tt["max_players"] or 4):
+        return False, "full"
+    await _execute(
+        db_path,
+        "INSERT OR IGNORE INTO casual_tee_time_players"
+        " (tee_time_id, discord_id, joined_at) VALUES (?,?,?)",
+        (tt_id, discord_id, utcnow_iso()),
+    )
+    return True, "joined"
+
+
+async def leave_casual_tee_time(db_path, tt_id: str,
+                                discord_id: str) -> None:
+    await _execute(
+        db_path,
+        "DELETE FROM casual_tee_time_players"
+        " WHERE tee_time_id = ? AND discord_id = ?",
+        (tt_id, discord_id),
+    )
+
+
+async def update_casual_tee_time(db_path, tt_id: str,
+                                 fields: dict) -> bool:
+    allowed = {"label", "course", "pars", "tee_position", "pin_position",
+               "wind_strength", "green_speed", "starts_at", "max_players",
+               "notes"}
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if not sets:
+        return False
+    cols = ", ".join(f"{k} = ?" for k in sets)
+    _, rowcount = await _execute(
+        db_path,
+        f"UPDATE casual_tee_times SET {cols} WHERE id = ?",
+        (*sets.values(), tt_id),
+    )
+    return rowcount > 0
+
+
+async def delete_casual_tee_time(db_path, tt_id: str) -> None:
+    await _execute(db_path,
+                   "DELETE FROM casual_tee_time_players WHERE tee_time_id = ?",
+                   (tt_id,))
+    await _execute(db_path, "DELETE FROM casual_tee_times WHERE id = ?",
+                   (tt_id,))

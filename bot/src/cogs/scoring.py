@@ -15,6 +15,7 @@ from discord.ext import commands
 
 from src import db
 from src import leaderboard_render
+from src import score_events
 from src import scoring_logic as sl
 from src.cogs.common import (
     active_tournament_autocomplete,
@@ -239,6 +240,20 @@ class ScoreEntryView(discord.ui.View):
                 list(self.scores), submitted_by=self.submit_id,
                 round_number=self.round_number,
             )
+            # Notable scoring events (ace / albatross / top-3 movement)
+            # queue pushes; never allowed to break the tap flow.
+            try:
+                new_card = await db.find_scorecard(
+                    self.db_path, self.t["id"], player_discord_id=pid,
+                    team_id=team_id, tee_time_id=self.tt["id"],
+                    round_number=self.round_number,
+                )
+                if new_card is not None:
+                    await score_events.detect_score_events(
+                        self.db_path, self.t["id"], pid, existing, new_card,
+                    )
+            except Exception:
+                pass
         except Exception:
             return
         now = time.monotonic()
@@ -804,6 +819,13 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
         submitted_by=submitter_id, round_number=round_number,
         witness_name=witness_name,
     )
+    # Notable scoring events (ace / albatross / top-3 movement) queue
+    # pushes; never allowed to break the submit flow.
+    new_card = await db.get_scorecard(db_path, card_id)
+    if new_card is not None:
+        await score_events.detect_score_events(
+            db_path, t["id"], card_player_id, existing, new_card,
+        )
     await leaderboard_render.refresh_leaderboard(bot, db_path, t["id"])
 
     own_card = card_owner_id == submitter_id
@@ -1129,6 +1151,9 @@ class Scoring(commands.Cog):
             return
         updated = await db.correct_scorecard_hole(
             self.bot.db_path, card["id"], hole - 1, score
+        )
+        await score_events.detect_score_events(
+            self.bot.db_path, t["id"], tid, card, updated,
         )
         await leaderboard_render.refresh_leaderboard(self.bot, self.bot.db_path, t["id"])
         await interaction.response.send_message(
