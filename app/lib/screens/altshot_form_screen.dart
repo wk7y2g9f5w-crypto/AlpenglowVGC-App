@@ -128,6 +128,10 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
       showSnack(context, 'Pick a course.', error: true);
       return;
     }
+    if (_when == null) {
+      showSnack(context, 'Pick a start date & time.', error: true);
+      return;
+    }
     setState(() => _saving = true);
     try {
       final payload = <String, dynamic>{
@@ -236,7 +240,7 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.schedule),
                   title: Text(_when == null
-                      ? 'Start time (optional)'
+                      ? 'Start time (required)'
                       : DateFormat('EEE, MMM d · h:mm a').format(_when!)),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: _pickWhen,

@@ -384,6 +384,22 @@ CREATE TABLE IF NOT EXISTS matchplay_records(
   ties INTEGER NOT NULL DEFAULT 0,
   UNIQUE (format, discord_id)
 );
+
+-- Global team-name lock (AltShot + Matchplay best-ball). A name, once
+-- chosen, belongs to the crew that first used it: no other group of
+-- players may play under it. team_name is the normalized key
+-- (strip + collapse whitespace + casefold); owner_ids is a JSON array
+-- of sorted discord_id strings. A row starts pending (is_final=0,
+-- pending_claim set to the team/side that claimed it) and is finalized
+-- to the full roster once the roster is full or a score is submitted.
+CREATE TABLE IF NOT EXISTS team_name_registry(
+  team_name TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL DEFAULT '',
+  owner_ids TEXT NOT NULL DEFAULT '[]',
+  is_final INTEGER NOT NULL DEFAULT 0,
+  pending_claim TEXT,
+  created_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -2429,6 +2445,118 @@ class AltShotError(Exception):
     'bad_team_size', 'bad_holes'."""
 
 
+class TeamNameError(Exception):
+    """Raised when a team name is taken by / belongs to another crew.
+    The API maps this to a 409 with the message as detail."""
+
+
+def normalize_team_name(name) -> str:
+    """Canonical team-name key: strip, collapse internal whitespace,
+    casefold. Blank/whitespace-only input normalizes to ''."""
+    import re
+    return re.sub(r"\s+", " ", (name or "").strip()).casefold()
+
+
+async def _team_name_row(db_path, norm: str):
+    return await _fetchone(
+        db_path,
+        "SELECT * FROM team_name_registry WHERE team_name = ?",
+        (norm,))
+
+
+async def team_name_claim(db_path, name, member_ids,
+                          claim_ref: str) -> tuple:
+    """Claim a team name for a roster.
+
+    Returns (True, '') on success, (False, message) when another crew
+    owns the name. Blank names never claim: (True, '').
+    """
+    import json
+    norm = normalize_team_name(name)
+    if not norm:
+        return True, ""
+    owners = sorted({str(x) for x in (member_ids or []) if x})
+    row = await _team_name_row(db_path, norm)
+    if row is None:
+        await _execute(
+            db_path,
+            "INSERT INTO team_name_registry (team_name, display_name,"
+            " owner_ids, is_final, pending_claim, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (norm, (name or "").strip(), json.dumps(owners), 0,
+             claim_ref, utcnow_iso()),
+        )
+        return True, ""
+    if row["pending_claim"] == claim_ref:
+        # Same team re-affirming its own tentative name.
+        return True, ""
+    if row["is_final"]:
+        try:
+            registered = set(json.loads(row["owner_ids"] or "[]"))
+        except (ValueError, TypeError):
+            registered = set()
+        if set(owners) <= registered:
+            return True, ""
+        return False, (f"Team name '{row['display_name']}' belongs to"
+                       " another crew.")
+    return False, (f"Team name '{row['display_name']}' is taken by"
+                   " another crew.")
+
+
+async def team_name_finalize(db_path, name, claim_ref: str,
+                             member_ids) -> None:
+    """Lock a tentatively-claimed name to its full roster. Only acts on
+    a pending row held by this claim_ref — idempotent otherwise."""
+    import json
+    norm = normalize_team_name(name)
+    if not norm:
+        return
+    row = await _team_name_row(db_path, norm)
+    if row and not row["is_final"] and row["pending_claim"] == claim_ref:
+        owners = sorted({str(x) for x in (member_ids or []) if x})
+        await _execute(
+            db_path,
+            "UPDATE team_name_registry SET owner_ids = ?, is_final = 1,"
+            " pending_claim = NULL WHERE team_name = ?",
+            (json.dumps(owners), norm),
+        )
+
+
+async def team_name_release(db_path, claim_ref: str) -> None:
+    """Release every still-pending name claimed by this team/side (used
+    when the team is renamed away or deleted)."""
+    await _execute(
+        db_path,
+        "DELETE FROM team_name_registry WHERE pending_claim = ?"
+        " AND is_final = 0",
+        (claim_ref,),
+    )
+
+
+async def team_name_rename(db_path, old_name, new_name, member_ids,
+                           claim_ref: str) -> tuple:
+    """Rename a team's name: claim the new name first; only on success
+    release the old pending claim. Returns (True, '') or
+    (False, message)."""
+    if normalize_team_name(new_name) == normalize_team_name(old_name):
+        return True, ""
+    ok, msg = await team_name_claim(db_path, new_name, member_ids,
+                                    claim_ref)
+    if not ok:
+        return False, msg
+    old_norm = normalize_team_name(old_name)
+    if old_norm:
+        row = await _team_name_row(db_path, old_norm)
+        if (row and not row["is_final"]
+                and row["pending_claim"] == claim_ref):
+            await _execute(
+                db_path,
+                "DELETE FROM team_name_registry WHERE team_name = ?",
+                (old_norm,),
+            )
+    return True, ""
+
+
 async def _altshot_members(db_path, team_id: str) -> list[dict]:
     return await _fetchall(
         db_path,
@@ -2497,11 +2625,17 @@ async def _create_altshot_team(db_path, tt_id: str, discord_id: str,
                                extra_names: list | None = None) -> str:
     import uuid
     team_id = uuid.uuid4().hex[:12]
+    name = (team_name or "").strip()
+    if name:
+        ok, msg = await team_name_claim(
+            db_path, name, [discord_id], f"altshot:team:{team_id}")
+        if not ok:
+            raise TeamNameError(msg)
     await _execute(
         db_path,
         "INSERT INTO altshot_teams (id, tee_time_id, player1_discord_id,"
         " team_name, created_at) VALUES (?,?,?,?,?)",
-        (team_id, tt_id, discord_id, (team_name or "").strip(),
+        (team_id, tt_id, discord_id, name,
          utcnow_iso()),
     )
     player = await get_player(db_path, discord_id)
@@ -2635,10 +2769,21 @@ async def join_altshot_tee_time(db_path, tt_id: str, discord_id: str,
             members = await _altshot_members(db_path, team["id"])
             if len(members) >= tt["team_size"]:
                 raise AltShotError("full")
+            claim_ref = f"altshot:team:{team['id']}"
+            tname = (team["team_name"] or "").strip()
+            new_ids = ([m["discord_id"] for m in members if m["discord_id"]]
+                       + [discord_id])
+            if tname:
+                ok, msg = await team_name_claim(
+                    db_path, tname, new_ids, claim_ref)
+                if not ok:
+                    raise TeamNameError(msg)
             player = await get_player(db_path, discord_id)
             await _add_altshot_member(
                 db_path, team["id"], discord_id,
                 display_name_of(player, discord_id))
+            if tname and len(members) + 1 >= tt["team_size"]:
+                await team_name_finalize(db_path, tname, claim_ref, new_ids)
         return await get_altshot_tee_time(db_path, tt_id)
     # Flexible: the caller starts their own team.
     existing = await _fetchone(
@@ -2682,6 +2827,7 @@ async def leave_altshot_tee_time(db_path, tt_id: str,
             await _execute(db_path,
                            "DELETE FROM altshot_scores WHERE team_id = ?",
                            (team["id"],))
+            await team_name_release(db_path, f"altshot:team:{team['id']}")
             await _execute(db_path, "DELETE FROM altshot_teams WHERE id = ?",
                            (team["id"],))
         return await get_altshot_tee_time(db_path, tt_id)
@@ -2699,6 +2845,7 @@ async def leave_altshot_tee_time(db_path, tt_id: str,
     await _execute(
         db_path, "DELETE FROM altshot_team_members WHERE team_id = ?",
         (team["id"],))
+    await team_name_release(db_path, f"altshot:team:{team['id']}")
     await _execute(db_path, "DELETE FROM altshot_teams WHERE id = ?",
                    (team["id"],))
     return await get_altshot_tee_time(db_path, tt_id)
@@ -2710,9 +2857,18 @@ async def update_altshot_team(db_path, team_id: str,
     if not team:
         return None
     if "team_name" in fields:
+        new_name = (fields["team_name"] or "").strip()
+        old_name = (team["team_name"] or "").strip()
+        claim_ref = f"altshot:team:{team_id}"
+        members = await _altshot_members(db_path, team_id)
+        member_ids = [m["discord_id"] for m in members if m["discord_id"]]
+        ok, msg = await team_name_rename(
+            db_path, old_name, new_name, member_ids, claim_ref)
+        if not ok:
+            raise TeamNameError(msg)
         await _execute(db_path,
                        "UPDATE altshot_teams SET team_name = ? WHERE id = ?",
-                       ((fields["team_name"] or "").strip(), team_id))
+                       (new_name, team_id))
     if "extra_names" in fields:
         tt = await _fetchone(
             db_path, "SELECT * FROM altshot_tee_times WHERE id = ?",
@@ -2780,6 +2936,7 @@ async def delete_altshot_tee_time(db_path, tt_id: str) -> None:
         await _execute(db_path,
                        "DELETE FROM altshot_team_members WHERE team_id = ?",
                        (t["id"],))
+        await team_name_release(db_path, f"altshot:team:{t['id']}")
     await _execute(db_path, "DELETE FROM altshot_teams WHERE tee_time_id = ?",
                    (tt_id,))
     await _execute(db_path, "DELETE FROM altshot_tee_times WHERE id = ?",
@@ -2819,6 +2976,13 @@ async def submit_altshot_score(db_path, team_id: str, holes: list,
         " submitted_at = excluded.submitted_at",
         (team_id, json.dumps(holes), total, submitted_by, now),
     )
+    # Lock the team name to this roster the first time the team scores
+    # (covers fluid 2-team rosters; fixed rosters finalize when full).
+    tname = (team["team_name"] or "").strip()
+    if tname:
+        await team_name_finalize(
+            db_path, tname, f"altshot:team:{team_id}",
+            [m["discord_id"] for m in roster if m["discord_id"]])
     return {"team_id": team_id, "holes": holes, "total": total,
             "submitted_by": submitted_by, "submitted_at": now}
 
@@ -3086,6 +3250,25 @@ async def create_matchplay_tee_time(
     elif team_size not in (2, 3, 4):
         raise MatchPlayError("bad_team_size")
     tt_id = uuid.uuid4().hex[:12]
+    side1_id = uuid.uuid4().hex[:12]
+    side2_id = uuid.uuid4().hex[:12]
+    # Claim team names before inserting anything; roll the claims back if
+    # the second name is taken. 1v1 match play has no team-name locking.
+    _claims = []
+    if format == "bestball":
+        try:
+            for tname, ids, ref in (
+                    (side1_team_name, [creator_discord_id],
+                     f"matchplay:side:{side1_id}"),
+                    (side2_team_name, [], f"matchplay:side:{side2_id}")):
+                ok, msg = await team_name_claim(db_path, tname, ids, ref)
+                if not ok:
+                    raise TeamNameError(msg)
+                _claims.append(ref)
+        except TeamNameError:
+            for ref in _claims:
+                await team_name_release(db_path, ref)
+            raise
     await _execute(
         db_path,
         "INSERT INTO matchplay_tee_times (id, creator_discord_id, label,"
@@ -3096,8 +3279,8 @@ async def create_matchplay_tee_time(
          pin_position, wind_strength, green_speed, starts_at, format,
          team_size, notes, utcnow_iso()),
     )
-    for n, tname in ((1, side1_team_name), (2, side2_team_name)):
-        side_id = uuid.uuid4().hex[:12]
+    for n, tname, side_id in ((1, side1_team_name, side1_id),
+                              (2, side2_team_name, side2_id)):
         await _execute(
             db_path,
             "INSERT INTO matchplay_sides (id, tee_time_id, side_number,"
@@ -3187,6 +3370,15 @@ async def join_matchplay_tee_time(db_path, tt_id: str, discord_id: str,
     cap = 1 if tt["format"] == "single" else (tt["team_size"] or 2)
     if len(members) >= cap:
         raise MatchPlayError("full")
+    claim_ref = f"matchplay:side:{side['id']}"
+    tname = (side["team_name"] or "").strip()
+    new_ids = [m["discord_id"] for m in members] + [discord_id]
+    # 1v1 match play has no team-name locking.
+    lock_names = tt["format"] == "bestball" and bool(tname)
+    if lock_names:
+        ok, msg = await team_name_claim(db_path, tname, new_ids, claim_ref)
+        if not ok:
+            raise TeamNameError(msg)
     import uuid
     await _execute(
         db_path,
@@ -3194,6 +3386,8 @@ async def join_matchplay_tee_time(db_path, tt_id: str, discord_id: str,
         " created_at) VALUES (?,?,?,?)",
         (uuid.uuid4().hex[:12], side["id"], discord_id, utcnow_iso()),
     )
+    if lock_names and len(new_ids) >= cap:
+        await team_name_finalize(db_path, tname, claim_ref, new_ids)
     return await get_matchplay_tee_time(db_path, tt_id)
 
 
@@ -3233,11 +3427,31 @@ async def update_matchplay_tee_time(db_path, tt_id: str,
         )
     for key, side_number in (("side1_team_name", 1), ("side2_team_name", 2)):
         if key in fields:
+            new_name = (fields[key] or "").strip()
+            side = await _fetchone(
+                db_path,
+                "SELECT * FROM matchplay_sides WHERE tee_time_id = ?"
+                " AND side_number = ?",
+                (tt_id, side_number),
+            )
+            if side is None:
+                continue
+            old_name = (side["team_name"] or "").strip()
+            claim_ref = f"matchplay:side:{side['id']}"
+            members = await _matchplay_side_members(db_path, side["id"])
+            member_ids = [m["discord_id"] for m in members]
+            # 1v1 match play has no team-name locking; the name is stored
+            # as-is without a registry claim.
+            if tt["format"] == "bestball":
+                ok, msg = await team_name_rename(
+                    db_path, old_name, new_name, member_ids, claim_ref)
+                if not ok:
+                    raise TeamNameError(msg)
             await _execute(
                 db_path,
                 "UPDATE matchplay_sides SET team_name = ?"
                 " WHERE tee_time_id = ? AND side_number = ?",
-                ((fields[key] or "").strip(), tt_id, side_number),
+                (new_name, tt_id, side_number),
             )
     return await get_matchplay_tee_time(db_path, tt_id)
 
@@ -3250,6 +3464,7 @@ async def delete_matchplay_tee_time(db_path, tt_id: str) -> None:
         await _execute(
             db_path, "DELETE FROM matchplay_side_members WHERE side_id = ?",
             (s["id"],))
+        await team_name_release(db_path, f"matchplay:side:{s['id']}")
     await _execute(db_path, "DELETE FROM matchplay_sides WHERE tee_time_id = ?",
                    (tt_id,))
     await _execute(db_path, "DELETE FROM matchplay_scores WHERE tee_time_id = ?",
@@ -3379,6 +3594,19 @@ async def save_matchplay_score(db_path, tt_id: str, hole_results: list,
     if outcome["status"] == "completed":
         await _matchplay_apply_records(
             db_path, tt, outcome["winner_side"], +1)
+    # Backstop: lock any named side's team name to its roster now that the
+    # match is being scored (sides are full by this point, so this is
+    # normally already finalized at join time).
+    sides = await _fetchall(
+        db_path, "SELECT * FROM matchplay_sides WHERE tee_time_id = ?",
+        (tt_id,))
+    for s in sides:
+        tname = (s["team_name"] or "").strip()
+        if tname:
+            members = await _matchplay_side_members(db_path, s["id"])
+            await team_name_finalize(
+                db_path, tname, f"matchplay:side:{s['id']}",
+                [m["discord_id"] for m in members])
     score = await get_matchplay_score(db_path, tt_id)
     return await _matchplay_score_json(db_path, tt, score)
 

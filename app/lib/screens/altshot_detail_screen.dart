@@ -81,6 +81,8 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
                 controller: nameCtrl,
                 decoration: const InputDecoration(
                   labelText: 'Team name (optional)',
+                  helperText: 'Leave blank and Golf+ usernames will show'
+                      ' on the leaderboard.',
                   border: OutlineInputBorder(),
                 ),
               ),
@@ -177,6 +179,8 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
                   controller: nameCtrl,
                   decoration: const InputDecoration(
                     labelText: 'Team name (optional)',
+                    helperText: 'Leave blank and Golf+ usernames will show'
+                        ' on the leaderboard.',
                     border: OutlineInputBorder(),
                   ),
                 ),

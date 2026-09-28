@@ -1764,7 +1764,7 @@ class MatchPlayTeeTimeCreate(BaseModel):
     pin_position: str = "black"
     wind_strength: str = "moderate"
     green_speed: str = "pro"
-    starts_at: str = ""
+    starts_at: str = Field(default="", validate_default=True)
     format: str = "single"
     team_size: int | None = None
     notes: str = ""
@@ -1831,6 +1831,14 @@ class MatchPlayTeeTimeCreate(BaseModel):
                 "team_size (2-4) is required for best-ball match play")
         return self
 
+    @field_validator("starts_at")
+    @classmethod
+    def _starts_at_required(cls, v: str) -> str:
+        if not (v or "").strip():
+            raise ValueError(
+                "starts_at is required — pick a start date & time.")
+        return v
+
 
 class MatchPlayTeeTimeUpdate(BaseModel):
     label: str | None = None
@@ -1843,6 +1851,14 @@ class MatchPlayTeeTimeUpdate(BaseModel):
     notes: str | None = None
     side1_team_name: str | None = None
     side2_team_name: str | None = None
+
+    @field_validator("starts_at")
+    @classmethod
+    def _starts_at_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError(
+                "starts_at cannot be cleared — pick a start date & time.")
+        return v
 
     @field_validator("tee_position")
     @classmethod
@@ -1910,7 +1926,7 @@ class AltShotTeeTimeCreate(BaseModel):
     pin_position: str = "white"
     wind_strength: str = "moderate"
     green_speed: str = "pro"
-    starts_at: str = ""
+    starts_at: str = Field(default="", validate_default=True)
     max_teams: int = 2
     team_size: int | None = None
     notes: str = ""
@@ -1972,6 +1988,14 @@ class AltShotTeeTimeCreate(BaseModel):
             raise ValueError("team_size only applies to 1-team tee times")
         return self
 
+    @field_validator("starts_at")
+    @classmethod
+    def _starts_at_required(cls, v: str) -> str:
+        if not (v or "").strip():
+            raise ValueError(
+                "starts_at is required — pick a start date & time.")
+        return v
+
 
 class AltShotTeeTimeUpdate(BaseModel):
     label: str | None = None
@@ -1984,6 +2008,14 @@ class AltShotTeeTimeUpdate(BaseModel):
     max_teams: int | None = None
     team_size: int | None = None
     notes: str | None = None
+
+    @field_validator("starts_at")
+    @classmethod
+    def _starts_at_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError(
+                "starts_at cannot be cleared — pick a start date & time.")
+        return v
 
     @field_validator("tee_position")
     @classmethod
@@ -2170,6 +2202,9 @@ async def join_altshot_tee_time(tt_id: str, body: AltShotJoin,
         return await db.join_altshot_tee_time(
             DB_PATH, tt_id, user["discord_id"],
             team_name=body.team_name, extra_names=body.extra_names)
+    except db.TeamNameError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=str(e))
     except db.AltShotError as e:
         if str(e) == "not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
@@ -2196,6 +2231,9 @@ async def update_altshot_team(tt_id: str, team_id: str,
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
         await db.update_altshot_team(DB_PATH, team_id, fields)
+    except db.TeamNameError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=str(e))
     except db.AltShotError as e:
         if str(e) == "too_many":
             raise HTTPException(
@@ -2383,6 +2421,9 @@ async def create_matchplay_tee_time(body: MatchPlayTeeTimeCreate,
             detail = "Could not create this match-play tee time."
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
+    except db.TeamNameError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=str(e))
     return await _matchplay_or_404(tt_id)
 
 
@@ -2408,7 +2449,11 @@ async def update_matchplay_tee_time(tt_id: str, body: MatchPlayTeeTimeUpdate,
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Unknown course — pick one from the course list.")
         fields["pars"] = ",".join(str(x) for x in auto)
-    return await db.update_matchplay_tee_time(DB_PATH, tt_id, fields)
+    try:
+        return await db.update_matchplay_tee_time(DB_PATH, tt_id, fields)
+    except db.TeamNameError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=str(e))
 
 
 @app.delete("/api/matchplay/tee-times/{tt_id}")
@@ -2429,6 +2474,9 @@ async def join_matchplay_tee_time(tt_id: str, body: MatchPlayJoin,
     try:
         return await db.join_matchplay_tee_time(
             DB_PATH, tt_id, user["discord_id"], body.side_number)
+    except db.TeamNameError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=str(e))
     except db.MatchPlayError as e:
         msg = str(e)
         if msg == "not_found":
