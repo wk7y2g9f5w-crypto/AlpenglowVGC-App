@@ -253,6 +253,7 @@ class PlayerMe {
   final String? golfplusHandle;
   final String? timezone;
   final bool isCrew;
+  final bool isAdmin;
 
   PlayerMe({
     required this.discordId,
@@ -260,6 +261,7 @@ class PlayerMe {
     this.golfplusHandle,
     this.timezone,
     this.isCrew = false,
+    this.isAdmin = false,
   });
 
   factory PlayerMe.fromJson(Map<String, dynamic> j) => PlayerMe(
@@ -268,6 +270,7 @@ class PlayerMe {
         golfplusHandle: j['golfplus_handle']?.toString(),
         timezone: j['timezone']?.toString(),
         isCrew: j['is_crew'] == true,
+        isAdmin: j['is_admin'] == true,
       );
 }
 

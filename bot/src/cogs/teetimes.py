@@ -23,6 +23,7 @@ from src import teesheet as ts
 from src.cogs.common import (
     active_tournament_autocomplete,
     inprogress_tournament_autocomplete,
+    is_admin,
     resolve_tournament,
     resolve_tz,
     admin_role_mention,
@@ -69,6 +70,27 @@ def parse_in_tz(date_s: str, time_s: str, tz_name: str | None) -> datetime:
         raise ValueError("That date/time doesn't exist — double-check it.")
     return local.astimezone(timezone.utc)
 
+
+async def _editable_tee_time_choices(interaction: discord.Interaction,
+                                     current: str):
+    """Autocomplete: tee times the caller may edit/delete.
+
+    Creators see their own; admins see everything. Times are shown in the
+    viewing player's own timezone.
+    """
+    admin = await is_admin(interaction)
+    rows = await db.search_tee_times(
+        interaction.client.db_path, str(interaction.guild_id), current or "")
+    me = str(interaction.user.id)
+    choices = []
+    for tt in rows:
+        if not admin and tt["created_by"] != me:
+            continue
+        when = await viewer_tee_time_when(
+            interaction.client.db_path, me, tt.get("starts_at"))
+        name = f"{tt['tournament_name'][:30]} — {tt['label'][:40]}{when}"[:100]
+        choices.append(app_commands.Choice(name=name, value=tt["id"]))
+    return choices
 
 class TeeTimeView(discord.ui.View):
     """Request/Leave buttons for one /tee_times listing (short-lived)."""
@@ -524,6 +546,150 @@ class TeeTimes(commands.Cog):
         await db.leave_tee_time(self.bot.db_path, tt["id"], str(interaction.user.id))
         await interaction.response.send_message(
             f"✅ You left **{tt['label']}**.", ephemeral=True
+        )
+
+    @staticmethod
+    async def _manageable_tee_time(interaction: discord.Interaction,
+                                   tee_time_id: int):
+        """Fetch a tee time and check the caller may edit/delete it.
+
+        Returns (tee_time, tournament, error_message). Only the creator or
+        an admin may manage a tee time.
+        """
+        bot = interaction.client
+        tt = await db.get_tee_time(bot.db_path, tee_time_id)
+        if not tt:
+            return None, None, "❌ That tee time doesn't exist."
+        t = await db.get_tournament(bot.db_path, tt["tournament_id"])
+        if not t or t["guild_id"] != str(interaction.guild_id):
+            return None, None, "❌ That tee time doesn't exist."
+        me = str(interaction.user.id)
+        if tt["created_by"] != me and not await is_admin(interaction):
+            return None, None, (
+                "❌ Only the tee time creator or an admin can change it.")
+        return tt, t, None
+
+    @tee_time.command(name="edit",
+                      description="Fix a tee time's name, date or time")
+    @app_commands.autocomplete(tee_time=_editable_tee_time_choices)
+    @app_commands.describe(
+        tee_time="Which tee time to edit",
+        label="New name (leave blank to keep the current one)",
+        date="New date as YYYY-MM-DD (leave blank to keep)",
+        time="New start time as HH:MM, 24-hour, your local time (blank to keep)",
+    )
+    async def tee_time_edit(
+        self,
+        interaction: discord.Interaction,
+        tee_time: int,
+        label: Optional[str] = None,
+        date: Optional[str] = None,
+        time: Optional[str] = None,
+    ):
+        tt, t, err = await self._manageable_tee_time(interaction, tee_time)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        if label is None and date is None and time is None:
+            await interaction.response.send_message(
+                "❌ Nothing to change — give me a new `label`, `date` "
+                "or `time`.", ephemeral=True)
+            return
+        new_label = label.strip()[:80] if label and label.strip() else None
+        starts_at = None
+        if date is not None or time is not None:
+            # Fill whichever half wasn't given from the current start time,
+            # interpreted in the editor's own timezone.
+            tz_name = await db.get_timezone(
+                self.bot.db_path, str(interaction.user.id))
+            cur = datetime.fromisoformat(tt["starts_at"]).astimezone(
+                resolve_tz(tz_name))
+            try:
+                starts = parse_in_tz(
+                    date or cur.strftime("%Y-%m-%d"),
+                    time or cur.strftime("%H:%M"),
+                    tz_name,
+                )
+            except ValueError as e:
+                await interaction.response.send_message(
+                    f"❌ {e}", ephemeral=True)
+                return
+            starts_at = starts.isoformat()
+        changed = await db.update_tee_time(
+            self.bot.db_path, tee_time, label=new_label, starts_at=starts_at)
+        if not changed:
+            await interaction.response.send_message(
+                "Nothing changed.", ephemeral=True)
+            return
+        await ts.maybe_refresh(self.bot, str(interaction.guild_id))
+        bits = []
+        if new_label:
+            bits.append(f"name → **{new_label}**")
+        if starts_at:
+            unix = int(datetime.fromisoformat(starts_at).timestamp())
+            bits.append(f"start → <t:{unix}:F> (<t:{unix}:R>)")
+        await interaction.response.send_message(
+            f"✅ Tee time updated for **{t['name']}**: {'; '.join(bits)}.",
+            ephemeral=False,
+        )
+
+    @tee_time.command(name="delete",
+                      description="Delete a tee time (creator or admin)")
+    @app_commands.autocomplete(tee_time=_editable_tee_time_choices)
+    @app_commands.describe(tee_time="Which tee time to delete")
+    async def tee_time_delete(
+        self, interaction: discord.Interaction, tee_time: int
+    ):
+        tt, t, err = await self._manageable_tee_time(interaction, tee_time)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        n_cards = await db.count_tee_time_scorecards(
+            self.bot.db_path, tee_time)
+        if n_cards:
+            await interaction.response.send_message(
+                f"❌ **{tt['label']}** already has {n_cards} submitted "
+                f"scorecard{'s' if n_cards != 1 else ''} — scores must be "
+                f"deleted first. Deleting the tee time now would orphan them.",
+                ephemeral=True)
+            return
+        players = await db.get_tee_time_players(self.bot.db_path, tee_time)
+
+        class ConfirmDelete(discord.ui.View):
+            def __init__(self, cog: "TeeTimes"):
+                super().__init__(timeout=60)
+                self.cog = cog
+
+            @discord.ui.button(label="Delete it", style=discord.ButtonStyle.danger)
+            async def confirm(self, btn_interaction: discord.Interaction,
+                              button: discord.ui.Button):
+                # Re-check permission on the click (roles can change).
+                _, _, err2 = await self.cog._manageable_tee_time(
+                    btn_interaction, tee_time)
+                if err2:
+                    await btn_interaction.response.send_message(
+                        err2, ephemeral=True)
+                    return
+                await db.delete_tee_time(btn_interaction.client.db_path,
+                                         tee_time)
+                await ts.maybe_refresh(
+                    btn_interaction.client, str(btn_interaction.guild_id))
+                await btn_interaction.response.edit_message(
+                    content=f"🗑️ Tee time **{tt['label']}** deleted.",
+                    view=None)
+
+            @discord.ui.button(label="Keep it", style=discord.ButtonStyle.secondary)
+            async def cancel(self, btn_interaction: discord.Interaction,
+                             button: discord.ui.Button):
+                await btn_interaction.response.edit_message(
+                    content="Kept — nothing deleted.", view=None)
+
+        await interaction.response.send_message(
+            f"Delete **{tt['label']}** from **{t['name']}**? "
+            f"({len(players)} player{'s' if len(players) != 1 else ''} "
+            f"will be removed from it.) This can't be undone.",
+            view=ConfirmDelete(self),
+            ephemeral=True,
         )
 
     @app_commands.command(name="tee_times", description="Show open tee times with Join buttons")

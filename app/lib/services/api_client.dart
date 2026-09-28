@@ -173,6 +173,29 @@ class ApiClient {
     await _delete('/api/tournaments/$tournamentId/register');
   }
 
+  /// Edit tournament details (crew). Only include keys that changed.
+  Future<Tournament> editTournament(
+      String tournamentId, Map<String, dynamic> fields) async {
+    final body =
+        await _patch('/api/tournaments/$tournamentId', fields) as Map<String, dynamic>;
+    return Tournament.fromJson(body);
+  }
+
+  /// Finalize a tournament: posts final standings + awards season points (crew).
+  Future<void> completeTournament(String tournamentId) async {
+    await _post('/api/tournaments/$tournamentId/complete');
+  }
+
+  /// Close a tournament immediately, no standings or points (crew).
+  Future<void> endTournament(String tournamentId) async {
+    await _post('/api/tournaments/$tournamentId/end');
+  }
+
+  /// Permanently delete a tournament and everything under it (admins only).
+  Future<void> deleteTournament(String tournamentId) async {
+    await _delete('/api/tournaments/$tournamentId');
+  }
+
   Future<List<TeeTime>> getTeeTimes(String tournamentId) async {
     final body = await _get('/api/tournaments/$tournamentId/tee-times');
     final list = body is List ? body : (body['tee_times'] as List? ?? []);
@@ -196,8 +219,24 @@ class ApiClient {
     return TeeTime.fromJson(m);
   }
 
-  Future<void> joinTeeTime(String teeTimeId) async {
-    await _post('/api/tee-times/$teeTimeId/join');
+  /// Edit a tee time (creator or crew). Only include keys that changed:
+  /// label, date (YYYY-MM-DD), time (HH:MM 24h).
+  Future<TeeTime> editTeeTime(
+      String teeTimeId, Map<String, dynamic> fields) async {
+    final body =
+        await _patch('/api/tee-times/$teeTimeId', fields) as Map<String, dynamic>;
+    final m = (body['tee_time'] is Map)
+        ? body['tee_time'] as Map<String, dynamic>
+        : body;
+    return TeeTime.fromJson(m);
+  }
+
+  /// Delete a tee time (creator or crew). Refused when scores exist.
+  Future<void> deleteTeeTime(String teeTimeId) async {
+    await _delete('/api/tee-times/$teeTimeId');
+  }
+
+  Future<void> joinTeeTime(String teeTimeId) async {    await _post('/api/tee-times/$teeTimeId/join');
   }
 
   Future<void> leaveTeeTime(String teeTimeId) async {

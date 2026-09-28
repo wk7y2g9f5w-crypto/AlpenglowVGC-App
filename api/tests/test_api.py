@@ -39,6 +39,11 @@ async def fake_fetch_crew_status(discord_id: str):
     return False
 
 
+async def fake_fetch_admin_status(discord_id: str):
+    """Default: not admin. Tests override per-case via self._admin(value)."""
+    return False
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -55,6 +60,7 @@ class ApiTestCase(unittest.TestCase):
         main.GUILD_ID = GUILD
         main.fetch_discord_user = fake_fetch_discord_user
         main.fetch_crew_status = fake_fetch_crew_status
+        main.fetch_admin_status = fake_fetch_admin_status
         self.client = None
         self._enter_client()
 
@@ -298,6 +304,103 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["players"][0]["display_name"], "User123")
         self.assertIn("golfplus_handle", rows[0]["players"][0])
+
+    # -- tee time edit/delete ------------------------------------------
+    def _tt_id(self, uid="123"):
+        self.with_tz(uid)
+        r = self._create(uid)
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()["id"]
+
+    def test_patch_tee_time_label_by_creator(self):
+        tt_id = self._tt_id("123")
+        r = self.client.patch(f"/api/tee-times/{tt_id}",
+                              headers=self.h("123"),
+                              json={"label": "Evening flight"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["label"], "Evening flight")
+
+    def test_patch_tee_time_time_keeps_date(self):
+        tt_id = self._tt_id("123")  # 09:30 America/Denver
+        r = self.client.patch(f"/api/tee-times/{tt_id}",
+                              headers=self.h("123"),
+                              json={"time": "18:00"})
+        self.assertEqual(r.status_code, 200, r.text)
+        # Date kept, time moved: 18:00 MDT == 2026-10-04T00:00:00Z.
+        self.assertEqual(r.json()["starts_at"], "2026-10-04T00:00:00+00:00")
+
+    def test_patch_tee_time_date_keeps_time(self):
+        tt_id = self._tt_id("123")
+        r = self.client.patch(f"/api/tee-times/{tt_id}",
+                              headers=self.h("123"),
+                              json={"date": "2026-10-05"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["starts_at"], "2026-10-05T15:30:00+00:00")
+
+    def test_patch_tee_time_403_not_creator_or_crew(self):
+        tt_id = self._tt_id("123")
+        self.with_tz("456")
+        r = self.client.patch(f"/api/tee-times/{tt_id}",
+                              headers=self.h("456"),
+                              json={"label": "hijack"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_patch_tee_time_crew_can_edit(self):
+        tt_id = self._tt_id("123")
+        self.with_tz("456")
+
+        async def fake_crew(discord_id):
+            return True
+
+        main.fetch_crew_status = fake_crew
+        try:
+            r = self.client.patch(f"/api/tee-times/{tt_id}",
+                                  headers=self.h("456"),
+                                  json={"label": "crew fix"})
+        finally:
+            main.fetch_crew_status = fake_fetch_crew_status
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["label"], "crew fix")
+
+    def test_patch_tee_time_422_empty_body(self):
+        tt_id = self._tt_id("123")
+        r = self.client.patch(f"/api/tee-times/{tt_id}",
+                              headers=self.h("123"), json={})
+        self.assertEqual(r.status_code, 422)
+
+    def test_patch_tee_time_404(self):
+        self.with_tz("123")
+        r = self.client.patch("/api/tee-times/999999",
+                              headers=self.h("123"),
+                              json={"label": "x"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_delete_tee_time_by_creator(self):
+        tt_id = self._tt_id("123")
+        r = self.client.delete(f"/api/tee-times/{tt_id}",
+                               headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"deleted": True})
+        r = self.client.get(f"/api/tournaments/{self.t_open}/tee-times",
+                            headers=self.h("123"))
+        self.assertEqual(r.json(), [])
+
+    def test_delete_tee_time_403_not_creator(self):
+        tt_id = self._tt_id("123")
+        self.with_tz("456")
+        r = self.client.delete(f"/api/tee-times/{tt_id}",
+                               headers=self.h("456"))
+        self.assertEqual(r.status_code, 403)
+
+    def test_delete_tee_time_409_when_scores_exist(self):
+        tt_id = self._tt_id("123")
+        run(db.upsert_scorecard(self.db_path, self.t_open, "123", None,
+                                tt_id, [4] * 18, "verified",
+                                submitted_by="123"))
+        r = self.client.delete(f"/api/tee-times/{tt_id}",
+                               headers=self.h("123"))
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["code"], "tee_time_has_scores")
 
     def test_join_happy(self):
         self.with_tz("123")
@@ -967,6 +1070,152 @@ class ApiTestCase(unittest.TestCase):
         self._crew(False)
         r = self.client.get("/api/players/me", headers=self.h("123"))
         self.assertFalse(r.json()["is_crew"])
+
+    # -- tournament management (edit/end/complete/delete) ------------------
+    def _admin(self, value):
+        async def fake(discord_id):
+            return value
+        main.fetch_admin_status = fake
+
+    def _make_open(self, name="Mgmt Open"):
+        return run(
+            db.create_tournament(
+                self.db_path, GUILD, name, "stroke", 18,
+                "Pebble Beach Golf Links", None, None, "1",
+                start_date="2026-10-03", end_date="2026-10-10",
+            )
+        )
+
+    def test_edit_tournament_ok(self):
+        self._crew(True)
+        tid = self._make_open()
+        r = self.client.patch(
+            f"/api/tournaments/{tid}", headers=self.h("1"),
+            json={"name": "Renamed", "course": "Spyglass Hill"})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["name"], "Renamed")
+        self.assertEqual(body["course"], "Spyglass Hill")
+        self.assertEqual(body["format"], "stroke")  # untouched
+
+    def test_edit_tournament_empty_422(self):
+        self._crew(True)
+        tid = self._make_open()
+        r = self.client.patch(
+            f"/api/tournaments/{tid}", headers=self.h("1"), json={})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_edit_tournament_bad_date_422(self):
+        self._crew(True)
+        tid = self._make_open()
+        r = self.client.patch(
+            f"/api/tournaments/{tid}", headers=self.h("1"),
+            json={"start_date": "not-a-date"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_edit_tournament_bad_range_400(self):
+        self._crew(True)
+        tid = self._make_open()
+        r = self.client.patch(
+            f"/api/tournaments/{tid}", headers=self.h("1"),
+            json={"start_date": "2026-10-10", "end_date": "2026-10-03"})
+        self.assertEqual(r.status_code, 400, r.text)
+
+    def test_edit_tournament_not_crew_403(self):
+        self._crew(False)
+        tid = self._make_open()
+        r = self.client.patch(
+            f"/api/tournaments/{tid}", headers=self.h("1"),
+            json={"name": "Nope"})
+        self.assertEqual(r.status_code, 403, r.text)
+
+    def test_edit_tournament_404(self):
+        self._crew(True)
+        r = self.client.patch(
+            "/api/tournaments/99999", headers=self.h("1"),
+            json={"name": "Nope"})
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_complete_tournament(self):
+        self._crew(True)
+        tid = self._make_open()
+        r = self.client.post(
+            f"/api/tournaments/{tid}/complete", headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        t = run(db.get_tournament(self.db_path, tid))
+        self.assertEqual(t["status"], "completed")
+        rows = run(db.poll_outbox(self.db_path))
+        kinds = [row["kind"] for row in rows]
+        self.assertIn("tournament_completed", kinds)
+
+    def test_complete_tournament_twice_409(self):
+        self._crew(True)
+        tid = self._make_open()
+        r = self.client.post(
+            f"/api/tournaments/{tid}/complete", headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(
+            f"/api/tournaments/{tid}/complete", headers=self.h("1"))
+        self.assertEqual(r.status_code, 409, r.text)
+
+    def test_complete_tournament_not_crew_403(self):
+        self._crew(False)
+        tid = self._make_open()
+        r = self.client.post(
+            f"/api/tournaments/{tid}/complete", headers=self.h("1"))
+        self.assertEqual(r.status_code, 403, r.text)
+
+    def test_end_tournament(self):
+        self._crew(True)
+        tid = self._make_open()
+        r = self.client.post(
+            f"/api/tournaments/{tid}/end", headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        t = run(db.get_tournament(self.db_path, tid))
+        self.assertEqual(t["status"], "completed")
+        rows = run(db.poll_outbox(self.db_path))
+        kinds = [row["kind"] for row in rows]
+        self.assertIn("tournament_ended", kinds)
+        self.assertNotIn("tournament_completed", kinds)
+
+    def test_delete_tournament_admin_ok(self):
+        self._crew(True)
+        self._admin(True)
+        tid = self._make_open()
+        r = self.client.delete(
+            f"/api/tournaments/{tid}", headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["deleted"])
+        self.assertIsNone(run(db.get_tournament(self.db_path, tid)))
+        # gone from the tournament list too
+        r = self.client.get("/api/tournaments", headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        ids = [t["id"] for t in r.json()]
+        self.assertNotIn(tid, ids)
+
+    def test_delete_tournament_crew_not_admin_403(self):
+        self._crew(True)
+        self._admin(False)
+        tid = self._make_open()
+        r = self.client.delete(
+            f"/api/tournaments/{tid}", headers=self.h("1"))
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertIsNotNone(run(db.get_tournament(self.db_path, tid)))
+
+    def test_delete_tournament_404(self):
+        self._crew(True)
+        self._admin(True)
+        r = self.client.delete("/api/tournaments/99999", headers=self.h("1"))
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_me_includes_is_admin(self):
+        self._admin(True)
+        r = self.client.get("/api/players/me", headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["is_admin"])
+        self._admin(False)
+        r = self.client.get("/api/players/me", headers=self.h("123"))
+        self.assertFalse(r.json()["is_admin"])
 
 
 if __name__ == "__main__":

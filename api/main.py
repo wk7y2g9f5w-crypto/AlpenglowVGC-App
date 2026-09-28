@@ -135,12 +135,13 @@ CREW_ROLE_NAMES = frozenset(
 _MANAGE_GUILD_BIT = 1 << 5
 
 
-async def fetch_crew_status(discord_id: str) -> bool | None:
-    """Is this Discord user crew (admin/mod/director) in the guild?
+async def _fetch_guild_standing(
+    discord_id: str,
+) -> tuple[bool, set[str]] | None:
+    """Guild standing for a Discord user: (privileged, role_names).
 
-    Returns True/False when Discord answered, None when the check could not
-    be performed (no bot token configured, network/Discord failure). Single
-    function so unit tests can monkeypatch it.
+    privileged = guild owner or holds the Manage Server permission.
+    Returns None when Discord couldn't be reached or the user wasn't found.
     """
     bot_token = os.environ.get("DISCORD_TOKEN")
     guild_id = os.environ.get("GUILD_ID") or str(config.GUILD_ID or "")
@@ -157,8 +158,9 @@ async def fetch_crew_status(discord_id: str) -> bool | None:
             if member_resp.status_code != 200:
                 return None
             member = member_resp.json()
+            privileged = False
             # Guild owner implicitly holds every permission (Administrator),
-            # but carries no explicit roles — recognize them as crew directly.
+            # but carries no explicit roles — recognize them directly.
             try:
                 guild_resp = await client.get(
                     f"https://discord.com/api/v10/guilds/{guild_id}",
@@ -167,12 +169,12 @@ async def fetch_crew_status(discord_id: str) -> bool | None:
                 if guild_resp.status_code == 200 and str(
                     guild_resp.json().get("owner_id")
                 ) == str(discord_id):
-                    return True
+                    privileged = True
             except (httpx.HTTPError, ValueError, TypeError, KeyError):
                 pass
             try:
                 if int(member.get("permissions", "0")) & _MANAGE_GUILD_BIT:
-                    return True
+                    privileged = True
             except (TypeError, ValueError):
                 pass
             roles_resp = await client.get(
@@ -187,11 +189,41 @@ async def fetch_crew_status(discord_id: str) -> bool | None:
                 for r in roles_resp.json()
                 if r.get("id") in member_role_ids
             }
-            return bool(names & CREW_ROLE_NAMES)
+            return privileged, names
     except httpx.HTTPError:
         return None
     except (ValueError, TypeError, KeyError):
         return None
+
+
+async def fetch_crew_status(discord_id: str) -> bool | None:
+    """Is this Discord user crew (admin/mod/director) in the guild?
+
+    Returns True/False when Discord answered, None when the check could not
+    be performed (no bot token configured, network/Discord failure). Single
+    function so unit tests can monkeypatch it.
+    """
+    standing = await _fetch_guild_standing(discord_id)
+    if standing is None:
+        return None
+    privileged, names = standing
+    return privileged or bool(names & CREW_ROLE_NAMES)
+
+
+# Full admins only: mods and tournament directors are deliberately excluded.
+ADMIN_ROLE_NAMES = frozenset({"Tournament Admin", "Admin"})
+
+
+async def fetch_admin_status(discord_id: str) -> bool | None:
+    """Is this Discord user a full admin (owner / Manage Server / Admin)?
+
+    Used for destructive actions like tournament delete.
+    """
+    standing = await _fetch_guild_standing(discord_id)
+    if standing is None:
+        return None
+    privileged, names = standing
+    return privileged or bool(names & ADMIN_ROLE_NAMES)
 
 
 async def require_crew(user: CurrentUser) -> dict:
@@ -211,6 +243,26 @@ async def require_crew(user: CurrentUser) -> dict:
 
 
 CrewUser = Annotated[dict, Depends(require_crew)]
+
+
+async def require_admin_user(user: CurrentUser) -> dict:
+    """Dependency: 403 unless the caller is a full admin, 503 when
+    unverifiable. Mods and tournament directors do NOT pass."""
+    ok = await fetch_admin_status(user["discord_id"])
+    if ok is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify admin status — try again shortly.",
+        )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin only: requires the Admin role.",
+        )
+    return user
+
+
+AdminUser = Annotated[dict, Depends(require_admin_user)]
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +392,29 @@ class TeeTimeCreate(BaseModel):
             raise ValueError("label must be non-empty")
         return v[:80]
 
+
+class TeeTimeUpdate(BaseModel):
+    """Edit a tee time: any subset of label/date/time. At least one required."""
+    label: str | None = None
+    date: str | None = None  # YYYY-MM-DD
+    time: str | None = None  # HH:MM 24h
+
+    @field_validator("label")
+    @classmethod
+    def _label_clean(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("label must be non-empty")
+        return v[:80]
+
+    @model_validator(mode="after")
+    def _at_least_one(self):
+        if self.label is None and self.date is None and self.time is None:
+            raise ValueError("nothing to change: pass label, date or time")
+        return self
+
     @field_validator("date")
     @classmethod
     def _valid_date(cls, v: str) -> str:
@@ -353,6 +428,56 @@ class TeeTimeCreate(BaseModel):
         if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", (v or "").strip()):
             raise ValueError("time must look like `19:30` (24-hour HH:MM)")
         return v.strip()
+
+
+class TournamentUpdate(BaseModel):
+    """Edit a tournament: any subset of name/description/dates/course.
+
+    Format, holes and rounds are intentionally NOT editable — changing them
+    would corrupt existing scorecards.
+    """
+
+    name: str | None = None
+    description: str | None = None
+    start_date: str | None = None  # YYYY-MM-DD
+    end_date: str | None = None  # YYYY-MM-DD
+    course: str | None = None
+
+    @field_validator("name", "course")
+    @classmethod
+    def _nonblank_str(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("must be non-empty")
+        return v[:80]
+
+    @field_validator("description")
+    @classmethod
+    def _description_clean(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip()[:500] or None
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _valid_date(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        # Same semantics as the bot: sl.parse_date raises ValueError on bad input.
+        sl.parse_date(v)
+        return v.strip()
+
+    @model_validator(mode="after")
+    def _something_to_change(self):
+        if all(
+            v is None
+            for v in (self.name, self.description, self.start_date,
+                      self.end_date, self.course)
+        ):
+            raise ValueError("nothing to change: pass at least one field")
+        return self
 
 
 class ScorecardSubmit(BaseModel):
@@ -767,6 +892,175 @@ async def leave_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
     return {"left": True}
 
 
+async def _can_manage_tee_time(tt: dict, user: CurrentUser) -> bool:
+    """Only the tee time creator or crew may edit/delete it."""
+    if tt["created_by"] == user["discord_id"]:
+        return True
+    return bool(await fetch_crew_status(user["discord_id"]))
+
+
+@app.patch("/api/tee-times/{tee_time_id}")
+async def update_tee_time(
+    tee_time_id: int, body: TeeTimeUpdate, user: CurrentUser
+) -> dict:
+    tt, _ = await _tee_time_or_404(tee_time_id)
+    if not await _can_manage_tee_time(tt, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the tee time creator or crew can edit it.",
+        )
+    starts_at = None
+    if body.date is not None or body.time is not None:
+        tz_name = await db.get_timezone(DB_PATH, user["discord_id"])
+        if not tz_name:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "timezone_required"},
+            )
+        try:
+            viewer_tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            viewer_tz = timezone.utc
+        cur = datetime.fromisoformat(tt["starts_at"]).astimezone(viewer_tz)
+        try:
+            starts = parse_in_tz(
+                body.date or cur.strftime("%Y-%m-%d"),
+                body.time or cur.strftime("%H:%M"),
+                tz_name,
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+            )
+        starts_at = starts.isoformat()
+    changed = await db.update_tee_time(
+        DB_PATH, tt["id"], label=body.label, starts_at=starts_at
+    )
+    if not changed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tee time not found",
+        )
+    tt = await db.get_tee_time(DB_PATH, tt["id"])
+    players = await db.get_tee_time_players(DB_PATH, tt["id"])
+    return _tee_time_json(tt, players)
+
+
+@app.delete("/api/tee-times/{tee_time_id}")
+async def delete_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
+    tt, _ = await _tee_time_or_404(tee_time_id)
+    if not await _can_manage_tee_time(tt, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the tee time creator or crew can delete it.",
+        )
+    n_cards = await db.count_tee_time_scorecards(DB_PATH, tt["id"])
+    if n_cards:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "tee_time_has_scores",
+                "message": f"This tee time has {n_cards} submitted scorecard(s) — delete those scores first.",
+            },
+        )
+    await db.delete_tee_time(DB_PATH, tt["id"])
+    return {"deleted": True}
+
+
+@app.patch("/api/tournaments/{tournament_id}")
+async def edit_tournament(
+    tournament_id: int, patch: TournamentUpdate, user: CrewUser
+) -> dict:
+    t = await _tournament_or_404(tournament_id)
+    new_start = patch.start_date or t.get("start_date")
+    new_end = patch.end_date or t.get("end_date")
+    try:
+        sl.validate_date_range(new_start, new_end)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    changed = await db.update_tournament(
+        DB_PATH, t["id"],
+        name=patch.name,
+        description=patch.description,
+        start_date=patch.start_date,
+        end_date=patch.end_date,
+        course=patch.course,
+    )
+    t = await db.get_tournament(DB_PATH, t["id"])
+    rounds = await db.list_rounds(DB_PATH, t["id"])
+    return _tournament_json(t, registered=False, rounds=rounds)
+
+
+async def _finish_tournament(t: dict, award_points: bool) -> dict:
+    """Shared finalize for complete (points + standings post) and end
+    (silent close)."""
+    if t["status"] == "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Tournament is already completed.",
+        )
+    await db.set_tournament_status(DB_PATH, t["id"], "completed")
+    await db.expire_join_requests_for_tournament(DB_PATH, t["id"])
+    season_msg = ""
+    if award_points:
+        try:
+            points_rows = await lr.final_standings_points(DB_PATH, t["id"])
+            seasons = await db.get_seasons_for_tournament(
+                DB_PATH, t["id"], "active")
+            awarded = 0
+            for s in seasons:
+                awarded += await db.record_season_points(
+                    DB_PATH, s["id"], t["id"],
+                    [(r["player_discord_id"], r["position"], r["points"])
+                     for r in points_rows],
+                )
+            if seasons:
+                names = ", ".join(s["name"] for s in seasons)
+                season_msg = (f" Season points awarded to {awarded} player(s)"
+                              f" in {names}.")
+        except Exception as e:  # never break the finalize itself
+            print(f"season points award failed for tournament {t['id']}: {e}")
+            season_msg = " (season points could not be awarded — check the logs)"
+    return {"completed": True, "season_msg": season_msg}
+
+
+@app.post("/api/tournaments/{tournament_id}/complete")
+async def complete_tournament(tournament_id: int, user: CrewUser) -> dict:
+    """Finalize a tournament: final standings post in #event-signups +
+    season points. The bot's outbox drain posts the leaderboard."""
+    t = await _tournament_or_404(tournament_id)
+    result = await _finish_tournament(t, award_points=True)
+    await db.enqueue_outbox(
+        DB_PATH, "tournament_completed",
+        {"tournament_id": t["id"], "guild_id": GUILD_ID})
+    return result
+
+
+@app.post("/api/tournaments/{tournament_id}/end")
+async def end_tournament(tournament_id: int, user: CrewUser) -> dict:
+    """Close a tournament immediately — no final standings, no season points.
+    For events that fizzle out. Use /complete for the full finish."""
+    t = await _tournament_or_404(tournament_id)
+    result = await _finish_tournament(t, award_points=False)
+    await db.enqueue_outbox(
+        DB_PATH, "tournament_ended",
+        {"tournament_id": t["id"], "guild_id": GUILD_ID})
+    return result
+
+
+@app.delete("/api/tournaments/{tournament_id}")
+async def delete_tournament(tournament_id: int, user: AdminUser) -> dict:
+    """Permanently delete a tournament and everything under it.
+
+    Admins only — mods and tournament directors are refused.
+    """
+    t = await _tournament_or_404(tournament_id)
+    counts = await db.tournament_usage_counts(DB_PATH, t["id"])
+    await db.delete_tournament(DB_PATH, t["id"])
+    return {"deleted": True, "counts": counts}
+
+
 @app.post("/api/tee-times/{tee_time_id}/request")
 async def request_join(tee_time_id: int, user: CurrentUser) -> dict:
     tt, _ = await _tee_time_or_404(tee_time_id)
@@ -1107,20 +1401,23 @@ async def season_standings(user: CurrentUser) -> dict:
 # --------------------------------------------------------------------------
 # Player profile
 # --------------------------------------------------------------------------
-def _profile_json(row: dict, is_crew: bool = False) -> dict:
+def _profile_json(row: dict, is_crew: bool = False,
+                  is_admin: bool = False) -> dict:
     return {
         "discord_id": row["discord_id"],
         "display_name": row["display_name"],
         "golfplus_handle": row.get("golfplus_handle"),
         "timezone": row.get("timezone"),
         "is_crew": is_crew,
+        "is_admin": is_admin,
     }
 
 
 @app.get("/api/players/me")
 async def get_me(user: CurrentUser) -> dict:
     crew = await fetch_crew_status(user["discord_id"])
-    return _profile_json(user, is_crew=bool(crew))
+    admin = await fetch_admin_status(user["discord_id"])
+    return _profile_json(user, is_crew=bool(crew), is_admin=bool(admin))
 
 
 @app.patch("/api/players/me")

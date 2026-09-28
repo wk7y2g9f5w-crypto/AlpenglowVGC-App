@@ -14,6 +14,11 @@ GUILD_ID: int = int(_guild_raw) if _guild_raw.isdigit() else 0
 
 DB_PATH: str = os.getenv("DB_PATH", "tournament_bot.db")
 
+# Optional: public download link for the companion app (e.g. TestFlight).
+# When set, tournament announcements in #event-signups show a "Get the app"
+# link button instead of the Discord-native Register button.
+APP_DOWNLOAD_URL: str = os.getenv("APP_DOWNLOAD_URL", "").strip()
+
 # Role that gates admin commands (auto-created if missing and the bot has
 # Manage Roles). Members with Manage Server permission are always admins.
 ADMIN_ROLE_NAME: str = "Tournament Admin"

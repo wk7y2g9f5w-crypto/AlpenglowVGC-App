@@ -89,6 +89,37 @@ async def require_admin(interaction: discord.Interaction) -> bool:
     return False
 
 
+# Roles that count as full admins for destructive actions (tournament
+# delete). Mods and Tournament Directors are deliberately excluded.
+STRICT_ADMIN_ROLE_NAMES = ("Tournament Admin", "Admin")
+
+
+async def is_strict_admin(interaction: discord.Interaction) -> bool:
+    """True for the guild owner / Manage Server holders / Admin role.
+
+    Unlike is_admin, Tournament Directors and Mods do NOT pass.
+    """
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        return False
+    perms = member.guild_permissions
+    if perms.manage_guild or perms.administrator:
+        return True
+    role_names = {r.name for r in member.roles}
+    return bool(role_names & set(STRICT_ADMIN_ROLE_NAMES))
+
+
+async def require_strict_admin(interaction: discord.Interaction) -> bool:
+    if await is_strict_admin(interaction):
+        return True
+    await interaction.response.send_message(
+        "⛔ Only an **Admin** (or the server owner) can do that — "
+        "mods and tournament directors can't.",
+        ephemeral=True,
+    )
+    return False
+
+
 def _db_path(interaction: discord.Interaction) -> str:
     return interaction.client.db_path
 
@@ -121,6 +152,12 @@ async def active_tournament_autocomplete(interaction: discord.Interaction, curre
 async def inprogress_tournament_autocomplete(interaction: discord.Interaction, current: str):
     return await tournament_autocomplete(interaction, current,
                                          statuses=("in_progress",))
+
+
+async def any_tournament_autocomplete(interaction: discord.Interaction, current: str):
+    return await tournament_autocomplete(
+        interaction, current,
+        statuses=("registration_open", "in_progress", "completed"))
 
 
 async def resolve_tournament(interaction: discord.Interaction, tournament_id,

@@ -28,6 +28,8 @@ class TournamentDetailScreen extends StatefulWidget {
 class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
   late Tournament _tournament;
   bool _busy = false;
+  bool _isCrew = false;
+  bool _isAdmin = false;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -36,6 +38,21 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
   void initState() {
     super.initState();
     _tournament = widget.tournament;
+    _loadFlags();
+  }
+
+  Future<void> _loadFlags() async {
+    try {
+      final me = await _api.getMe();
+      if (mounted) {
+        setState(() {
+          _isCrew = me.isCrew;
+          _isAdmin = me.isAdmin;
+        });
+      }
+    } catch (_) {
+      // Flags stay false — crew actions just stay hidden.
+    }
   }
 
   Tournament _withRegistered(bool registered) => Tournament(
@@ -111,6 +128,7 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
       child: Scaffold(
         appBar: AppBar(
           title: Text(t.name),
+          actions: [if (_isCrew) _crewMenu(t)],
           bottom: const TabBar(tabs: [
             Tab(text: 'Tee Times'),
             Tab(text: 'Leaderboard'),
@@ -140,6 +158,294 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
       ),
     );
   }
+
+  Widget _crewMenu(Tournament t) {
+    final done = t.status == 'completed';
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.more_vert),
+      onSelected: _onCrewAction,
+      itemBuilder: (_) => [
+        const PopupMenuItem(value: 'edit', child: Text('Edit details')),
+        if (!done)
+          const PopupMenuItem(
+              value: 'complete', child: Text('Complete tournament')),
+        if (!done)
+          const PopupMenuItem(value: 'end', child: Text('End tournament')),
+        if (_isAdmin)
+          const PopupMenuItem(
+            value: 'delete',
+            child: Text('Delete tournament',
+                style: TextStyle(color: Colors.red)),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _onCrewAction(String action) async {
+    switch (action) {
+      case 'edit':
+        await _editDetails();
+      case 'complete':
+        await _confirmFinish(
+          title: 'Complete tournament?',
+          body:
+              'This posts the final standings in #event-signups and awards season points.',
+          run: () => _api.completeTournament(_tournament.id),
+          done: 'Tournament completed — final standings posted.',
+        );
+      case 'end':
+        await _confirmFinish(
+          title: 'End tournament?',
+          body:
+              'This closes the tournament right now with no final standings and no season points.',
+          run: () => _api.endTournament(_tournament.id),
+          done: 'Tournament ended.',
+        );
+      case 'delete':
+        await _confirmDelete();
+    }
+  }
+
+  /// Swap in a fresh Tournament from the API while keeping the local
+  /// registration flag (the management endpoints don't return it).
+  void _replace(Tournament fresh) {
+    setState(() => _tournament = Tournament(
+          id: fresh.id,
+          name: fresh.name,
+          format: fresh.format,
+          holes: fresh.holes,
+          course: fresh.course,
+          status: fresh.status,
+          startDate: fresh.startDate,
+          endDate: fresh.endDate,
+          teePosition: fresh.teePosition,
+          pinPosition: fresh.pinPosition,
+          windStrength: fresh.windStrength,
+          greenSpeed: fresh.greenSpeed,
+          registered: _tournament.registered,
+          pars: fresh.pars,
+          numRounds: fresh.numRounds,
+          rounds: fresh.rounds,
+        ));
+  }
+
+  Future<void> _editDetails() async {
+    final nameCtrl = TextEditingController(text: _tournament.name);
+    final courseCtrl = TextEditingController(text: _tournament.course ?? '');
+    DateTime? start = _parseDate(_tournament.startDate);
+    DateTime? end = _parseDate(_tournament.endDate);
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          title: const Text('Edit tournament'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(labelText: 'Name'),
+                ),
+                TextField(
+                  controller: courseCtrl,
+                  decoration: const InputDecoration(labelText: 'Course'),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () async {
+                          final picked = await showDatePicker(
+                            context: ctx,
+                            initialDate: start ?? DateTime.now(),
+                            firstDate: DateTime(DateTime.now().year - 1),
+                            lastDate: DateTime(DateTime.now().year + 2),
+                          );
+                          if (picked != null) setDlg(() => start = picked);
+                        },
+                        child: Text(start == null
+                            ? 'Start date'
+                            : _iso(start!)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () async {
+                          final picked = await showDatePicker(
+                            context: ctx,
+                            initialDate: end ?? start ?? DateTime.now(),
+                            firstDate: DateTime(DateTime.now().year - 1),
+                            lastDate: DateTime(DateTime.now().year + 2),
+                          );
+                          if (picked != null) setDlg(() => end = picked);
+                        },
+                        child:
+                            Text(end == null ? 'End date' : _iso(end!)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true || !mounted) return;
+
+    final fields = <String, dynamic>{};
+    final name = nameCtrl.text.trim();
+    if (name.isNotEmpty && name != _tournament.name) fields['name'] = name;
+    final course = courseCtrl.text.trim();
+    if (course.isNotEmpty && course != (_tournament.course ?? '')) {
+      fields['course'] = course;
+    }
+    final startIso = start == null ? null : _iso(start!);
+    if (startIso != _tournament.startDate) fields['start_date'] = startIso;
+    final endIso = end == null ? null : _iso(end!);
+    if (endIso != _tournament.endDate) fields['end_date'] = endIso;
+    if (fields.isEmpty) {
+      showSnack(context, 'Nothing changed.');
+      return;
+    }
+
+    setState(() => _busy = true);
+    try {
+      final updated = await _api.editTournament(_tournament.id, fields);
+      if (mounted) {
+        _replace(updated);
+        showSnack(context, 'Tournament updated.');
+      }
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+    } catch (e) {
+      if (mounted) showSnack(context, 'Update failed: $e', error: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _confirmFinish({
+    required String title,
+    required String body,
+    required Future<void> Function() run,
+    required String done,
+  }) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Confirm'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await run();
+      if (mounted) {
+        _replace(_withStatus('completed'));
+        showSnack(context, done);
+      }
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+    } catch (e) {
+      if (mounted) showSnack(context, 'Failed: $e', error: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Tournament _withStatus(String status) => Tournament(
+        id: _tournament.id,
+        name: _tournament.name,
+        format: _tournament.format,
+        holes: _tournament.holes,
+        course: _tournament.course,
+        status: status,
+        startDate: _tournament.startDate,
+        endDate: _tournament.endDate,
+        teePosition: _tournament.teePosition,
+        pinPosition: _tournament.pinPosition,
+        windStrength: _tournament.windStrength,
+        greenSpeed: _tournament.greenSpeed,
+        registered: _tournament.registered,
+        pars: _tournament.pars,
+        numRounds: _tournament.numRounds,
+        rounds: _tournament.rounds,
+      );
+
+  Future<void> _confirmDelete() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete tournament?'),
+        content: Text(
+            'This permanently deletes "${_tournament.name}" — registrations, tee times and scores go with it. This can\'t be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep it'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete forever'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await _api.deleteTournament(_tournament.id);
+      if (mounted) {
+        showSnack(context, 'Tournament deleted.');
+        Navigator.of(context).pop();
+      }
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+    } catch (e) {
+      if (mounted) showSnack(context, 'Delete failed: $e', error: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  DateTime? _parseDate(String? iso) {
+    if (iso == null || iso.isEmpty) return null;
+    try {
+      return DateTime.parse(iso);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _iso(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   Widget _header(Tournament t) {
     return Card(

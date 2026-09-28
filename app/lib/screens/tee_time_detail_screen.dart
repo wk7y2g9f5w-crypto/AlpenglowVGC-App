@@ -54,7 +54,13 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
         // Non-creators get 403; ignore.
       }
     }
-    return _DetailData(teeTime: tt, requests: requests);
+    bool isCrew = false;
+    try {
+      isCrew = (await _api.getMe()).isCrew;
+    } catch (_) {
+      // Offline — crew actions just stay hidden.
+    }
+    return _DetailData(teeTime: tt, requests: requests, isCrew: isCrew);
   }
 
   Future<void> _refresh() async {
@@ -72,6 +78,141 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
       if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
     } catch (e) {
       if (mounted) showSnack(context, 'Failed: $e', error: true);
+    }
+  }
+
+  String _dateStr(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  String _timeStr(TimeOfDay t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  Future<void> _editTeeTime(TeeTime tt) async {
+    final labelCtrl = TextEditingController(text: tt.label);
+    final current = DateTime.tryParse(tt.startsAtUtc.toString())?.toLocal();
+    DateTime date = current ?? DateTime.now();
+    TimeOfDay time = current == null
+        ? TimeOfDay.now()
+        : TimeOfDay(hour: current.hour, minute: current.minute);
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          title: const Text('Edit tee time'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: labelCtrl,
+                decoration: const InputDecoration(labelText: 'Name'),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () async {
+                        final picked = await showDatePicker(
+                          context: ctx,
+                          initialDate: date,
+                          firstDate: DateTime(DateTime.now().year - 1),
+                          lastDate: DateTime(DateTime.now().year + 2),
+                        );
+                        if (picked != null) setDlg(() => date = picked);
+                      },
+                      child: Text(_dateStr(date)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () async {
+                        final picked = await showTimePicker(
+                            context: ctx, initialTime: time);
+                        if (picked != null) setDlg(() => time = picked);
+                      },
+                      child: Text(time.format(ctx)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true || !mounted) return;
+
+    final fields = <String, dynamic>{};
+    final label = labelCtrl.text.trim();
+    if (label.isNotEmpty && label != tt.label) fields['label'] = label;
+    final dateIso = _dateStr(date);
+    final curDateIso =
+        current == null ? null : _dateStr(DateTime(current.year, current.month, current.day));
+    if (dateIso != curDateIso) fields['date'] = dateIso;
+    final timeIso = _timeStr(time);
+    final curTimeIso = current == null
+        ? null
+        : _timeStr(TimeOfDay(hour: current.hour, minute: current.minute));
+    if (timeIso != curTimeIso) fields['time'] = timeIso;
+    if (fields.isEmpty) {
+      showSnack(context, 'Nothing changed.');
+      return;
+    }
+
+    try {
+      await _api.editTeeTime(tt.id, fields);
+      await _refresh();
+      if (mounted) showSnack(context, 'Tee time updated.');
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+    } catch (e) {
+      if (mounted) showSnack(context, 'Update failed: $e', error: true);
+    }
+  }
+
+  Future<void> _deleteTeeTime(TeeTime tt) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete tee time?'),
+        content: Text(
+            'This removes "${tt.label}" and takes its ${tt.players.length} player(s) with it. This can\'t be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep it'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await _api.deleteTeeTime(tt.id);
+      if (mounted) {
+        showSnack(context, 'Tee time deleted.');
+        Navigator.of(context).pop();
+      }
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+    } catch (e) {
+      if (mounted) showSnack(context, 'Delete failed: $e', error: true);
     }
   }
 
@@ -175,8 +316,32 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                     ),
                 ],
               ),
-              if (isCreator && pending.isNotEmpty) ...[
-                const SizedBox(height: 24),
+              if (isCreator || data.isCrew) ...[
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 4),
+                const Text('Manage',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () => _editTeeTime(tt),
+                      icon: const Icon(Icons.edit),
+                      label: const Text('Edit'),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      onPressed: () => _deleteTeeTime(tt),
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      label: const Text('Delete',
+                          style: TextStyle(color: Colors.red)),
+                    ),
+                  ],
+                ),
+              ],
+              if (isCreator && pending.isNotEmpty) ...[                const SizedBox(height: 24),
                 const Text('Pending requests',
                     style:
                         TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
@@ -219,5 +384,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
 class _DetailData {
   final TeeTime teeTime;
   final List<TeeTimeRequest> requests;
-  _DetailData({required this.teeTime, required this.requests});
+  final bool isCrew;
+  _DetailData(
+      {required this.teeTime, required this.requests, this.isCrew = false});
 }

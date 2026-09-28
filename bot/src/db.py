@@ -719,6 +719,127 @@ async def list_tee_times(db_path, tournament_id) -> list[dict]:
     )
 
 
+async def update_tee_time(db_path, tee_time_id, *, label=None,
+                          starts_at=None) -> bool:
+    """Update a tee time's label and/or start time (ISO string).
+
+    Returns True when a row was actually changed.
+    """
+    sets, params = [], []
+    if label is not None:
+        sets.append("label = ?")
+        params.append(label)
+    if starts_at is not None:
+        sets.append("starts_at = ?")
+        params.append(starts_at)
+    if not sets:
+        return False
+    params.append(tee_time_id)
+    _, rowcount = await _execute(
+        db_path,
+        "UPDATE tee_times SET %s WHERE id = ?" % ", ".join(sets),
+        tuple(params),
+    )
+    return rowcount > 0
+
+
+async def count_tee_time_scorecards(db_path, tee_time_id) -> int:
+    row = await _fetchone(
+        db_path,
+        "SELECT COUNT(*) AS c FROM scorecards WHERE tee_time_id = ?",
+        (tee_time_id,),
+    )
+    return int(row["c"]) if row else 0
+
+
+async def delete_tee_time(db_path, tee_time_id) -> None:
+    """Delete a tee time plus its players and join requests.
+
+    No FK enforcement in this DB, so cascade manually. Callers should
+    refuse when scorecards exist (count_tee_time_scorecards) rather than
+    orphaning submitted scores.
+    """
+    await _execute(
+        db_path, "DELETE FROM tee_time_players WHERE tee_time_id = ?",
+        (tee_time_id,))
+    await _execute(
+        db_path, "DELETE FROM join_requests WHERE tee_time_id = ?",
+        (tee_time_id,))
+    await _execute(
+        db_path, "DELETE FROM tee_times WHERE id = ?", (tee_time_id,))
+
+
+async def update_tournament(db_path, tournament_id, *, name=None,
+                            description=None, start_date=None, end_date=None,
+                            course=None) -> bool:
+    """Update safe tournament fields (never format/holes/rounds — those
+    would corrupt existing scorecards). Returns True when a row changed."""
+    sets, params = [], []
+    if name is not None:
+        sets.append("name = ?")
+        params.append(name)
+    if description is not None:
+        sets.append("description = ?")
+        params.append(description)
+    if start_date is not None:
+        sets.append("start_date = ?")
+        params.append(start_date)
+    if end_date is not None:
+        sets.append("end_date = ?")
+        params.append(end_date)
+    if course is not None:
+        sets.append("course = ?")
+        params.append(course)
+    if not sets:
+        return False
+    params.append(tournament_id)
+    _, rowcount = await _execute(
+        db_path,
+        "UPDATE tournaments SET %s WHERE id = ?" % ", ".join(sets),
+        tuple(params),
+    )
+    return rowcount > 0
+
+
+async def tournament_usage_counts(db_path, tournament_id) -> dict:
+    """Counts for the delete confirmation prompt."""
+    out = {}
+    for key, table, col in [
+        ("registrations", "registrations", "tournament_id"),
+        ("tee_times", "tee_times", "tournament_id"),
+        ("scorecards", "scorecards", "tournament_id"),
+    ]:
+        row = await _fetchone(
+            db_path,
+            f"SELECT COUNT(*) AS c FROM {table} WHERE {col} = ?",
+            (tournament_id,),
+        )
+        out[key] = int(row["c"]) if row else 0
+    return out
+
+
+async def delete_tournament(db_path, tournament_id) -> None:
+    """Delete a tournament and everything under it.
+
+    No FK enforcement in this DB, so cascade manually, children first.
+    Pending outbox rows for the tournament are left alone — the drain
+    skips (and acks) events whose tournament no longer exists.
+    """
+    tt_rows = await _fetchall(
+        db_path, "SELECT id FROM tee_times WHERE tournament_id = ?",
+        (tournament_id,))
+    for r in tt_rows:
+        await delete_tee_time(db_path, r["id"])
+    for table in ("scorecards", "matches", "tournament_leaders",
+                  "season_points", "season_tournaments", "registrations",
+                  "teams", "rounds"):
+        await _execute(
+            db_path, f"DELETE FROM {table} WHERE tournament_id = ?",
+            (tournament_id,))
+    await _execute(
+        db_path, "DELETE FROM tournaments WHERE id = ?", (tournament_id,))
+
+
 async def search_tee_times(db_path, guild_id, current) -> list[dict]:
     sql = ("SELECT tt.*, t.name AS tournament_name FROM tee_times tt"
            " JOIN tournaments t ON t.id = tt.tournament_id"
