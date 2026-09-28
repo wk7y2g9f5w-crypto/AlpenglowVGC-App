@@ -5,7 +5,6 @@ import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
 import 'casual_form_screen.dart';
-import 'casual_screen.dart';
 
 /// Detail for one casual tee time: settings, player list, join/leave,
 /// and creator-or-crew edit/delete.
@@ -106,7 +105,7 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
               Text(tt.course,
                   style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
-              Text(formatCasualWhen(tt.startsAt)),
+              Text(formatTeeTimeWhen(tt.startsAt)),
               const SizedBox(height: 8),
               Text(tt.settingsSummary,
                   style: const TextStyle(color: Colors.grey)),

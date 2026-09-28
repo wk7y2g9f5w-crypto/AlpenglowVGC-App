@@ -133,3 +133,14 @@ class AsyncBody<T> extends StatelessWidget {
     );
   }
 }
+
+/// Human-friendly tee time start, shared by the Casual and AltShot tabs.
+String formatTeeTimeWhen(String iso) {
+  if (iso.isEmpty) return 'Time TBD';
+  try {
+    final dt = DateTime.parse(iso).toLocal();
+    return DateFormat('EEE, MMM d · h:mm a').format(dt);
+  } catch (_) {
+    return iso;
+  }
+}

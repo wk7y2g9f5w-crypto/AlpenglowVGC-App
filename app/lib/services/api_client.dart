@@ -426,4 +426,81 @@ class ApiClient {
     final body = await _post('/api/casual-tee-times/$id/leave');
     return CasualTeeTime.fromJson(body as Map<String, dynamic>);
   }
+
+  // ------------------------------------------------------------- alt-shot
+  Future<List<AltShotTeeTime>> listAltShotTeeTimes() async {
+    final body = await _get('/api/altshot-tee-times');
+    final items = (body as Map<String, dynamic>)['tee_times'] as List;
+    return items
+        .map((e) => AltShotTeeTime.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<AltShotTeeTime> getAltShotTeeTime(String id) async {
+    final body = await _get('/api/altshot-tee-times/$id');
+    return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<AltShotTeeTime> createAltShotTeeTime(
+      Map<String, dynamic> payload) async {
+    final body = await _post('/api/altshot-tee-times', payload);
+    return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<AltShotTeeTime> updateAltShotTeeTime(
+      String id, Map<String, dynamic> payload) async {
+    final body = await _patch('/api/altshot-tee-times/$id', payload);
+    return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<void> deleteAltShotTeeTime(String id) async {
+    await _delete('/api/altshot-tee-times/$id');
+  }
+
+  Future<AltShotTeeTime> joinAltShotTeeTime(String id,
+      {String teamName = '',
+      String player2Name = '',
+      String player3Name = '',
+      String player4Name = ''}) async {
+    final body = await _post('/api/altshot-tee-times/$id/join', {
+      'team_name': teamName,
+      'player2_name': player2Name,
+      'player3_name': player3Name,
+      'player4_name': player4Name,
+    });
+    return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<AltShotTeeTime> leaveAltShotTeeTime(String id) async {
+    final body = await _post('/api/altshot-tee-times/$id/leave');
+    return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<AltShotTeam> updateAltShotTeam(
+      String ttId, String teamId, Map<String, String> payload) async {
+    final body = await _patch(
+        '/api/altshot-tee-times/$ttId/teams/$teamId', payload);
+    return AltShotTeam.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<Map<String, dynamic>> submitAltShotScore(
+      String ttId, String teamId, List<int> holes) async {
+    final body = await _post(
+        '/api/altshot-tee-times/$ttId/teams/$teamId/score', {'holes': holes});
+    return body as Map<String, dynamic>;
+  }
+
+  Future<void> deleteAltShotScore(String ttId, String teamId) async {
+    await _delete('/api/altshot-tee-times/$ttId/teams/$teamId/score');
+  }
+
+  Future<List<AltShotRecord>> getAltShotRecords(
+      String course, int teamSize) async {
+    final body = await _get('/api/altshot-records',
+        {'course': course, 'team_size': teamSize.toString()});
+    final items = (body as Map<String, dynamic>)['records'] as List;
+    return items
+        .map((e) => AltShotRecord.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
 }

@@ -1709,5 +1709,217 @@ class ApiTestCase(unittest.TestCase):
         self.assertFalse(r.json()["is_admin"])
 
 
+class AltShotApiTestCase(ApiTestCase):
+    """Alt-shot records: tee times, teams (2-4 players, optional team name),
+    scores, and per-team-size record leaderboards."""
+
+    def _create_tt(self, uid="1", **over):
+        body = {
+            "label": "Sat alt-shot",
+            "course": "Pebble Beach Golf Links",
+            "starts_at": "2030-10-03T14:00:00Z",
+            "max_teams": 2,
+        }
+        body.update(over)
+        r = self.client.post("/api/altshot-tee-times", headers=self.h(uid),
+                             json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()
+
+    def test_create_and_list(self):
+        tt = self._create_tt()
+        self.assertEqual(len(tt["teams"]), 1)  # creator team auto-created
+        self.assertEqual(tt["teams"][0]["player1_discord_id"], "1")
+        self.assertEqual(tt["teams"][0]["team_size"], 1)
+        r = self.client.get("/api/altshot-tee-times", headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(len(r.json()["tee_times"]), 1)
+
+    def test_create_bad_course_422(self):
+        r = self.client.post("/api/altshot-tee-times", headers=self.h("1"),
+                             json={"label": "x", "course": "Fake CC"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_create_bad_max_teams_422(self):
+        r = self.client.post(
+            "/api/altshot-tee-times", headers=self.h("1"),
+            json={"label": "x", "course": "Pebble Beach Golf Links",
+                  "max_teams": 3})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_join_full_409(self):
+        tt = self._create_tt()
+        r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
+                             headers=self.h("2"),
+                             json={"player2_name": "Gus"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(len(r.json()["teams"]), 2)
+        r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
+                             headers=self.h("3"), json={})
+        self.assertEqual(r.status_code, 409, r.text)
+
+    def test_join_idempotent(self):
+        tt = self._create_tt()
+        r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
+                             headers=self.h("2"), json={})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
+                             headers=self.h("2"), json={})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(len(r.json()["teams"]), 2)
+
+    def _team_url(self, tt_id, team_id, suffix=""):
+        return (f"/api/altshot-tee-times/{tt_id}/teams/{team_id}" + suffix)
+
+    def test_update_team_names_and_display(self):
+        tt = self._create_tt()
+        team = tt["teams"][0]
+        r = self.client.patch(self._team_url(tt["id"], team["id"]),
+                              headers=self.h("1"),
+                              json={"team_name": "The Eagles",
+                                    "player2_name": "Dave",
+                                    "player3_name": "Erin"})
+        self.assertEqual(r.status_code, 200, r.text)
+        t = r.json()
+        self.assertEqual(t["team_name"], "The Eagles")
+        self.assertEqual(t["team_size"], 3)
+        self.assertEqual(t["display_name"], "The Eagles")
+        self.assertEqual(len(t["player_names"]), 3)
+        # No team name: players joined with " & ".
+        r = self.client.patch(self._team_url(tt["id"], team["id"]),
+                              headers=self.h("1"), json={"team_name": ""})
+        self.assertEqual(r.json()["display_name"],
+                         r.json()["player1_name"] + " & Dave & Erin")
+
+    def test_submit_needs_two_players(self):
+        tt = self._create_tt()
+        team = tt["teams"][0]
+        r = self.client.post(self._team_url(tt["id"], team["id"], "/score"),
+                             headers=self.h("1"),
+                             json={"holes": [4] * 18})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.client.patch(self._team_url(tt["id"], team["id"]),
+                          headers=self.h("1"),
+                          json={"player2_name": "Dave"})
+        r = self.client.post(self._team_url(tt["id"], team["id"], "/score"),
+                             headers=self.h("1"),
+                             json={"holes": [4] * 18})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["total"], 72)
+
+    def test_submit_bad_holes_422(self):
+        tt = self._create_tt()
+        team = tt["teams"][0]
+        self.client.patch(self._team_url(tt["id"], team["id"]),
+                          headers=self.h("1"),
+                          json={"player2_name": "Dave"})
+        r = self.client.post(self._team_url(tt["id"], team["id"], "/score"),
+                             headers=self.h("1"),
+                             json={"holes": [4] * 9})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_team_edit_forbidden_for_stranger(self):
+        tt = self._create_tt()
+        team = tt["teams"][0]
+        r = self.client.patch(self._team_url(tt["id"], team["id"]),
+                              headers=self.h("9"),
+                              json={"player2_name": "Mallory"})
+        self.assertEqual(r.status_code, 403, r.text)
+        r = self.client.post(self._team_url(tt["id"], team["id"], "/score"),
+                             headers=self.h("9"),
+                             json={"holes": [4] * 18})
+        self.assertEqual(r.status_code, 403, r.text)
+
+    def test_records_split_by_team_size(self):
+        tt = self._create_tt()
+        t1 = tt["teams"][0]
+        self.client.patch(self._team_url(tt["id"], t1["id"]),
+                          headers=self.h("1"),
+                          json={"team_name": "Big Squad",
+                                "player2_name": "Dave",
+                                "player3_name": "Erin",
+                                "player4_name": "Finn"})
+        r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
+                             headers=self.h("2"),
+                             json={"player2_name": "Gus"})
+        t2 = [t for t in r.json()["teams"]
+              if t["player1_discord_id"] == "2"][0]
+        self.client.post(self._team_url(tt["id"], t2["id"], "/score"),
+                         headers=self.h("2"), json={"holes": [4] * 18})
+        self.client.post(self._team_url(tt["id"], t1["id"], "/score"),
+                         headers=self.h("1"), json={"holes": [3] * 18})
+        # 2-player board: only the duo.
+        r = self.client.get("/api/altshot-records",
+                            params={"course": "Pebble Beach Golf Links",
+                                    "team_size": 2},
+                            headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        recs = r.json()["records"]
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["total"], 72)
+        self.assertEqual(recs[0]["to_par"], 0)
+        self.assertEqual(recs[0]["team_size"], 2)
+        # 4-player board: only the squad, with all names visible.
+        r = self.client.get("/api/altshot-records",
+                            params={"course": "Pebble Beach Golf Links",
+                                    "team_size": 4},
+                            headers=self.h("1"))
+        recs = r.json()["records"]
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["total"], 54)
+        self.assertEqual(recs[0]["to_par"], -18)
+        self.assertEqual(recs[0]["team_display"], "Big Squad")
+        self.assertEqual(len(recs[0]["player_names"]), 4)
+        # 3-player board: empty.
+        r = self.client.get("/api/altshot-records",
+                            params={"course": "Pebble Beach Golf Links",
+                                    "team_size": 3},
+                            headers=self.h("1"))
+        self.assertEqual(r.json()["records"], [])
+        # Bad team_size rejected.
+        r = self.client.get("/api/altshot-records",
+                            params={"course": "Pebble Beach Golf Links",
+                                    "team_size": 5},
+                            headers=self.h("1"))
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_delete_score_and_leave(self):
+        tt = self._create_tt()
+        team = tt["teams"][0]
+        self.client.patch(self._team_url(tt["id"], team["id"]),
+                          headers=self.h("1"),
+                          json={"player2_name": "Dave"})
+        self.client.post(self._team_url(tt["id"], team["id"], "/score"),
+                         headers=self.h("1"), json={"holes": [4] * 18})
+        r = self.client.delete(self._team_url(tt["id"], team["id"], "/score"),
+                               headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.get("/api/altshot-records",
+                            params={"course": "Pebble Beach Golf Links",
+                                    "team_size": 2},
+                            headers=self.h("1"))
+        self.assertEqual(r.json()["records"], [])
+        r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/leave",
+                             headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["teams"], [])
+
+    def test_delete_tee_time_forbidden_for_stranger(self):
+        tt = self._create_tt()
+        r = self.client.delete(f"/api/altshot-tee-times/{tt['id']}",
+                               headers=self.h("9"))
+        self.assertEqual(r.status_code, 403, r.text)
+        r = self.client.get(f"/api/altshot-tee-times/{tt['id']}",
+                            headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_404s(self):
+        r = self.client.get("/api/altshot-tee-times/nope", headers=self.h("1"))
+        self.assertEqual(r.status_code, 404, r.text)
+        r = self.client.post("/api/altshot-tee-times/nope/join",
+                             headers=self.h("1"), json={})
+        self.assertEqual(r.status_code, 404, r.text)
+
+
 if __name__ == "__main__":
     unittest.main()

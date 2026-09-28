@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
 import '../models/models.dart';
 import '../services/api_client.dart';
@@ -88,7 +87,7 @@ class _CasualScreenState extends State<CasualScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const SizedBox(height: 4),
-                      Text('${tt.course} · ${formatCasualWhen(tt.startsAt)}'),
+                      Text('${tt.course} · ${formatTeeTimeWhen(tt.startsAt)}'),
                       const SizedBox(height: 2),
                       Text(
                         '${tt.players.length}/${tt.maxPlayers} players · ${tt.settingsSummary}',
@@ -117,12 +116,3 @@ class _CasualScreenState extends State<CasualScreen> {
   }
 }
 
-String formatCasualWhen(String iso) {
-  if (iso.isEmpty) return 'Time TBD';
-  try {
-    final dt = DateTime.parse(iso).toLocal();
-    return DateFormat('EEE, MMM d · h:mm a').format(dt);
-  } catch (_) {
-    return iso;
-  }
-}

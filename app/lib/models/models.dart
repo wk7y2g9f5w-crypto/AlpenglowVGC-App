@@ -431,3 +431,204 @@ class CasualPlayer {
 
 String _capWord(String s) =>
     s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+
+/// Alt-shot records: team alternate-shot rounds. A tee time holds 1-2 teams;
+/// each team is one registered player plus an optional partner name. Scores
+/// are submitted once per team (not live); a team needs both players attached
+/// to submit to the per-course record leaderboard.
+class AltShotScore {
+  final List<int> holes;
+  final int total;
+  final String submittedAt;
+
+  AltShotScore(
+      {required this.holes, required this.total, required this.submittedAt});
+
+  factory AltShotScore.fromJson(Map<String, dynamic> j) => AltShotScore(
+        holes: ((j['holes'] as List?) ?? [])
+            .map((e) => (e as num).toInt())
+            .toList(),
+        total: (j['total'] as num).toInt(),
+        submittedAt: (j['submitted_at'] ?? '').toString(),
+      );
+}
+
+class AltShotTeam {
+  final String id;
+  final String player1DiscordId;
+  final String player1Name;
+  final String teamName;
+  final List<String> playerNames;
+  final int teamSize;
+  final String displayName;
+  final AltShotScore? score;
+
+  AltShotTeam({
+    required this.id,
+    required this.player1DiscordId,
+    required this.player1Name,
+    required this.teamName,
+    required this.playerNames,
+    required this.teamSize,
+    required this.displayName,
+    this.score,
+  });
+
+  factory AltShotTeam.fromJson(Map<String, dynamic> j) => AltShotTeam(
+        id: j['id'].toString(),
+        player1DiscordId: (j['player1_discord_id'] ?? '').toString(),
+        player1Name: (j['player1_name'] ?? '').toString(),
+        teamName: (j['team_name'] ?? '').toString(),
+        playerNames: ((j['player_names'] as List?) ?? [])
+            .map((e) => e.toString())
+            .toList(),
+        teamSize: (j['team_size'] as num?)?.toInt() ?? 1,
+        displayName: (j['display_name'] ?? '').toString(),
+        score: j['score'] == null
+            ? null
+            : AltShotScore.fromJson(j['score'] as Map<String, dynamic>),
+      );
+
+  /// A team needs at least 2 players to submit a score to the records.
+  bool get canSubmit => teamSize >= 2;
+
+  /// Subtitle line: every player on the team.
+  String get playersLine => playerNames.join(' · ');
+}
+
+class AltShotTeeTime {
+  final String id;
+  final String creatorDiscordId;
+  final String label;
+  final String course;
+  final List<int> pars;
+  final String teePosition;
+  final String pinPosition;
+  final String windStrength;
+  final String greenSpeed;
+  final String startsAt;
+  final int maxTeams;
+  final String notes;
+  final List<AltShotTeam> teams;
+
+  AltShotTeeTime({
+    required this.id,
+    required this.creatorDiscordId,
+    required this.label,
+    required this.course,
+    required this.pars,
+    required this.teePosition,
+    required this.pinPosition,
+    required this.windStrength,
+    required this.greenSpeed,
+    required this.startsAt,
+    required this.maxTeams,
+    required this.notes,
+    required this.teams,
+  });
+
+  factory AltShotTeeTime.fromJson(Map<String, dynamic> j) => AltShotTeeTime(
+        id: j['id'].toString(),
+        creatorDiscordId: (j['creator_discord_id'] ?? '').toString(),
+        label: (j['label'] ?? '').toString(),
+        course: (j['course'] ?? '').toString(),
+        pars: ((j['pars'] ?? '').toString().split(','))
+            .map((e) => int.tryParse(e.trim()) ?? 4)
+            .toList(),
+        teePosition: (j['tee_position'] ?? 'middle').toString(),
+        pinPosition: (j['pin_position'] ?? 'white').toString(),
+        windStrength: (j['wind_strength'] ?? 'moderate').toString(),
+        greenSpeed: (j['green_speed'] ?? 'pro').toString(),
+        startsAt: (j['starts_at'] ?? '').toString(),
+        maxTeams: (j['max_teams'] as num?)?.toInt() ?? 2,
+        notes: (j['notes'] ?? '').toString(),
+        teams: ((j['teams'] as List?) ?? [])
+            .map((e) => AltShotTeam.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+
+  bool get isFull => teams.length >= maxTeams;
+
+  AltShotTeam? myTeam(String discordId) {
+    for (final t in teams) {
+      if (t.player1DiscordId == discordId) return t;
+    }
+    return null;
+  }
+
+  String get settingsSummary {
+    final parts = <String>[
+      '${_capWord(teePosition)} tees',
+      '${_capWord(pinPosition)} pins',
+      '${_capWord(windStrength)} wind',
+      greenSpeed == 'veryfast' ? 'Very fast greens' : 'Pro greens',
+    ];
+    return parts.join(' · ');
+  }
+}
+
+class AltShotRecord {
+  final String teamDisplay;
+  final String teamName;
+  final List<String> playerNames;
+  final int teamSize;
+  final int total;
+  final int? toPar;
+  final String teeTimeLabel;
+  final String teePosition;
+  final String pinPosition;
+  final String windStrength;
+  final String greenSpeed;
+  final String submittedAt;
+
+  AltShotRecord({
+    required this.teamDisplay,
+    required this.teamName,
+    required this.playerNames,
+    required this.teamSize,
+    required this.total,
+    this.toPar,
+    required this.teeTimeLabel,
+    required this.teePosition,
+    required this.pinPosition,
+    required this.windStrength,
+    required this.greenSpeed,
+    required this.submittedAt,
+  });
+
+  factory AltShotRecord.fromJson(Map<String, dynamic> j) => AltShotRecord(
+        teamDisplay: (j['team_display'] ?? '').toString(),
+        teamName: (j['team_name'] ?? '').toString(),
+        playerNames: ((j['player_names'] as List?) ?? [])
+            .map((e) => e.toString())
+            .toList(),
+        teamSize: (j['team_size'] as num?)?.toInt() ?? 2,
+        total: (j['total'] as num).toInt(),
+        toPar: (j['to_par'] as num?)?.toInt(),
+        teeTimeLabel: (j['tee_time_label'] ?? '').toString(),
+        teePosition: (j['tee_position'] ?? '').toString(),
+        pinPosition: (j['pin_position'] ?? '').toString(),
+        windStrength: (j['wind_strength'] ?? '').toString(),
+        greenSpeed: (j['green_speed'] ?? '').toString(),
+        submittedAt: (j['submitted_at'] ?? '').toString(),
+      );
+
+  /// Subtitle: every player on the team (plus the team name when set).
+  String get playersLine => playerNames.join(' · ');
+
+  String get settingsSummary {
+    final parts = <String>[
+      '${_capWord(teePosition)} tees',
+      '${_capWord(pinPosition)} pins',
+      '${_capWord(windStrength)} wind',
+      greenSpeed == 'veryfast' ? 'Very fast greens' : 'Pro greens',
+    ];
+    return parts.join(' · ');
+  }
+
+  String get scoreLine {
+    if (toPar == null) return '$total';
+    if (toPar == 0) return '$total (E)';
+    return '$total (${toPar! > 0 ? '+' : ''}$toPar)';
+  }
+}
