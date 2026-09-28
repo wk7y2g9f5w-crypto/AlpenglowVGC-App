@@ -157,6 +157,19 @@ async def fetch_crew_status(discord_id: str) -> bool | None:
             if member_resp.status_code != 200:
                 return None
             member = member_resp.json()
+            # Guild owner implicitly holds every permission (Administrator),
+            # but carries no explicit roles — recognize them as crew directly.
+            try:
+                guild_resp = await client.get(
+                    f"https://discord.com/api/v10/guilds/{guild_id}",
+                    headers=headers,
+                )
+                if guild_resp.status_code == 200 and str(
+                    guild_resp.json().get("owner_id")
+                ) == str(discord_id):
+                    return True
+            except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                pass
             try:
                 if int(member.get("permissions", "0")) & _MANAGE_GUILD_BIT:
                     return True
