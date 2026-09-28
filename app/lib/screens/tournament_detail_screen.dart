@@ -1028,7 +1028,8 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
                         color: i == 0 ? Colors.white : Colors.black87,
                         fontWeight: FontWeight.bold)),
               ),
-              title: Text(e.name,
+              title: Text(
+                  '${e.name}${e.onCourse ? ' ⛳' : ''}${e.isPending ? ' ⏳' : ''}',
                   style: const TextStyle(fontWeight: FontWeight.w600)),
               subtitle: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1040,6 +1041,11 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
                         style: const TextStyle(
                             color: Colors.green,
                             fontWeight: FontWeight.w600)),
+                  if (e.isPending)
+                    const Text('⏳ awaiting verification',
+                        style: TextStyle(
+                            color: Colors.grey,
+                            fontStyle: FontStyle.italic)),
                 ],
               ),
               trailing: Row(

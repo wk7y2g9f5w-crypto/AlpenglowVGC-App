@@ -302,6 +302,11 @@ class LeaderboardEntry {
   /// Live scoring: the player/team is mid-round, with this many holes entered.
   bool get onCourse => raw['on_course'] == true;
   int? get thru => (raw['thru'] as num?)?.toInt();
+
+  /// Card status: verified / pending / in_progress (may be absent on
+  /// aggregate rows).
+  String? get status => raw['status']?.toString();
+  bool get isPending => status == 'pending';
 }
 
 class PlayerMe {

@@ -318,10 +318,13 @@ class ApiClient {
 
   Future<List<LeaderboardEntry>> getLeaderboard(String tournamentId) async {
     final body = await _get('/api/tournaments/$tournamentId/leaderboard');
-    final list = body is Map<String, dynamic>
-        ? (body['entries'] as List? ?? [])
-        : (body as List? ?? []);
-    return list.map((e) => LeaderboardEntry(e as Map<String, dynamic>)).toList();
+    if (body is! Map<String, dynamic>) return [];
+    // Ranked standings first, then pending (unverified solo) cards.
+    final standings = (body['standings'] as List? ?? []);
+    final pending = (body['pending'] as List? ?? []);
+    return [...standings, ...pending]
+        .map((e) => LeaderboardEntry(e as Map<String, dynamic>))
+        .toList();
   }
 
   Future<Map<String, dynamic>> getSeasonStandings() async {
