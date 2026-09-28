@@ -205,6 +205,37 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
 
   Future<void> _submit() async {
     if (_player == null) return;
+    // Finality warning: scores stay editable right up until this point.
+    final toPar = _toParLabel();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(_existingStatus != null
+            ? 'Update submitted scorecard?'
+            : 'Submit scorecard?'),
+        content: Text(
+          _existingStatus != null
+              ? 'This will update ${_player!.displayName}\'s submitted '
+                  'scorecard for round $_roundNumber.'
+              : 'All scores entered are final. After submitting, only crew '
+                  '(admins, mods, tournament directors) can change them.\n\n'
+                  '${_player!.displayName} — round $_roundNumber: '
+                  'total ${_total ?? '–'}'
+                  '${toPar.isNotEmpty ? ' ($toPar)' : ''}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep editing'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(_existingStatus != null ? 'Update' : 'Submit'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
     setState(() => _submitting = true);
     try {
       await _api.submitScorecard(

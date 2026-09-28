@@ -388,16 +388,80 @@ class ScoreEntryView(discord.ui.View):
 
     async def _on_submit(self, interaction: discord.Interaction):
         try:
-            await interaction.response.defer(ephemeral=True)
-            await _save_scorecard(
-                self.bot, interaction, self.t["id"], self.tt["id"],
-                self.card_owner_id, self.submit_id, self.team_id,
-                [s for s in self.scores if s is not None],
+            # Crew-only edit rule, checked up front so a re-submit attempt
+            # gets the refusal instead of a confirm dialog. Mirrors the
+            # player/team resolution in _save_scorecard below.
+            owner_id = (None if self.t["format"] in SHARED_CARD_FORMATS
+                        else self.card_owner_id)
+            existing = await db.find_scorecard(
+                self.db_path, self.t["id"],
+                player_discord_id=owner_id,
+                team_id=self.team_id,
+                tee_time_id=self.tt["id"],
                 round_number=self.round_number,
+            )
+            if existing is not None and not await is_admin(interaction):
+                await interaction.response.send_message(
+                    "❌ That scorecard is already submitted — only crew "
+                    "(admins, mods, tournament directors) can change it. "
+                    "Ask a crew member to fix it.",
+                    ephemeral=True,
+                )
+                return
+            total = sum(s for s in self.scores if s is not None)
+            to_par = ""
+            if self.pars:
+                diff = total - sum(self.pars)
+                to_par = f" ({diff:+d} vs par)" if diff else " (even par)"
+            await interaction.response.send_message(
+                f"⚠️ **Submit this scorecard?**\n"
+                f"Total: **{total}**{to_par}\n\n"
+                "All scores entered are **final** — after submitting, only "
+                "crew (admins, mods, tournament directors) can change them.",
+                view=_ConfirmSubmitView(self),
+                ephemeral=True,
             )
         except Exception:
             await self._fail(interaction,
                              "❌ Couldn't submit the score — try again.")
+
+
+class _ConfirmSubmitView(discord.ui.View):
+    """Are-you-sure step before a scorecard is locked in."""
+
+    def __init__(self, entry: "ScoreEntryView"):
+        super().__init__(timeout=120)
+        self.entry = entry
+
+    @discord.ui.button(label="✅ Confirm submit",
+                       style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction,
+                      button: discord.ui.Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
+            e = self.entry
+            await _save_scorecard(
+                e.bot, interaction, e.t["id"], e.tt["id"],
+                e.card_owner_id, e.submit_id, e.team_id,
+                [s for s in e.scores if s is not None],
+                round_number=e.round_number,
+            )
+        except Exception:
+            await interaction.followup.send(
+                "❌ Couldn't submit the score — try again.", ephemeral=True)
+        finally:
+            self.stop()
+
+    @discord.ui.button(label="Keep editing",
+                       style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction,
+                     button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Submission cancelled — your scores are still editable. "
+                    "Hit **✅ Submit** when they're final.",
+            view=None,
+        )
+        self.stop()
 
 
 async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
