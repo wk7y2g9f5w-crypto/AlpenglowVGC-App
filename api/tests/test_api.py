@@ -1158,6 +1158,101 @@ class ApiTestCase(unittest.TestCase):
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
 
+    def test_tee_time_one_per_round_limit(self):
+        self.with_tz("123")
+        self.with_tz("456")
+        rounds = [
+            {"tee_position": "middle",
+             "start_date": "2026-09-20", "end_date": "2026-10-06"},
+            {"tee_position": "middle",
+             "start_date": "2026-09-20", "end_date": "2026-10-10"},
+        ]
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=rounds,
+                                                    start_date="2026-09-20"))
+        self.assertEqual(r.status_code, 201, r.text)
+        tid = r.json()["id"]
+        run(db.set_tournament_status(self.db_path, tid, "in_progress"))
+
+        def make_tt(uid, label, rn):
+            rr = self.client.post(
+                f"/api/tournaments/{tid}/tee-times", headers=self.h(uid),
+                json={"label": label, "date": "2026-01-02", "time": "15:30",
+                      "max_players": 4, "round_number": rn})
+            self.assertEqual(rr.status_code, 200, rr.text)
+            return rr.json()["id"]
+
+        tt1 = make_tt("123", "Morning", 1)    # 123 auto-joins
+        tt2 = make_tt("456", "Afternoon", 1)  # 456 auto-joins
+        # 123 can't join a second round-1 tee time...
+        r = self.client.post(f"/api/tee-times/{tt2}/join",
+                             headers=self.h("123"))
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "round_conflict")
+        # ...or create one.
+        r = self.client.post(
+            f"/api/tournaments/{tid}/tee-times", headers=self.h("123"),
+            json={"label": "Late", "date": "2026-01-02", "time": "16:30",
+                  "max_players": 4, "round_number": 1})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "round_conflict")
+        # A different round is fine.
+        make_tt("123", "R2 flight", 2)
+        # Submit 123's round-1 card in tt1 — the submitted card completes
+        # that tee time, freeing the round.
+        run(db.register_player(self.db_path, tid, "123"))
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "round_number": 1}
+        r = self.client.put(f"/api/tee-times/{tt1}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        # Now joining the second round-1 tee time works.
+        r = self.client.post(f"/api/tee-times/{tt2}/join",
+                             headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_scorecard_submit_second_tee_time(self):
+        # Regression: a player in tee times for two different rounds can
+        # submit to the second one (used to 403 with not_in_tee_time).
+        self.with_tz("123")
+        self.with_tz("456")
+        rounds = [
+            {"tee_position": "middle",
+             "start_date": "2026-09-20", "end_date": "2026-10-10"},
+            {"tee_position": "middle",
+             "start_date": "2026-09-20", "end_date": "2026-10-10"},
+        ]
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=rounds,
+                                                    start_date="2026-09-20"))
+        self.assertEqual(r.status_code, 201, r.text)
+        tid = r.json()["id"]
+        run(db.set_tournament_status(self.db_path, tid, "in_progress"))
+        r = self.client.post(
+            f"/api/tournaments/{tid}/tee-times", headers=self.h("123"),
+            json={"label": "R1", "date": "2026-01-02", "time": "15:30",
+                  "max_players": 4, "round_number": 1})
+        tt1 = r.json()["id"]
+        r = self.client.post(
+            f"/api/tournaments/{tid}/tee-times", headers=self.h("456"),
+            json={"label": "R2", "date": "2026-01-03", "time": "15:30",
+                  "max_players": 4, "round_number": 2})
+        tt2 = r.json()["id"]
+        # 123 joins the round-2 tee time (different round: allowed).
+        r = self.client.post(f"/api/tee-times/{tt2}/join",
+                             headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        # Submitting the round-2 card to the round-2 tee time works even
+        # though tt1 was joined first.
+        run(db.register_player(self.db_path, tid, "123"))
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "round_number": 2}
+        r = self.client.put(f"/api/tee-times/{tt2}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+
     def test_scorecard_witness_round_trip(self):
         self.with_tz("123")
         self.with_tz("456")

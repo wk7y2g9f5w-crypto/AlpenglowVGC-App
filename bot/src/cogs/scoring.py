@@ -569,8 +569,7 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
             ephemeral=True,
         )
         return
-    mine = await db.get_player_tee_time(db_path, t["id"], submitter_id)
-    if not mine or mine["id"] != tt["id"]:
+    if not await db.is_player_in_tee_time(db_path, tt["id"], submitter_id):
         await interaction.followup.send(
             f"❌ You're not in the **{tt['label']}** tee time.", ephemeral=True
         )
@@ -581,8 +580,7 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
             f"**{t['name']}**.", ephemeral=True
         )
         return
-    owner_tt = await db.get_player_tee_time(db_path, t["id"], card_owner_id)
-    if not owner_tt or owner_tt["id"] != tt["id"]:
+    if not await db.is_player_in_tee_time(db_path, tt["id"], card_owner_id):
         await interaction.followup.send(
             "❌ The selected player isn't in this tee time.", ephemeral=True
         )
@@ -762,8 +760,7 @@ class Scoring(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            mine = await db.get_player_tee_time(db_path, t["id"], player_id)
-            if not mine or mine["id"] != tt["id"]:
+            if not await db.is_player_in_tee_time(db_path, tt["id"], player_id):
                 await interaction.response.send_message(
                     f"❌ You're not in the **{tt['label']}** tee time. "
                     "Join it from `/tee_times` first.",

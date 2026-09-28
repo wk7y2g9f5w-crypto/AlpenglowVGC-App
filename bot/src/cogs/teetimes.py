@@ -122,17 +122,17 @@ class TeeTimeView(discord.ui.View):
 
     async def _on_leave(self, interaction: discord.Interaction):
         db_path = interaction.client.db_path
-        tt = await db.get_player_tee_time(
+        left = await db.leave_all_tee_times(
             db_path, self.tournament_id, str(interaction.user.id)
         )
-        if not tt:
+        if not left:
             await interaction.response.send_message(
                 "You're not in any tee time for this tournament.", ephemeral=True
             )
             return
-        await db.leave_tee_time(db_path, tt["id"], str(interaction.user.id))
         await interaction.response.send_message(
-            f"✅ You left **{tt['label']}**.", ephemeral=True
+            f"✅ You left {left} tee time{'s' if left != 1 else ''}.",
+            ephemeral=True,
         )
         await ts.maybe_refresh(interaction.client, str(interaction.guild_id))
 
@@ -220,12 +220,18 @@ async def request_join_flow(interaction: discord.Interaction, tee_time_id: int) 
         return
     existing = await db.get_player_tee_time(db_path, t["id"], user_id)
     if existing and existing["id"] != tt["id"]:
-        await interaction.response.send_message(
-            f"❌ You're already in **{existing['label']}**. Leave it first, "
-            "then request this one (one tee time per player per tournament).",
-            ephemeral=True,
+        active = await db.active_tee_time_for_round(
+            db_path, t["id"], tt.get("round_number") or 1, user_id,
+            exclude_tee_time_id=tt["id"],
         )
-        return
+        if active is not None:
+            await interaction.response.send_message(
+                f"❌ You're already in **{active['label']}** for "
+                f"Round {active.get('round_number') or 1}. Leave it first, then "
+                "request this one (one tee time per player per round).",
+                ephemeral=True,
+            )
+            return
     if existing and existing["id"] == tt["id"]:
         await interaction.response.send_message(
             f"You're already in **{tt['label']}**. ✅", ephemeral=True
@@ -356,16 +362,30 @@ async def _decide_join_request_flow(interaction: discord.Interaction, accept: bo
             ephemeral=True,
         )
         return
-    other = await db.get_player_tee_time(db_path, t["id"], req["player_discord_id"])
-    if other and other["id"] != tt["id"]:
+    other = await db.active_tee_time_for_round(
+        db_path, t["id"], tt.get("round_number") or 1,
+        req["player_discord_id"], exclude_tee_time_id=tt["id"],
+    )
+    if other is not None:
         await db.decide_join_request(db_path, request_id, "declined", decider_id)
         await _disable_request_buttons(interaction, "Declined ❌")
         await interaction.response.send_message(
-            f"❌ **{requester_name}** joined a different tee time — request declined.",
+            f"❌ **{requester_name}** is already in **{other['label']}** for "
+            f"Round {other.get('round_number') or 1} — request declined.",
             ephemeral=True,
         )
         return
     join_result = await db.join_tee_time(db_path, tt["id"], req["player_discord_id"])
+    if join_result == "round_conflict":
+        await db.decide_join_request(db_path, request_id, "declined", decider_id)
+        await _disable_request_buttons(interaction, "Declined ❌")
+        await interaction.response.send_message(
+            f"❌ **{requester_name}** joined another Round "
+            f"{tt.get('round_number') or 1} tee time while this was pending — "
+            "request auto-declined.",
+            ephemeral=True,
+        )
+        return
     if join_result == "full":
         await db.decide_join_request(db_path, request_id, "declined", decider_id)
         await _disable_request_buttons(interaction, "Declined ❌")
@@ -506,6 +526,17 @@ class TeeTimes(commands.Cog):
         if await db.get_round(self.bot.db_path, t["id"], round) is None:
             await interaction.response.send_message(
                 f"❌ Round {round} doesn't exist in **{t['name']}**.", ephemeral=True
+            )
+            return
+        conflict = await db.active_tee_time_for_round(
+            self.bot.db_path, t["id"], round, str(interaction.user.id)
+        )
+        if conflict is not None:
+            await interaction.response.send_message(
+                f"❌ You're already in **{conflict['label']}** for Round {round} "
+                "(one tee time per player per round). Leave it first, or enter "
+                "your card there.",
+                ephemeral=True,
             )
             return
 

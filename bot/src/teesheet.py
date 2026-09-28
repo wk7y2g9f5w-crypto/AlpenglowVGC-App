@@ -110,18 +110,18 @@ class BoardTeeSheetView(discord.ui.View):
     def _make_leave(tournament_id: int):
         async def _on_leave(interaction: discord.Interaction):
             db_path = interaction.client.db_path
-            tt = await db.get_player_tee_time(
+            left = await db.leave_all_tee_times(
                 db_path, tournament_id, str(interaction.user.id)
             )
-            if not tt:
+            if not left:
                 await interaction.response.send_message(
                     "You're not in a tee time for that tournament.",
                     ephemeral=True,
                 )
                 return
-            await db.leave_tee_time(db_path, tt["id"], str(interaction.user.id))
             await interaction.response.send_message(
-                f"✅ You left **{tt['label']}**.", ephemeral=True
+                f"✅ You left {left} tee time{'s' if left != 1 else ''}.",
+                ephemeral=True,
             )
             await maybe_refresh(interaction.client, str(interaction.guild_id))
 

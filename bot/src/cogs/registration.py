@@ -125,12 +125,9 @@ class Registration(commands.Cog):
         removed = await db.unregister_player(
             self.bot.db_path, t["id"], str(interaction.user.id)
         )
-        # Also drop them from their tee time, if any.
-        tt = await db.get_player_tee_time(self.bot.db_path, t["id"],
-                                          str(interaction.user.id))
-        if tt:
-            await db.leave_tee_time(self.bot.db_path, tt["id"],
-                                    str(interaction.user.id))
+        # Also drop them from all their tee times, if any.
+        await db.leave_all_tee_times(self.bot.db_path, t["id"],
+                                     str(interaction.user.id))
         if removed:
             await interaction.response.send_message(
                 f"✅ You've been withdrawn from **{t['name']}**.", ephemeral=True

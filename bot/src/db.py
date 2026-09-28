@@ -965,13 +965,24 @@ async def tee_time_player_count(db_path, tee_time_id) -> int:
 
 
 async def join_tee_time(db_path, tee_time_id, discord_id) -> str:
-    """Returns 'ok', 'full', or 'already'."""
+    """Returns 'ok', 'full', 'already', 'round_conflict', or 'missing'.
+
+    'round_conflict': the player is already in a different tee time for the
+    same tournament round and hasn't played it yet (no submitted scorecard
+    covering them). One active tee time per player per round.
+    """
     tt = await get_tee_time(db_path, tee_time_id)
     if tt is None:
         return "missing"
     players = await get_tee_time_players(db_path, tee_time_id)
     if any(p["discord_id"] == discord_id for p in players):
         return "already"
+    conflict = await active_tee_time_for_round(
+        db_path, tt["tournament_id"], tt.get("round_number") or 1, discord_id,
+        exclude_tee_time_id=tee_time_id,
+    )
+    if conflict is not None:
+        return "round_conflict"
     if len(players) >= (tt["max_players"] or 4):
         return "full"
     await _execute(
@@ -990,6 +1001,81 @@ async def leave_tee_time(db_path, tee_time_id, discord_id) -> bool:
         (tee_time_id, discord_id),
     )
     return rowcount > 0
+
+
+async def is_player_in_tee_time(db_path, tee_time_id, discord_id) -> bool:
+    """Direct membership check — is this player in THIS tee time?
+
+    Prefer this over get_player_tee_time() when gating an action on a specific
+    tee time: get_player_tee_time() returns one arbitrary tee time per
+    tournament, which misfires when a player is in several.
+    """
+    row = await _fetchone(
+        db_path,
+        "SELECT 1 FROM tee_time_players"
+        " WHERE tee_time_id = ? AND player_discord_id = ?",
+        (tee_time_id, discord_id),
+    )
+    return row is not None
+
+
+async def player_has_submitted(db_path, tee_time_id, round_number,
+                               discord_id) -> bool:
+    """Has this player played this tee time + round? True when a scorecard
+    exists for the tee time/round covering them — their own card, or a team
+    card for a team they're on."""
+    row = await _fetchone(
+        db_path,
+        "SELECT 1 FROM scorecards s"
+        " WHERE s.tee_time_id = ? AND s.round_number = ?"
+        " AND (s.player_discord_id = ?"
+        "      OR (s.team_id IS NOT NULL AND EXISTS ("
+        "            SELECT 1 FROM team_members tm"
+        "            WHERE tm.team_id = s.team_id"
+        "              AND tm.player_discord_id = ?)))"
+        " LIMIT 1",
+        (tee_time_id, round_number, discord_id, discord_id),
+    )
+    return row is not None
+
+
+async def active_tee_time_for_round(db_path, tournament_id, round_number,
+                                    discord_id,
+                                    exclude_tee_time_id=None) -> dict | None:
+    """Another tee time in this tournament + round the player is in but hasn't
+    played yet. A submitted scorecard completes the player's seat in a tee
+    time, so it no longer counts as active."""
+    rows = await _fetchall(
+        db_path,
+        "SELECT tt.* FROM tee_times tt"
+        " JOIN tee_time_players tp ON tp.tee_time_id = tt.id"
+        " WHERE tt.tournament_id = ? AND tt.round_number = ?"
+        " AND tp.player_discord_id = ?",
+        (tournament_id, round_number, discord_id),
+    )
+    for tt in rows:
+        if exclude_tee_time_id is not None and tt["id"] == exclude_tee_time_id:
+            continue
+        if not await player_has_submitted(
+            db_path, tt["id"], round_number, discord_id
+        ):
+            return tt
+    return None
+
+
+async def leave_all_tee_times(db_path, tournament_id, discord_id) -> int:
+    """Remove a player from every tee time they're in for this tournament.
+    Returns the number of tee times left."""
+    rows = await _fetchall(
+        db_path,
+        "SELECT tt.id FROM tee_times tt"
+        " JOIN tee_time_players tp ON tp.tee_time_id = tt.id"
+        " WHERE tt.tournament_id = ? AND tp.player_discord_id = ?",
+        (tournament_id, discord_id),
+    )
+    for r in rows:
+        await leave_tee_time(db_path, r["id"], discord_id)
+    return len(rows)
 
 
 async def get_player_tee_time(db_path, tournament_id, discord_id) -> dict | None:
