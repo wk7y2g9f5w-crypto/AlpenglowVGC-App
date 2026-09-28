@@ -4,6 +4,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import '../widgets/course_art.dart';
 import 'tournament_detail_screen.dart';
 import 'create_tournament_screen.dart';
 
@@ -89,42 +90,12 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
             itemCount: tournaments.length,
             itemBuilder: (context, i) {
               final t = tournaments[i];
+              final art = courseArtAsset(t.course);
               return Card(
                 margin:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: ListTile(
-                  title: Text(t.name,
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const SizedBox(height: 4),
-                      Text(
-                          '${t.course ?? 'Course TBD'} · ${formatDateRange(t.startDate, t.endDate)}'),
-                      const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          StatusChip(status: t.status),
-                          if (t.registered) ...[
-                            const SizedBox(width: 8),
-                            const Chip(
-                              label: Text('REGISTERED',
-                                  style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold)),
-                              backgroundColor: Colors.transparent,
-                              side: BorderSide(color: Colors.green),
-                              visualDensity: VisualDensity.compact,
-                              padding: EdgeInsets.zero,
-                              avatar: Icon(Icons.check,
-                                  size: 14, color: Colors.green),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ],
-                  ),
-                  trailing: const Icon(Icons.chevron_right),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
                   onTap: () async {
                     await Navigator.of(context).push(MaterialPageRoute(
                       builder: (_) => TournamentDetailScreen(
@@ -135,6 +106,92 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
                     ));
                     _refresh();
                   },
+                  child: Container(
+                    decoration: BoxDecoration(
+                      image: art != null
+                          ? DecorationImage(
+                              image: AssetImage(art),
+                              fit: BoxFit.cover,
+                              alignment: Alignment.center,
+                            )
+                          : null,
+                      gradient: art == null
+                          ? const LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                Color(0xFF1B5E20),
+                                Color(0xFF0D3311)
+                              ],
+                            )
+                          : null,
+                    ),
+                    child: Container(
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Color.fromRGBO(0, 0, 0, 0.25),
+                            Color.fromRGBO(0, 0, 0, 0.72),
+                          ],
+                        ),
+                      ),
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                              children: [
+                                Text(t.name,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 17,
+                                        color: Colors.white)),
+                                const SizedBox(height: 4),
+                                Text(
+                                    '${t.course ?? 'Course TBD'} · ${formatDateRange(t.startDate, t.endDate)}',
+                                    style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 13)),
+                                const SizedBox(height: 8),
+                                Row(
+                                  children: [
+                                    StatusChip(status: t.status),
+                                    if (t.registered) ...[
+                                      const SizedBox(width: 8),
+                                      const Chip(
+                                        label: Text('REGISTERED',
+                                            style: TextStyle(
+                                                fontSize: 11,
+                                                fontWeight:
+                                                    FontWeight.bold,
+                                                color: Colors.white)),
+                                        backgroundColor:
+                                            Colors.transparent,
+                                        side: BorderSide(
+                                            color: Colors.green),
+                                        visualDensity:
+                                            VisualDensity.compact,
+                                        padding: EdgeInsets.zero,
+                                        avatar: Icon(Icons.check,
+                                            size: 14,
+                                            color: Colors.green),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right,
+                              color: Colors.white70),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               );
             },
