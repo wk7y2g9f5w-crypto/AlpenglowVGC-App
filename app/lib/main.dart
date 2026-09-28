@@ -106,20 +106,106 @@ class _HomeShellState extends State<HomeShell> {
     ];
     return Scaffold(
       body: IndexedStack(index: _index, children: pages),
-      bottomNavigationBar: NavigationBar(
+      bottomNavigationBar: _ScrollableNavBar(
         selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: const [
-          NavigationDestination(
-              icon: Icon(Icons.emoji_events), label: 'Tournaments'),
-          NavigationDestination(icon: Icon(Icons.golf_course), label: 'Casual'),
-          NavigationDestination(icon: Icon(Icons.groups), label: 'AltShot'),
-          NavigationDestination(
-              icon: Icon(Icons.sports_golf), label: 'Matchplay'),
-          NavigationDestination(icon: Icon(Icons.person), label: 'Profile'),
-          NavigationDestination(
-              icon: Icon(Icons.settings), label: 'Settings'),
+        onSelected: (i) => setState(() => _index = i),
+        items: const [
+          _NavItem(icon: Icons.emoji_events, label: 'Tournaments'),
+          _NavItem(icon: Icons.golf_course, label: 'Casual'),
+          _NavItem(icon: Icons.groups, label: 'AltShot'),
+          _NavItem(icon: Icons.sports_golf, label: 'Matchplay'),
+          _NavItem(icon: Icons.person, label: 'Profile'),
+          _NavItem(icon: Icons.settings, label: 'Settings'),
         ],
+      ),
+    );
+  }
+}
+
+class _NavItem {
+  final IconData icon;
+  final String label;
+
+  const _NavItem({required this.icon, required this.label});
+}
+
+/// Bottom tab bar that scrolls horizontally, so every tab keeps its full
+/// label instead of being squeezed (Material 3 NavigationBar has no
+/// scroll support). Keeps the same pill-indicator look.
+class _ScrollableNavBar extends StatelessWidget {
+  final int selectedIndex;
+  final ValueChanged<int> onSelected;
+  final List<_NavItem> items;
+
+  const _ScrollableNavBar({
+    required this.selectedIndex,
+    required this.onSelected,
+    required this.items,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SafeArea(
+      top: false,
+      child: Container(
+        decoration: BoxDecoration(
+          color: scheme.surface,
+          border: Border(top: BorderSide(color: scheme.outlineVariant)),
+        ),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              for (var i = 0; i < items.length; i++) _tab(scheme, i),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _tab(ColorScheme scheme, int i) {
+    final selected = i == selectedIndex;
+    final item = items[i];
+    return InkWell(
+      onTap: () => onSelected(i),
+      child: SizedBox(
+        width: 104,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+                decoration: selected
+                    ? BoxDecoration(
+                        color: scheme.secondaryContainer,
+                        borderRadius: BorderRadius.circular(16),
+                      )
+                    : null,
+                child: Icon(item.icon,
+                    color: selected
+                        ? scheme.onSecondaryContainer
+                        : scheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                item.label,
+                maxLines: 1,
+                style: TextStyle(
+                  fontSize: 12,
+                  color:
+                      selected ? scheme.onSurface : scheme.onSurfaceVariant,
+                  fontWeight:
+                      selected ? FontWeight.w600 : FontWeight.normal,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
