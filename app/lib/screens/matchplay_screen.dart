@@ -198,23 +198,10 @@ class _MatchPlayRecordsView extends StatefulWidget {
 }
 
 class _MatchPlayRecordsViewState extends State<_MatchPlayRecordsView> {
-  static const _tees = {'front': 'Front', 'middle': 'Middle', 'back': 'Back'};
-  static const _pins = {'black': 'Black', 'white': 'White', 'red': 'Red'};
-  static const _winds = {
-    'low': 'Low',
-    'moderate': 'Moderate',
-    'severe': 'Severe'
-  };
-  static const _greens = {'veryfast': 'Very Fast', 'pro': 'Pro'};
+  static const _formats = {'single': '1v1 Matchplay', 'bestball': 'Best Ball'};
 
-  List<GolfCourse> _courses = [];
-  GolfCourse? _course;
-  String _tee = 'back';
-  String _pin = 'black';
-  String _wind = 'moderate';
-  String _greenSpeed = 'pro';
+  String _format = 'single';
   Future<List<MatchPlayRecord>>? _future;
-  bool _loading = true;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -222,174 +209,98 @@ class _MatchPlayRecordsViewState extends State<_MatchPlayRecordsView> {
   @override
   void initState() {
     super.initState();
-    _loadCourses();
-  }
-
-  Future<void> _loadCourses() async {
-    try {
-      final courses = await _api.getCourses();
-      if (!mounted) return;
-      setState(() {
-        _courses = courses;
-        _loading = false;
-      });
-    } catch (err) {
-      if (!mounted) return;
-      setState(() => _loading = false);
-      showSnack(context, 'Could not load courses: $err', error: true);
-    }
+    _reload();
   }
 
   void _reload() {
     setState(() {
-      _future = _course == null
-          ? null
-          : _api.getMatchPlayRecords(_course!.name,
-              teePosition: _tee,
-              pinPosition: _pin,
-              windStrength: _wind,
-              greenSpeed: _greenSpeed);
+      _future = _api.getMatchPlayRecords(_format);
     });
-  }
-
-  void _pick(GolfCourse? c) {
-    _course = c;
-    _reload();
-  }
-
-  Widget _filter(String label, String value, Map<String, String> options,
-      ValueChanged<String> onChanged) {
-    return Expanded(
-      child: DropdownButtonFormField<String>(
-        initialValue: value,
-        decoration: InputDecoration(
-          labelText: label,
-          border: const OutlineInputBorder(),
-          isDense: true,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-        ),
-        items: options.entries
-            .map((e) => DropdownMenuItem(
-                value: e.key,
-                child:
-                    Text(e.value, style: const TextStyle(fontSize: 13))))
-            .toList(),
-        onChanged: (v) {
-          if (v != null) {
-            onChanged(v);
-            _reload();
-          }
-        },
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-          child: DropdownButtonFormField<GolfCourse>(
-            initialValue: _course,
+          child: DropdownButtonFormField<String>(
+            initialValue: _format,
             decoration: const InputDecoration(
-              labelText: 'Course records',
+              labelText: 'Leaderboard',
               border: OutlineInputBorder(),
               isDense: true,
             ),
-            items: _courses
-                .map((c) => DropdownMenuItem(value: c, child: Text(c.name)))
+            items: _formats.entries
+                .map((e) =>
+                    DropdownMenuItem(value: e.key, child: Text(e.value)))
                 .toList(),
-            onChanged: _pick,
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-          child: Row(
-            children: [
-              _filter('Tees', _tee, _tees, (v) => _tee = v),
-              const SizedBox(width: 8),
-              _filter('Pins', _pin, _pins, (v) => _pin = v),
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-          child: Row(
-            children: [
-              _filter('Wind', _wind, _winds, (v) => _wind = v),
-              const SizedBox(width: 8),
-              _filter('Greens', _greenSpeed, _greens, (v) => _greenSpeed = v),
-            ],
+            onChanged: (v) {
+              if (v != null) {
+                _format = v;
+                _reload();
+              }
+            },
           ),
         ),
         const SizedBox(height: 8),
         Expanded(
-          child: _course == null
-              ? const Center(
-                  child: Text('Pick a course to see its match-play records.'))
-              : AsyncBody<List<MatchPlayRecord>>(
-                  future: _future!,
-                  onRefresh: () async {
-                    final f = _api.getMatchPlayRecords(_course!.name,
-                        teePosition: _tee,
-                        pinPosition: _pin,
-                        windStrength: _wind,
-                        greenSpeed: _greenSpeed);
-                    setState(() => _future = f);
-                    await f;
-                  },
-                  builder: (context, records) {
-                    if (records.isEmpty) {
-                      return ListView(
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        children: const [
-                          SizedBox(height: 80),
-                          Center(
-                              child: Text(
-                                  'No records yet.\nBe the first to win one.',
-                                  textAlign: TextAlign.center)),
-                        ],
-                      );
-                    }
-                    return ListView.builder(
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      itemCount: records.length,
-                      itemBuilder: (context, i) {
-                        final r = records[i];
-                        return Card(
-                          margin: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 6),
-                          child: ListTile(
-                            leading: CircleAvatar(
-                              backgroundColor: i == 0
-                                  ? Colors.amber
-                                  : Colors.grey.shade300,
-                              child: Text('${i + 1}',
-                                  style: TextStyle(
-                                      color: i == 0
-                                          ? Colors.black
-                                          : Colors.black54,
-                                      fontWeight: FontWeight.bold)),
-                            ),
-                            title: Text(r.playerName,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.bold)),
-                            subtitle: Text(
-                                'W–L–T ${r.recordLine}',
-                                style: const TextStyle(fontSize: 12)),
-                            trailing: Text(r.winPctLine,
-                                style: const TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold)),
-                          ),
-                        );
-                      },
-                    );
-                  },
-                ),
+          child: AsyncBody<List<MatchPlayRecord>>(
+            future: _future!,
+            onRefresh: () async {
+              final f = _api.getMatchPlayRecords(_format);
+              setState(() => _future = f);
+              await f;
+            },
+            builder: (context, records) {
+              if (records.isEmpty) {
+                return ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  children: const [
+                    SizedBox(height: 80),
+                    Center(
+                        child: Text(
+                            'No records yet.\nBe the first to win one.',
+                            textAlign: TextAlign.center)),
+                  ],
+                );
+              }
+              return ListView.builder(
+                physics: const AlwaysScrollableScrollPhysics(),
+                itemCount: records.length,
+                itemBuilder: (context, i) {
+                  final r = records[i];
+                  return Card(
+                    margin: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: i == 0
+                            ? Colors.amber
+                            : Colors.grey.shade300,
+                        child: Text('${i + 1}',
+                            style: TextStyle(
+                                color: i == 0
+                                    ? Colors.black
+                                    : Colors.black54,
+                                fontWeight: FontWeight.bold)),
+                      ),
+                      title: Text(r.playerName,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold)),
+                      subtitle: Text(
+                          'W–L–T ${r.recordLine}',
+                          style: const TextStyle(fontSize: 12)),
+                      trailing: Text(r.winPctLine,
+                          style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
         ),
       ],
     );

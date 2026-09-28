@@ -204,22 +204,24 @@ class _MatchPlayFormScreenState extends State<MatchPlayFormScreen> {
                 ),
                 const SizedBox(height: 12),
                 if (isNew) ...[
-                  Row(
-                    children: [
-                      const Text('Format'),
-                      const SizedBox(width: 12),
-                      SegmentedButton<String>(
-                        segments: const [
-                          ButtonSegment(
-                              value: 'single', label: Text('Single')),
-                          ButtonSegment(
-                              value: 'bestball', label: Text('Best Ball')),
-                        ],
-                        selected: {_format},
-                        onSelectionChanged: (s) =>
-                            setState(() => _format = s.first),
-                      ),
+                  DropdownButtonFormField<String>(
+                    initialValue: _format,
+                    decoration: const InputDecoration(
+                      labelText: 'Format',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                          value: 'single',
+                          child: Text('1v1 Matchplay')),
+                      DropdownMenuItem(
+                          value: 'bestball',
+                          child: Text('Best Ball')),
                     ],
+                    onChanged: (v) {
+                      if (v != null) setState(() => _format = v);
+                    },
                   ),
                   if (_format == 'bestball') ...[
                     const SizedBox(height: 8),

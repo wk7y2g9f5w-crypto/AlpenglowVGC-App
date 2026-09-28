@@ -640,7 +640,6 @@ class MatchPlayRecord {
   final int wins;
   final int losses;
   final int ties;
-  final double winPct;
 
   MatchPlayRecord({
     required this.discordId,
@@ -648,7 +647,6 @@ class MatchPlayRecord {
     required this.wins,
     required this.losses,
     required this.ties,
-    required this.winPct,
   });
 
   factory MatchPlayRecord.fromJson(Map<String, dynamic> j) =>
@@ -658,10 +656,13 @@ class MatchPlayRecord {
         wins: (j['wins'] as num?)?.toInt() ?? 0,
         losses: (j['losses'] as num?)?.toInt() ?? 0,
         ties: (j['ties'] as num?)?.toInt() ?? 0,
-        winPct: (j['win_pct'] as num?)?.toDouble() ?? 0.0,
       );
 
   String get recordLine => '$wins–$losses–$ties';
+
+  int get played => wins + losses + ties;
+
+  double get winPct => played == 0 ? 0.0 : wins / played;
 
   String get winPctLine => '${(winPct * 100).toStringAsFixed(1)}%';
 }

@@ -2506,32 +2506,14 @@ async def delete_matchplay_score(tt_id: str, user: CurrentUser) -> dict:
 
 
 @app.get("/api/matchplay/records")
-async def matchplay_records(user: CurrentUser, course: str,
-                            tee_position: str = "back",
-                            pin_position: str = "black",
-                            wind_strength: str = "moderate",
-                            green_speed: str = "pro") -> dict:
-    for name, val, ok in (
-            ("tee_position", tee_position, ("front", "middle", "back")),
-            ("pin_position", pin_position, ("black", "white", "red")),
-            ("wind_strength", wind_strength, ("low", "moderate", "severe")),
-            ("green_speed", green_speed, ("veryfast", "pro"))):
-        if (val or "").strip().lower() not in ok:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Unknown {name} '{val}'.")
-    records = await db.get_matchplay_records(
-        DB_PATH, course.strip(),
-        tee_position=tee_position.strip().lower(),
-        pin_position=pin_position.strip().lower(),
-        wind_strength=wind_strength.strip().lower(),
-        green_speed=green_speed.strip().lower())
-    return {"course": course.strip(),
-            "tee_position": tee_position.strip().lower(),
-            "pin_position": pin_position.strip().lower(),
-            "wind_strength": wind_strength.strip().lower(),
-            "green_speed": green_speed.strip().lower(),
-            "records": records}
+async def matchplay_records(user: CurrentUser, format: str) -> dict:
+    fmt = (format or "").strip().lower()
+    if fmt not in ("single", "bestball"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown format '{format}'.")
+    records = await db.get_matchplay_records(DB_PATH, fmt)
+    return {"format": fmt, "records": records}
 
 
 # --------------------------------------------------------------------------

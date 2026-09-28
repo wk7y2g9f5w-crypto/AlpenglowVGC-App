@@ -57,11 +57,9 @@ class MatchPlayApiTestCase(ApiTestCase):
                                headers=self.h(uid),
                                json={"hole_results": results})
 
-    def _records(self, course="Pebble Beach Golf Links", **params):
-        q = {"course": course}
-        q.update(params)
+    def _records(self, format="single"):
         r = self.client.get("/api/matchplay/records", headers=self.h("1"),
-                            params=q)
+                            params={"format": format})
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()["records"]
 
@@ -368,30 +366,54 @@ class MatchPlayApiTestCase(ApiTestCase):
         alumec = recs[0]
         self.assertEqual((alumec["wins"], alumec["losses"], alumec["ties"]),
                          (2, 0, 0))
-        self.assertAlmostEqual(alumec["win_pct"], 1.0)
         tank = recs[2]
         self.assertEqual((tank["wins"], tank["losses"]), (0, 2))
-        self.assertAlmostEqual(tank["win_pct"], 0.0)
 
-    def test_records_filtered_by_setup(self):
-        t1 = self._full_single()  # back/black/moderate/pro
+    def test_records_keyed_by_format(self):
+        # Wins at DIFFERENT courses accumulate in the same format row.
+        t1 = self._full_single()
         self._put(t1["id"], "1", [1, 1, 1] + [0] * 13 + [None, None])
-        t2 = self._create_tt(tee_position="front", pin_position="white")
+        t2 = self._create_tt(course="Pinehurst No. 2")
         self._join(t2["id"], "2", 2)
         self._put(t2["id"], "1", [1, 1, 1] + [0] * 13 + [None, None])
-        default = self._records()
-        self.assertEqual(len(default), 2)  # only the back/black match
-        front = self._records(tee_position="front", pin_position="white")
-        self.assertEqual(len(front), 2)
+        recs = self._records("single")
+        by_name = {x["player_name"]: x for x in recs}
         self.assertEqual(
-            {(x["player_name"], x["wins"]) for x in front},
-            {("User1", 1), ("User2", 0)})
+            (by_name["User1"]["wins"], by_name["User1"]["losses"]),
+            (2, 0))
+        self.assertEqual(
+            (by_name["User2"]["wins"], by_name["User2"]["losses"]),
+            (0, 2))
+        # A best-ball match writes independent rows: single tallies
+        # untouched, bestball rows separate.
+        bb = self._create_tt(format="bestball", team_size=2)
+        self._join(bb["id"], "2", 1)
+        self._join(bb["id"], "3", 2)
+        self._join(bb["id"], "4", 2)
+        self._put(bb["id"], "1", [1, 1, 1] + [0] * 13 + [None, None])
+        bb_recs = self._records("bestball")
+        bb_by_name = {x["player_name"]: x for x in bb_recs}
+        self.assertEqual(
+            (bb_by_name["User1"]["wins"], bb_by_name["User2"]["wins"]),
+            (1, 1))
+        self.assertEqual(
+            (bb_by_name["User3"]["losses"], bb_by_name["User4"]["losses"]),
+            (1, 1))
+        # Single rows unchanged by the best-ball result.
+        recs = self._records("single")
+        by_name = {x["player_name"]: x for x in recs}
+        self.assertEqual(by_name["User1"]["wins"], 2)
 
-    def test_records_bad_setup_422(self):
-        r = self.client.get("/api/matchplay/records", headers=self.h("1"),
-                            params={"course": "Pebble Beach Golf Links",
-                                    "wind_strength": "breezy"})
+    def test_records_format_required_and_validated(self):
+        r = self.client.get("/api/matchplay/records", headers=self.h("1"))
         self.assertEqual(r.status_code, 422, r.text)
+        r = self.client.get("/api/matchplay/records", headers=self.h("1"),
+                            params={"format": "scramble"})
+        self.assertEqual(r.status_code, 422, r.text)
+        r = self.client.get("/api/matchplay/records", headers=self.h("1"),
+                            params={"format": "bestball"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["format"], "bestball")
 
     # -- tee time management ----------------------------------------------
     def test_update_tee_time_creator_ok(self):

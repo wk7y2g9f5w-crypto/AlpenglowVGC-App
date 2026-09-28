@@ -327,7 +327,9 @@ CREATE TABLE IF NOT EXISTS altshot_scores(
 -- are no text-name guests. Both sides must be full before any score can be
 -- saved. Scores are live (hole-by-hole); the server auto-completes the
 -- match when the result is decided (3&2, 2 UP, All Square, ...).
--- matchplay_records holds per-player W-L-T tallies keyed by course+setup.
+-- matchplay_records holds per-player W-L-T tallies keyed by format only
+-- ('single' for 1v1, 'bestball' for team best-ball). Migrated from the old
+-- course+setup-keyed shape in _migrate (table is dropped and recreated).
 CREATE TABLE IF NOT EXISTS matchplay_tee_times(
   id TEXT PRIMARY KEY,
   creator_discord_id TEXT NOT NULL,
@@ -374,18 +376,13 @@ CREATE TABLE IF NOT EXISTS matchplay_scores(
 );
 CREATE TABLE IF NOT EXISTS matchplay_records(
   id TEXT PRIMARY KEY,
-  course TEXT NOT NULL,
-  tee_position TEXT NOT NULL,
-  pin_position TEXT NOT NULL,
-  wind_strength TEXT NOT NULL,
-  green_speed TEXT NOT NULL,
+  format TEXT NOT NULL,
   discord_id TEXT NOT NULL,
   player_name TEXT NOT NULL DEFAULT '',
   wins INTEGER NOT NULL DEFAULT 0,
   losses INTEGER NOT NULL DEFAULT 0,
   ties INTEGER NOT NULL DEFAULT 0,
-  UNIQUE (course, tee_position, pin_position, wind_strength, green_speed,
-          discord_id)
+  UNIQUE (format, discord_id)
 );
 """
 
@@ -665,6 +662,28 @@ async def _migrate(db_path: str) -> None:
                          _extra.strip(), _pos, _now))
                     _pos += 1
         await con.commit()
+
+        # matchplay_records v2: tallies are keyed by format ('single' /
+        # 'bestball') only. If the old course+setup-keyed table exists,
+        # drop it and recreate the new shape. Not yet deployed to
+        # production, so no rows need preserving. Idempotent: a fresh
+        # SCHEMA already has the new shape (no 'course' column -> skip).
+        cur = await con.execute("PRAGMA table_info(matchplay_records)")
+        _rec_cols = [r[1] for r in await cur.fetchall()]
+        if _rec_cols and "course" in _rec_cols:
+            await con.execute("DROP TABLE matchplay_records")
+            await con.commit()
+            await con.execute(
+                """CREATE TABLE matchplay_records(
+                  id TEXT PRIMARY KEY,
+                  format TEXT NOT NULL,
+                  discord_id TEXT NOT NULL,
+                  player_name TEXT NOT NULL DEFAULT '',
+                  wins INTEGER NOT NULL DEFAULT 0,
+                  losses INTEGER NOT NULL DEFAULT 0,
+                  ties INTEGER NOT NULL DEFAULT 0,
+                  UNIQUE (format, discord_id))""")
+            await con.commit()
 
 
 def _dicts(rows) -> list[dict]:
@@ -3266,6 +3285,7 @@ async def _matchplay_sides_full(db_path, tt: dict) -> bool:
 async def _matchplay_apply_records(db_path, tt: dict, winner_side: int | None,
                                    delta: int) -> None:
     """Apply (+1) or un-apply (-1) W-L-T tallies for a completed match.
+    Tallies are keyed by the tee time's format ('single' | 'bestball').
     Called with +1 when a match completes and -1 when a previous completion
     is undone (score edited back to in-progress, changed, or cleared)."""
     import uuid
@@ -3280,6 +3300,7 @@ async def _matchplay_apply_records(db_path, tt: dict, winner_side: int | None,
     for s in sides:
         members = await _matchplay_side_members(db_path, s["id"])
         rosters.append(members)
+    fmt = (tt.get("format") or "single").strip().lower()
     for idx, members in enumerate(rosters):
         side_no = idx + 1
         if winner_side is None:
@@ -3293,17 +3314,13 @@ async def _matchplay_apply_records(db_path, tt: dict, winner_side: int | None,
             name = display_name_of(player, m["discord_id"])
             await _execute(
                 db_path,
-                "INSERT INTO matchplay_records (id, course, tee_position,"
-                " pin_position, wind_strength, green_speed, discord_id,"
+                "INSERT INTO matchplay_records (id, format, discord_id,"
                 " player_name, wins, losses, ties)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
-                " ON CONFLICT (course, tee_position, pin_position,"
-                " wind_strength, green_speed, discord_id)"
+                " VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT (format, discord_id)"
                 " DO UPDATE SET player_name = excluded.player_name,"
                 f" {col} = {col} + ?",
-                (uuid.uuid4().hex[:12], tt["course"], tt["tee_position"],
-                 tt["pin_position"], tt["wind_strength"], tt["green_speed"],
-                 m["discord_id"], name,
+                (uuid.uuid4().hex[:12], fmt, m["discord_id"], name,
                  1 if col == "wins" else 0, 1 if col == "losses" else 0,
                  1 if col == "ties" else 0, delta),
             )
@@ -3395,39 +3412,24 @@ async def delete_matchplay_score(db_path, tt_id: str) -> None:
     )
 
 
-async def get_matchplay_records(db_path, course: str,
-                                tee_position: str | None = None,
-                                pin_position: str | None = None,
-                                wind_strength: str | None = None,
-                                green_speed: str | None = None) -> list[dict]:
-    """Per-course, per-setup player W-L-T leaderboard, wins first."""
-    clauses = ["course = ?"]
-    params: list = [course]
-    for col, val in (("tee_position", tee_position),
-                     ("pin_position", pin_position),
-                     ("wind_strength", wind_strength),
-                     ("green_speed", green_speed)):
-        if val:
-            clauses.append(f"{col} = ?")
-            params.append(val)
+async def get_matchplay_records(db_path, format: str) -> list[dict]:
+    """Per-format ('single' | 'bestball') player W-L-T leaderboard,
+    wins first."""
     rows = await _fetchall(
         db_path,
         "SELECT discord_id, player_name, wins, losses, ties"
         " FROM matchplay_records"
-        f" WHERE {' AND '.join(clauses)}"
+        " WHERE format = ?"
         " ORDER BY wins DESC, losses ASC, ties DESC, player_name ASC",
-        tuple(params),
+        (format,),
     )
     records = []
     for r in rows:
-        played = r["wins"] + r["losses"] + r["ties"]
         records.append({
             "discord_id": r["discord_id"],
             "player_name": r["player_name"],
             "wins": r["wins"],
             "losses": r["losses"],
             "ties": r["ties"],
-            "win_pct": (round(r["wins"] / played, 3)
-                        if played else 0.0),
         })
     return records

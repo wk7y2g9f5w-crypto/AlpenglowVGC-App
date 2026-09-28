@@ -572,17 +572,9 @@ class ApiClient {
     await _delete('/api/matchplay/tee-times/$id/score');
   }
 
-  Future<List<MatchPlayRecord>> getMatchPlayRecords(String course,
-      {String teePosition = 'back',
-      String pinPosition = 'black',
-      String windStrength = 'moderate',
-      String greenSpeed = 'pro'}) async {
+  Future<List<MatchPlayRecord>> getMatchPlayRecords(String format) async {
     final body = await _get('/api/matchplay/records', {
-      'course': course,
-      'tee_position': teePosition,
-      'pin_position': pinPosition,
-      'wind_strength': windStrength,
-      'green_speed': greenSpeed,
+      'format': format,
     });
     final items = (body as Map<String, dynamic>)['records'] as List;
     return items
