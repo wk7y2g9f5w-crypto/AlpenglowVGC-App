@@ -41,6 +41,15 @@ class TournamentRound {
     return todayKey.compareTo(startDate!) >= 0;
   }
 
+  /// True when the round's window has closed (hard cutoff for non-crew).
+  bool get hasEnded {
+    if (endDate == null || endDate!.isEmpty) return false;
+    final today = DateTime.now();
+    final todayKey =
+        '${today.year.toString().padLeft(4, '0')}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    return todayKey.compareTo(endDate!) > 0;
+  }
+
   String get settingsSummary {
     final parts = <String>[];
     if (teePosition != null) parts.add('${_cap(teePosition!)} tees');

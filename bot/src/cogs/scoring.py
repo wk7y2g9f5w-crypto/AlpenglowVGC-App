@@ -20,6 +20,7 @@ from src.cogs.common import (
     admin_role_mention,
     inprogress_tournament_autocomplete,
     is_admin,
+    is_crew,
     require_admin,
     resolve_tournament,
     viewer_tee_time_when,
@@ -242,6 +243,8 @@ class ScoreEntryView(discord.ui.View):
         label = f"Round {r['round_number']} ({dates}) — {tee} tees, {pin} pins, {wind} wind"
         if not sl.round_has_started(r.get("start_date")):
             label += " — not started"
+        elif sl.round_has_ended(r.get("end_date")):
+            label += " — ended"
         return label
 
     def _build_items(self):
@@ -552,6 +555,17 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
         await interaction.followup.send(
             f"❌ Round {round_number} hasn't started yet — it opens "
             f"{sl.format_date(rnd.get('start_date'))}.",
+            ephemeral=True,
+        )
+        return
+    # Hard cutoff at the round's end date — crew can still submit.
+    if sl.round_has_ended(rnd.get("end_date")) and not await is_crew(
+        interaction
+    ):
+        await interaction.followup.send(
+            f"❌ Round {round_number} closed "
+            f"{sl.format_date(rnd.get('end_date'))} — scores are locked. "
+            "Ask a crew member if a card still needs to go in.",
             ephemeral=True,
         )
         return

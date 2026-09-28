@@ -43,6 +43,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   String? _witnessName;
   bool _isCrew = false;
   final _witnessCtrl = TextEditingController();
+  int _loadSeq = 0;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -84,7 +85,10 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   Future<void> _loadCrew() async {
     try {
       final me = await _api.getMe();
-      if (mounted) setState(() => _isCrew = me.isCrew);
+      if (mounted) {
+        setState(() => _isCrew = me.isCrew);
+        _ensureSelectableRound();
+      }
     } catch (_) {
       // Leave as non-crew; the server still enforces the lock.
     }
@@ -96,12 +100,14 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   }
 
   /// Load the saved card (if any) for [playerDiscordId] (null = me) + round.
-  /// The displayed card always belongs to the selected player.
+  /// The displayed card always belongs to the selected player. Only the
+  /// latest load applies, so a slow response can't clobber a newer one.
   Future<void> _loadCard(String? playerDiscordId, int roundNumber) async {
+    final seq = ++_loadSeq;
     try {
       final card = await _api.getScorecard(widget.teeTime.id,
           roundNumber: roundNumber, playerDiscordId: playerDiscordId);
-      if (!mounted) return;
+      if (!mounted || seq != _loadSeq) return;
       if (card != null && card.scores.length == _holeCount) {
         setState(() {
           _scores = card.scores.map<int?>((s) => s).toList();
@@ -124,7 +130,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       }
     } on ApiException {
       // No existing card or unreadable; start blank.
-      if (mounted) {
+      if (mounted && seq == _loadSeq) {
         setState(() {
           _scores = List<int?>.filled(_holeCount, null);
           _existingStatus = null;
@@ -155,16 +161,37 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       final summary = r.settingsSummary;
       if (summary.isNotEmpty) parts.add(summary);
       if (r.datesSummary.isNotEmpty) parts.add(r.datesSummary);
-      if (!r.hasStarted) parts.add('not started yet');
+      if (!r.hasStarted) {
+        parts.add('not started yet');
+      } else if (r.hasEnded) {
+        parts.add('ended');
+      }
       return parts.join(' — ');
     }
     return 'Round $rn';
   }
 
-  bool _roundStarted(int rn) {
+  /// A round can be picked when its window has opened. After the window
+  /// closes, only crew can still enter cards for it.
+  bool _roundSelectable(int rn) {
     final rounds = widget.tournament.rounds;
-    if (rounds.length >= rn) return rounds[rn - 1].hasStarted;
+    if (rounds.length >= rn) {
+      final r = rounds[rn - 1];
+      if (!r.hasStarted) return false;
+      if (r.hasEnded && !_isCrew) return false;
+    }
     return true;
+  }
+
+  /// After crew status loads, move off a round the viewer can't play.
+  void _ensureSelectableRound() {
+    if (_roundSelectable(_roundNumber)) return;
+    for (var rn = 1; rn <= widget.tournament.numRounds; rn++) {
+      if (_roundSelectable(rn)) {
+        _pickRound(rn);
+        return;
+      }
+    }
   }
 
   int? get _total {
@@ -409,7 +436,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                 widget.tournament.numRounds,
                 (i) => DropdownMenuItem(
                   value: i + 1,
-                  enabled: _roundStarted(i + 1),
+                  enabled: _roundSelectable(i + 1),
                   child: Text(_roundLabel(i + 1),
                       overflow: TextOverflow.ellipsis),
                 ),

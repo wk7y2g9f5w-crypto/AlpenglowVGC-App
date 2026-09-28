@@ -1351,6 +1351,29 @@ async def put_scorecard(
                 ),
             },
         )
+    # Gate 3d: hard cutoff at the round's end date — crew can still submit
+    # after the window closes (e.g. entering a missed card).
+    is_crew: bool | None = None
+    if sl.round_has_ended(rnd.get("end_date")):
+        is_crew = await fetch_crew_status(user["discord_id"])
+        if is_crew is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify crew status with Discord — try again shortly.",
+            )
+        if not is_crew:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "round_ended",
+                    "message": (
+                        f"Round {body.round_number} closed "
+                        f"{sl.format_date(rnd.get('end_date'))} — scores are "
+                        "locked. Ask a crew member if a card still needs "
+                        "to go in."
+                    ),
+                },
+            )
     # Gate 4: the tee time must have started (bot's tee-time gate).
     if not sl.tee_time_passed(tt.get("starts_at") or ""):
         raise HTTPException(
@@ -1367,7 +1390,8 @@ async def put_scorecard(
         round_number=body.round_number,
     )
     if existing is not None:
-        is_crew = await fetch_crew_status(user["discord_id"])
+        if is_crew is None:
+            is_crew = await fetch_crew_status(user["discord_id"])
         if is_crew is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

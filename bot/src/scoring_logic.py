@@ -316,6 +316,18 @@ def round_has_started(start_date_iso: str | None) -> bool:
     return datetime.now(timezone.utc).date() >= start
 
 
+def round_has_ended(end_date_iso: str | None) -> bool:
+    """Has a round's play window closed? A round with no end date (or an
+    unparseable one) never closes."""
+    if not end_date_iso:
+        return False
+    try:
+        end = parse_date(end_date_iso)
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc).date() > end
+
+
 def validate_round_dates(start_s: str | None, end_s: str | None,
                          tour_start_s: str | None,
                          tour_end_s: str | None):

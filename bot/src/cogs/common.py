@@ -78,6 +78,25 @@ async def is_admin(interaction: discord.Interaction) -> bool:
     return director is not None and director in member.roles
 
 
+# Every role that counts as "the crew": admins, mods, tournament directors.
+CREW_ROLE_NAMES = frozenset(
+    {"Tournament Admin", "Admin", "Mod", "Tournament Director"}
+)
+
+
+async def is_crew(interaction: discord.Interaction) -> bool:
+    """True if the user is crew (admin/mod/tournament director roles, or
+    Manage Server / Administrator permission)."""
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        return False
+    perms = member.guild_permissions
+    if perms.manage_guild or perms.administrator:
+        return True
+    role_names = {r.name for r in member.roles}
+    return bool(role_names & CREW_ROLE_NAMES)
+
+
 async def require_admin(interaction: discord.Interaction) -> bool:
     if await is_admin(interaction):
         return True

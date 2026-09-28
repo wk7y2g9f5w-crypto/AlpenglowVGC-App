@@ -36,6 +36,10 @@ String friendlyApiMessage(ApiException e) {
       return "That player isn't in this tee time.";
     case 'scorecard_locked':
       return 'That scorecard is already submitted — only crew (admins, mods, tournament directors) can change it.';
+    case 'round_not_started':
+      return 'That round hasn\'t started yet — wait for its window to open.';
+    case 'round_ended':
+      return 'That round has closed — scores are locked. Ask a crew member if a card still needs to go in.';
     default:
       return e.message;
   }

@@ -1116,6 +1116,48 @@ class ApiTestCase(unittest.TestCase):
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
 
+    def test_scorecard_round_ended_cutoff(self):
+        self.with_tz("123")
+        self.with_tz("456")
+        # Round 1 closed in the past; round 2 is open.
+        rounds = [
+            {"tee_position": "middle",
+             "start_date": "2026-09-20", "end_date": "2026-09-25"},
+            {"tee_position": "middle",
+             "start_date": "2026-09-26", "end_date": "2999-01-02"},
+        ]
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(
+                                 rounds=rounds,
+                                 start_date="2026-09-20",
+                                 end_date="2999-01-02"))
+        self.assertEqual(r.status_code, 201, r.text)
+        tid = r.json()["id"]
+        run(db.set_tournament_status(self.db_path, tid, "in_progress"))
+        tt_id = run(db.create_tee_time(
+            self.db_path, tid, "past flight",
+            "2026-01-02T15:30:00+00:00", 4, "123", None))
+        run(db.join_tee_time(self.db_path, tt_id, "123"))
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "round_number": 1}
+        # Crew bypasses the cutoff.
+        self._crew(True)
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        # Non-crew is locked out with a clear code.
+        self._crew(False)
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "round_ended")
+        # Round 2 is still open for everyone.
+        body["round_number"] = 2
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+
     def test_scorecard_witness_round_trip(self):
         self.with_tz("123")
         self.with_tz("456")

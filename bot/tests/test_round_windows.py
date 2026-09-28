@@ -109,6 +109,20 @@ class RoundWindowLogicTest(unittest.TestCase):
         self.assertTrue(sl.round_has_started("not-a-date"))
         self.assertFalse(sl.round_has_started("2999-01-01"))
 
+    def test_round_has_ended(self):
+        self.assertFalse(sl.round_has_ended(None))
+        self.assertFalse(sl.round_has_ended("not-a-date"))
+        self.assertTrue(sl.round_has_ended("2000-01-01"))
+        self.assertFalse(sl.round_has_ended("2999-01-01"))
+        # Today counts as still open (inclusive end).
+        from datetime import datetime, timezone
+
+        self.assertFalse(
+            sl.round_has_ended(
+                datetime.now(timezone.utc).date().isoformat()
+            )
+        )
+
     def test_validate_round_dates_ok(self):
         s, e = sl.validate_round_dates(
             "2026-10-04", "2026-10-05", "2026-10-03", "2026-10-10")
