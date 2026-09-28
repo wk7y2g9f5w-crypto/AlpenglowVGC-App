@@ -1,7 +1,8 @@
-"""One active tee time per player per round of a tournament.
+"""One tee time per player per round; one scorecard per round per member.
 
-A submitted scorecard completes the player's seat in a tee time, so that tee
-time no longer blocks them from joining another one for the same round.
+No exceptions: a submitted scorecard does NOT free the player to join a
+second tee time for the same round, and a second card for the same round is
+refused even from a different tee time.
 """
 import os
 import tempfile
@@ -42,30 +43,34 @@ class TeeTimeRoundLimitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await db.join_tee_time(self.db_path, tt2, "p1"), "round_conflict"
         )
-        conflict = await db.active_tee_time_for_round(
+        conflict = await db.tee_time_for_round(
             self.db_path, tid, 1, "p1", exclude_tee_time_id=tt2
         )
         self.assertIsNotNone(conflict)
         self.assertEqual(conflict["id"], tt1)
 
-    async def test_submitted_card_frees_the_round(self):
+    async def test_submitted_card_does_not_free_the_round(self):
         tid = await self._tournament()
         await db.register_player(self.db_path, tid, "p1")
         tt1 = await self._tee_time(tid, "Morning", 1)
         tt2 = await self._tee_time(tid, "Afternoon", 1)
         await db.join_tee_time(self.db_path, tt1, "p1")
-        # Play the round: submit a card in the first tee time.
         await db.upsert_scorecard(
             self.db_path, tid, "p1", None, tt1, [4] * 18, "verified",
             round_number=1,
         )
-        self.assertTrue(
-            await db.player_has_submitted(self.db_path, tt1, 1, "p1")
+        # Played the round -> still can't join a second tee time for it.
+        self.assertEqual(
+            await db.join_tee_time(self.db_path, tt2, "p1"), "round_conflict"
         )
-        self.assertIsNone(
-            await db.active_tee_time_for_round(self.db_path, tid, 1, "p1")
-        )
+        # Leaving the first tee time does allow joining the second...
+        await db.leave_tee_time(self.db_path, tt1, "p1")
         self.assertEqual(await db.join_tee_time(self.db_path, tt2, "p1"), "ok")
+        # ...but find_round_card still finds the round-1 card (submit paths
+        # refuse a second card for the round).
+        card = await db.find_round_card(self.db_path, tid, "p1", 1)
+        self.assertIsNotNone(card)
+        self.assertEqual(card["tee_time_id"], tt1)
 
     async def test_different_rounds_do_not_conflict(self):
         tid = await self._tournament()
@@ -75,7 +80,7 @@ class TeeTimeRoundLimitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await db.join_tee_time(self.db_path, tt1, "p1"), "ok")
         self.assertEqual(await db.join_tee_time(self.db_path, tt2, "p1"), "ok")
 
-    async def test_team_card_counts_as_submitted(self):
+    async def test_find_round_card_team_coverage(self):
         tid = await db.create_tournament(
             self.db_path, "guild1", "RL", "alt_shot", 18,
             "Pebble Beach Golf Links", ",".join(["4"] * 18), None, "admin1",
@@ -83,23 +88,47 @@ class TeeTimeRoundLimitTest(unittest.IsolatedAsyncioTestCase):
             rounds=[{"tee_position": "middle"}],
         )
         await db.register_player(self.db_path, tid, "p1")
+        await db.register_player(self.db_path, tid, "p2")
         team_id = await db.create_team(self.db_path, tid, "Duo", "p1")
         await db.add_team_member(self.db_path, team_id, "p1")
+        await db.add_team_member(self.db_path, team_id, "p2")
         tt1 = await self._tee_time(tid, "Morning", 1)
-        tt2 = await self._tee_time(tid, "Afternoon", 1)
-        await db.join_tee_time(self.db_path, tt1, "p1")
-        self.assertEqual(
-            await db.join_tee_time(self.db_path, tt2, "p1"), "round_conflict"
-        )
-        # Shared team card covers the member.
+        # Shared team card covers both members.
         await db.upsert_scorecard(
             self.db_path, tid, None, team_id, tt1, [4] * 18, "verified",
             round_number=1,
         )
-        self.assertTrue(
-            await db.player_has_submitted(self.db_path, tt1, 1, "p1")
+        for pid in ("p1", "p2"):
+            card = await db.find_round_card(self.db_path, tid, pid, 1)
+            self.assertIsNotNone(card, pid)
+            self.assertEqual(card["tee_time_label"], "Morning")
+        # A different round has no card.
+        self.assertIsNone(await db.find_round_card(self.db_path, tid, "p1", 2))
+
+    async def test_find_round_card_best_ball_is_per_member(self):
+        tid = await db.create_tournament(
+            self.db_path, "guild1", "RL", "best_ball", 18,
+            "Pebble Beach Golf Links", ",".join(["4"] * 18), None, "admin1",
+            start_date="2026-10-03", end_date="2026-10-10",
+            rounds=[{"tee_position": "middle"}],
         )
-        self.assertEqual(await db.join_tee_time(self.db_path, tt2, "p1"), "ok")
+        await db.register_player(self.db_path, tid, "p1")
+        await db.register_player(self.db_path, tid, "p2")
+        team_id = await db.create_team(self.db_path, tid, "Duo", "p1")
+        await db.add_team_member(self.db_path, team_id, "p1")
+        await db.add_team_member(self.db_path, team_id, "p2")
+        tt1 = await self._tee_time(tid, "Morning", 1)
+        # p1's own best-ball card (player + team set) blocks p1 only.
+        await db.upsert_scorecard(
+            self.db_path, tid, "p1", team_id, tt1, [4] * 18, "verified",
+            round_number=1,
+        )
+        self.assertIsNotNone(
+            await db.find_round_card(self.db_path, tid, "p1", 1)
+        )
+        self.assertIsNone(
+            await db.find_round_card(self.db_path, tid, "p2", 1)
+        )
 
     async def test_is_player_in_tee_time(self):
         tid = await self._tournament()

@@ -968,8 +968,7 @@ async def join_tee_time(db_path, tee_time_id, discord_id) -> str:
     """Returns 'ok', 'full', 'already', 'round_conflict', or 'missing'.
 
     'round_conflict': the player is already in a different tee time for the
-    same tournament round and hasn't played it yet (no submitted scorecard
-    covering them). One active tee time per player per round.
+    same tournament round. One tee time per player per round — no exceptions.
     """
     tt = await get_tee_time(db_path, tee_time_id)
     if tt is None:
@@ -977,7 +976,7 @@ async def join_tee_time(db_path, tee_time_id, discord_id) -> str:
     players = await get_tee_time_players(db_path, tee_time_id)
     if any(p["discord_id"] == discord_id for p in players):
         return "already"
-    conflict = await active_tee_time_for_round(
+    conflict = await tee_time_for_round(
         db_path, tt["tournament_id"], tt.get("round_number") or 1, discord_id,
         exclude_tee_time_id=tee_time_id,
     )
@@ -1019,32 +1018,14 @@ async def is_player_in_tee_time(db_path, tee_time_id, discord_id) -> bool:
     return row is not None
 
 
-async def player_has_submitted(db_path, tee_time_id, round_number,
-                               discord_id) -> bool:
-    """Has this player played this tee time + round? True when a scorecard
-    exists for the tee time/round covering them — their own card, or a team
-    card for a team they're on."""
-    row = await _fetchone(
-        db_path,
-        "SELECT 1 FROM scorecards s"
-        " WHERE s.tee_time_id = ? AND s.round_number = ?"
-        " AND (s.player_discord_id = ?"
-        "      OR (s.team_id IS NOT NULL AND EXISTS ("
-        "            SELECT 1 FROM team_members tm"
-        "            WHERE tm.team_id = s.team_id"
-        "              AND tm.player_discord_id = ?)))"
-        " LIMIT 1",
-        (tee_time_id, round_number, discord_id, discord_id),
-    )
-    return row is not None
+async def tee_time_for_round(db_path, tournament_id, round_number,
+                             discord_id,
+                             exclude_tee_time_id=None) -> dict | None:
+    """Another tee time in this tournament + round the player is in.
 
-
-async def active_tee_time_for_round(db_path, tournament_id, round_number,
-                                    discord_id,
-                                    exclude_tee_time_id=None) -> dict | None:
-    """Another tee time in this tournament + round the player is in but hasn't
-    played yet. A submitted scorecard completes the player's seat in a tee
-    time, so it no longer counts as active."""
+    One tee time per player per round — a submitted scorecard does NOT free
+    the player to join a second one, because nobody may play a round twice.
+    """
     rows = await _fetchall(
         db_path,
         "SELECT tt.* FROM tee_times tt"
@@ -1056,11 +1037,33 @@ async def active_tee_time_for_round(db_path, tournament_id, round_number,
     for tt in rows:
         if exclude_tee_time_id is not None and tt["id"] == exclude_tee_time_id:
             continue
-        if not await player_has_submitted(
-            db_path, tt["id"], round_number, discord_id
-        ):
-            return tt
+        return tt
     return None
+
+
+async def find_round_card(db_path, tournament_id, discord_id,
+                          round_number) -> dict | None:
+    """The scorecard covering this player for this tournament + round, in any
+    tee time — their own card, or a team card for a team they're on.
+
+    Enforces one scorecard per round per member: a second card for the same
+    round (even from a different tee time) is refused by the submit paths.
+    """
+    round_number = max(1, min(5, int(round_number or 1)))
+    return await _fetchone(
+        db_path,
+        "SELECT s.*, tt.label AS tee_time_label"
+        " FROM scorecards s JOIN tee_times tt ON tt.id = s.tee_time_id"
+        " WHERE s.tournament_id = ? AND s.round_number = ?"
+        " AND (s.player_discord_id = ?"
+        "      OR (s.team_id IS NOT NULL AND s.player_discord_id IS NULL"
+        "          AND EXISTS ("
+        "            SELECT 1 FROM team_members tm"
+        "            WHERE tm.team_id = s.team_id"
+        "              AND tm.player_discord_id = ?)))"
+        " ORDER BY s.submitted_at DESC LIMIT 1",
+        (tournament_id, round_number, discord_id, discord_id),
+    )
 
 
 async def leave_all_tee_times(db_path, tournament_id, discord_id) -> int:

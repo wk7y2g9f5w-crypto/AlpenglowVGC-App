@@ -634,6 +634,26 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     # Verification: 2+ players in the tee time = partners present.
     player_count = await db.tee_time_player_count(db_path, tt["id"])
     status = "verified" if player_count >= 2 else "pending"
+    # One scorecard per round per member: a card already submitted for this
+    # round (in any tee time — own card or a team card covering the player)
+    # blocks a second one.
+    owner_name = card_owner_id
+    for p in await db.get_tee_time_players(db_path, tt["id"]):
+        if p["discord_id"] == card_owner_id:
+            owner_name = p["display_name"]
+            break
+    who_name = f"**{owner_name}**" + (f" (team **{team_name}**)" if team_id else "")
+    round_card = await db.find_round_card(
+        db_path, t["id"], card_owner_id, round_number
+    )
+    if round_card is not None and round_card["tee_time_id"] != tt["id"]:
+        await interaction.followup.send(
+            f"❌ {who_name} already has a submitted card for Round "
+            f"{round_number} (in **{round_card['tee_time_label']}**). One "
+            "scorecard per round per player — nobody plays a round twice.",
+            ephemeral=True,
+        )
+        return
     # Crew-only edit rule: a submitted card can only be changed by crew
     # (admins, mods, tournament directors). First submissions stay open to
     # tee-time members.
@@ -656,11 +676,6 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     )
     await leaderboard_render.refresh_leaderboard(bot, db_path, t["id"])
 
-    owner_name = card_owner_id
-    for p in await db.get_tee_time_players(db_path, tt["id"]):
-        if p["discord_id"] == card_owner_id:
-            owner_name = p["display_name"]
-            break
     own_card = card_owner_id == submitter_id
     submitter_name = "you"
     if interaction.guild and not own_card:

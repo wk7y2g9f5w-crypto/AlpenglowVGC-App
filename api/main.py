@@ -890,9 +890,8 @@ async def create_tee_time(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Round {body.round_number} doesn't exist in this tournament.",
         )
-    # One active tee time per player per round (a submitted card completes
-    # the player's seat, so it no longer counts).
-    conflict = await db.active_tee_time_for_round(
+    # One tee time per player per round — no exceptions.
+    conflict = await db.tee_time_for_round(
         DB_PATH, t["id"], body.round_number, user["discord_id"]
     )
     if conflict is not None:
@@ -902,8 +901,8 @@ async def create_tee_time(
                 "code": "round_conflict",
                 "message": (
                     f"You're already in {conflict['label']} for "
-                    f"Round {body.round_number} — leave it first, or enter "
-                    "your card there."
+                    f"Round {body.round_number} — leave it first to create "
+                    "a different one."
                 ),
             },
         )
@@ -927,7 +926,7 @@ async def create_tee_time(
 @app.post("/api/tee-times/{tee_time_id}/join")
 async def join_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
     tt, t = await _tee_time_or_404(tee_time_id)
-    conflict = await db.active_tee_time_for_round(
+    conflict = await db.tee_time_for_round(
         DB_PATH, t["id"], tt.get("round_number") or 1, user["discord_id"],
         exclude_tee_time_id=tt["id"],
     )
@@ -939,7 +938,7 @@ async def join_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
                 "message": (
                     f"You're already in {conflict['label']} for "
                     f"Round {conflict.get('round_number') or 1} — leave it "
-                    "first, or enter your card there."
+                    "first to join this one."
                 ),
             },
         )
@@ -1275,7 +1274,7 @@ async def _decide(tee_time_id: int, req_id: int, accept: bool, user: CurrentUser
         if not await db.is_registered(DB_PATH, t["id"], requester):
             updated = await db.decide_join_request(DB_PATH, req_id, "declined", decider)
             return _join_request_json(updated)
-        other = await db.active_tee_time_for_round(
+        other = await db.tee_time_for_round(
             DB_PATH, t["id"], tt.get("round_number") or 1, requester,
             exclude_tee_time_id=tt["id"],
         )
@@ -1415,6 +1414,23 @@ async def put_scorecard(
                     ),
                 },
             )
+    # Gate 3e: one scorecard per round per member — a card already submitted
+    # for this round in another tee time blocks a second one.
+    round_card = await db.find_round_card(
+        DB_PATH, t["id"], body.player_discord_id, body.round_number
+    )
+    if round_card is not None and round_card["tee_time_id"] != tt["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "round_already_submitted",
+                "message": (
+                    f"A card for Round {body.round_number} was already "
+                    f"submitted in {round_card['tee_time_label']} — one "
+                    "scorecard per round per player."
+                ),
+            },
+        )
     # Gate 4: the tee time must have started (bot's tee-time gate).
     if not sl.tee_time_passed(tt.get("starts_at") or ""):
         raise HTTPException(

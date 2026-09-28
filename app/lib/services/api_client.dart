@@ -41,7 +41,9 @@ String friendlyApiMessage(ApiException e) {
     case 'round_ended':
       return 'That round has closed — scores are locked. Ask a crew member if a card still needs to go in.';
     case 'round_conflict':
-      return 'You\'re already in another tee time for that round — leave it first, or enter your card there.';
+      return 'You\'re already in another tee time for that round — leave it first to join this one.';
+    case 'round_already_submitted':
+      return 'A card for that round was already submitted — one scorecard per round per player.';
     default:
       return e.message;
   }

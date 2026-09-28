@@ -220,7 +220,7 @@ async def request_join_flow(interaction: discord.Interaction, tee_time_id: int) 
         return
     existing = await db.get_player_tee_time(db_path, t["id"], user_id)
     if existing and existing["id"] != tt["id"]:
-        active = await db.active_tee_time_for_round(
+        active = await db.tee_time_for_round(
             db_path, t["id"], tt.get("round_number") or 1, user_id,
             exclude_tee_time_id=tt["id"],
         )
@@ -362,7 +362,7 @@ async def _decide_join_request_flow(interaction: discord.Interaction, accept: bo
             ephemeral=True,
         )
         return
-    other = await db.active_tee_time_for_round(
+    other = await db.tee_time_for_round(
         db_path, t["id"], tt.get("round_number") or 1,
         req["player_discord_id"], exclude_tee_time_id=tt["id"],
     )
@@ -528,14 +528,14 @@ class TeeTimes(commands.Cog):
                 f"❌ Round {round} doesn't exist in **{t['name']}**.", ephemeral=True
             )
             return
-        conflict = await db.active_tee_time_for_round(
+        conflict = await db.tee_time_for_round(
             self.bot.db_path, t["id"], round, str(interaction.user.id)
         )
         if conflict is not None:
             await interaction.response.send_message(
                 f"❌ You're already in **{conflict['label']}** for Round {round} "
-                "(one tee time per player per round). Leave it first, or enter "
-                "your card there.",
+                "(one tee time per player per round). Leave it first to create "
+                "a different one.",
                 ephemeral=True,
             )
             return
