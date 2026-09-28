@@ -168,6 +168,13 @@ CREATE TABLE IF NOT EXISTS tournament_leaders(
 );
 CREATE INDEX IF NOT EXISTS idx_seasons_guild ON seasons(guild_id);
 CREATE INDEX IF NOT EXISTS idx_season_points_season ON season_points(season_id);
+CREATE TABLE IF NOT EXISTS outbox(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_kind ON outbox(kind);
 """
 
 
@@ -1160,4 +1167,43 @@ async def list_confirmed_matches_for_player(db_path, guild_id,
         " WHERE t.guild_id = ? AND m.status = 'confirmed'"
         " AND (m.player1 = ? OR m.player2 = ?)",
         (guild_id, discord_id, discord_id),
+    )
+
+
+# ------------------------------------------------------------------- outbox
+# Cross-process work queue: the API (which never touches Discord) enqueues
+# events here; the bot drains them on a timer and performs the Discord-side
+# effects (persistent views, board refreshes). Rows are deleted only after
+# successful handling, so a crash retries them — handlers must be idempotent.
+async def enqueue_outbox(db_path, kind: str, payload: dict) -> int:
+    lastrowid, _ = await _execute(
+        db_path,
+        "INSERT INTO outbox (kind, payload, created_at) VALUES (?,?,?)",
+        (kind, json.dumps(payload), utcnow_iso()),
+    )
+    return lastrowid
+
+
+async def poll_outbox(db_path, limit: int = 25) -> list[dict]:
+    rows = await _fetchall(
+        db_path, "SELECT * FROM outbox ORDER BY id ASC LIMIT ?", (limit,)
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["payload"] = json.loads(d.get("payload") or "{}")
+        except (ValueError, TypeError):
+            d["payload"] = {}
+        out.append(d)
+    return out
+
+
+async def ack_outbox(db_path, ids: list[int]) -> None:
+    if not ids:
+        return
+    await _execute(
+        db_path,
+        "DELETE FROM outbox WHERE id IN (%s)" % ",".join("?" for _ in ids),
+        tuple(ids),
     )

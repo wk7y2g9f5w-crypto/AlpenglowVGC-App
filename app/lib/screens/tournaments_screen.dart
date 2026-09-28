@@ -5,6 +5,7 @@ import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
 import 'tournament_detail_screen.dart';
+import 'create_tournament_screen.dart';
 
 /// Home tab: list of tournaments with pull-to-refresh.
 class TournamentsScreen extends StatefulWidget {
@@ -20,6 +21,7 @@ class TournamentsScreen extends StatefulWidget {
 
 class _TournamentsScreenState extends State<TournamentsScreen> {
   late Future<List<Tournament>> _future;
+  bool _isCrew = false;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -28,9 +30,19 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
   void initState() {
     super.initState();
     _future = _load();
+    _loadCrewFlag();
   }
 
   Future<List<Tournament>> _load() => _api.getTournaments();
+
+  Future<void> _loadCrewFlag() async {
+    try {
+      final me = await _api.getMe();
+      if (mounted) setState(() => _isCrew = me.isCrew);
+    } catch (_) {
+      // Not crew (or offline) — the create button just stays hidden.
+    }
+  }
 
   Future<void> _refresh() async {
     final f = _load();
@@ -42,6 +54,23 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Tournaments')),
+      floatingActionButton: _isCrew
+          ? FloatingActionButton.extended(
+              onPressed: () async {
+                final created = await Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => CreateTournamentScreen(
+                      auth: widget.auth,
+                      settings: widget.settings,
+                    ),
+                  ),
+                );
+                if (created == true) _refresh();
+              },
+              icon: const Icon(Icons.add),
+              label: const Text('New'),
+            )
+          : null,
       body: AsyncBody<List<Tournament>>(
         future: _future,
         onRefresh: _refresh,

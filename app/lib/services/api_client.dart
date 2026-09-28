@@ -119,6 +119,44 @@ class ApiClient {
         .toList();
   }
 
+  Future<Tournament> createTournament({
+    required String name,
+    required String format,
+    required int holes,
+    required String course,
+    required String startDate,
+    required String endDate,
+    String teePosition = 'middle',
+    String pinPosition = 'white',
+    String windStrength = 'moderate',
+    String greenSpeed = 'pro',
+    String? description,
+  }) async {
+    final body = await _post('/api/tournaments', {
+      'name': name,
+      'format': format,
+      'holes': holes,
+      'course': course,
+      'start_date': startDate,
+      'end_date': endDate,
+      'tee_position': teePosition,
+      'pin_position': pinPosition,
+      'wind_strength': windStrength,
+      'green_speed': greenSpeed,
+      if (description != null && description.isNotEmpty)
+        'description': description,
+    });
+    return Tournament.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<List<GolfCourse>> getCourses() async {
+    final body = await _get('/api/courses');
+    final list = body as List? ?? [];
+    return list
+        .map((e) => GolfCourse.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
   Future<Map<String, dynamic>> register(String tournamentId) async {
     final body = await _post('/api/tournaments/$tournamentId/register');
     return (body as Map<String, dynamic>? ?? {});

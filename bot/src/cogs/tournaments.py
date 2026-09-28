@@ -3,7 +3,7 @@ from typing import Literal, Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from src import db
 from src import golfplus_courses
@@ -64,6 +64,46 @@ class Tournaments(commands.Cog):
             self.bot.db_path, ["registration_open"]
         ):
             self.bot.add_view(RegisterView(t["id"]))
+        self._drain_outbox.start()
+
+    async def cog_unload(self):
+        self._drain_outbox.cancel()
+
+    @tasks.loop(minutes=1)
+    async def _drain_outbox(self):
+        """Pick up tournaments created via the companion app API.
+
+        The API can't touch Discord, so it enqueues a tournament_created
+        event; here we attach the persistent Register button and refresh
+        the Tee Sheet board. Idempotent: re-adding an existing view and
+        re-refreshing the board are harmless.
+        """
+        try:
+            rows = await db.poll_outbox(self.bot.db_path)
+        except Exception as e:  # noqa: BLE001 - outbox drain is best-effort
+            print(f"outbox drain failed: {e}")
+            return
+        done = []
+        for row in rows:
+            try:
+                if row["kind"] == "tournament_created":
+                    tid = int(row["payload"].get("tournament_id", 0))
+                    t = await db.get_tournament(self.bot.db_path, tid)
+                    if t and t["status"] == "registration_open":
+                        self.bot.add_view(RegisterView(tid))
+                        await ts.maybe_refresh(self.bot, t["guild_id"])
+                done.append(row["id"])
+            except Exception as e:  # noqa: BLE001 - one bad row skips, rest drain
+                print(f"outbox row {row['id']} failed: {e}")
+        if done:
+            try:
+                await db.ack_outbox(self.bot.db_path, done)
+            except Exception as e:  # noqa: BLE001
+                print(f"outbox ack failed: {e}")
+
+    @_drain_outbox.before_loop
+    async def _drain_outbox_before(self):
+        await self.bot.wait_until_ready()
 
     tournament = app_commands.Group(
         name="tournament", description="Create and manage tournaments"

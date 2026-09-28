@@ -4,6 +4,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import '../widgets/score_badge.dart';
 
 /// Native score entry screen mirroring the Discord bot's tap-to-enter UI.
 ///
@@ -253,26 +254,60 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
             ],
           ),
         ),
-        // Hole strip.
+        // Hole strip: hole number + score in standard golf notation
+        // (circle = birdie, square = bogey, double ring/square for
+        // eagle/double+). Tap a hole to jump to it.
         SizedBox(
-          height: 56,
+          height: 70,
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             itemCount: _holeCount,
             itemBuilder: (context, i) {
-              final filled = _scores[i] != null;
+              final score = _scores[i];
+              final holePar = pars != null ? pars[i] : null;
               final current = i == _hole;
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: ChoiceChip(
-                  label: Text('${i + 1}'),
-                  selected: current,
-                  onSelected: (_) => setState(() => _hole = i),
-                  avatar: filled
-                      ? Text('${_scores[i]}',
-                          style: const TextStyle(fontSize: 11))
-                      : null,
+              final scheme = Theme.of(context).colorScheme;
+              return GestureDetector(
+                onTap: () => setState(() => _hole = i),
+                child: Container(
+                  width: 54,
+                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                  decoration: BoxDecoration(
+                    color: current ? scheme.primaryContainer : null,
+                    borderRadius: BorderRadius.circular(10),
+                    border: current
+                        ? Border.all(color: scheme.primary, width: 1.5)
+                        : null,
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        '${i + 1}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: scheme.onSurfaceVariant,
+                          fontWeight:
+                              current ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      score != null
+                          ? ScoreBadge(score: score, par: holePar, size: 30)
+                          : Container(
+                              width: 30,
+                              height: 30,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: scheme.outlineVariant,
+                                  width: 1,
+                                ),
+                              ),
+                            ),
+                    ],
+                  ),
                 ),
               );
             },

@@ -7,8 +7,10 @@ and Discord always agree.
 
 This service NEVER modifies the bot's behavior: it shares the one SQLite
 file, keeps transactions short (the bot's db layer opens a fresh connection
-per call), and never touches Discord roles/channels/messages (bot-only
-side effects are skipped).
+per call), and never writes to Discord (channels/messages/roles are
+bot-only). The one exception is a read-only lookup of the caller's guild
+roles via Discord's REST API, used solely to gate admin-only endpoints —
+mirroring the bot's own admin/mod/Tournament Director check.
 
 Auth: every request except /api/health needs
 ``Authorization: Bearer <discord_user_oauth_token>``. The token is validated
@@ -42,6 +44,7 @@ from src import db  # noqa: E402
 from src import config  # noqa: E402
 from src import scoring_logic as sl  # noqa: E402
 from src import leaderboard_render as lr  # noqa: E402
+from src import golfplus_courses as gc  # noqa: E402
 from src.cogs.teetimes import parse_in_tz  # noqa: E402  (pure helper, no Discord I/O)
 from src.cogs.stats import _parse_pars  # noqa: E402  (pure helper, no Discord I/O)
 
@@ -119,6 +122,85 @@ CurrentUser = Annotated[dict, Depends(get_current_user)]
 
 
 # --------------------------------------------------------------------------
+# Crew (admin/mod) gating
+# --------------------------------------------------------------------------
+# Mirrors the bot's admin model (cogs/common.py is_admin): the "Tournament
+# Admin" role, the "Tournament Director" role, or Manage Server permission —
+# plus the "Mod" and "Admin" crew roles, since the app's admin surface is
+# meant for any admin/moderator. Read-only Discord REST lookup; the API
+# never writes to Discord.
+CREW_ROLE_NAMES = frozenset(
+    {"Tournament Admin", "Admin", "Mod", "Tournament Director"}
+)
+_MANAGE_GUILD_BIT = 1 << 5
+
+
+async def fetch_crew_status(discord_id: str) -> bool | None:
+    """Is this Discord user crew (admin/mod/director) in the guild?
+
+    Returns True/False when Discord answered, None when the check could not
+    be performed (no bot token configured, network/Discord failure). Single
+    function so unit tests can monkeypatch it.
+    """
+    bot_token = os.environ.get("DISCORD_TOKEN")
+    guild_id = os.environ.get("GUILD_ID") or str(config.GUILD_ID or "")
+    if not bot_token or not guild_id:
+        return None
+    headers = {"Authorization": f"Bot {bot_token}"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            member_resp = await client.get(
+                f"https://discord.com/api/v10/guilds/{guild_id}"
+                f"/members/{discord_id}",
+                headers=headers,
+            )
+            if member_resp.status_code != 200:
+                return None
+            member = member_resp.json()
+            try:
+                if int(member.get("permissions", "0")) & _MANAGE_GUILD_BIT:
+                    return True
+            except (TypeError, ValueError):
+                pass
+            roles_resp = await client.get(
+                f"https://discord.com/api/v10/guilds/{guild_id}/roles",
+                headers=headers,
+            )
+            if roles_resp.status_code != 200:
+                return None
+            member_role_ids = set(member.get("roles") or [])
+            names = {
+                r["name"]
+                for r in roles_resp.json()
+                if r.get("id") in member_role_ids
+            }
+            return bool(names & CREW_ROLE_NAMES)
+    except httpx.HTTPError:
+        return None
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+async def require_crew(user: CurrentUser) -> dict:
+    """Dependency: 403 unless the caller is crew, 503 when unverifiable."""
+    ok = await fetch_crew_status(user["discord_id"])
+    if ok is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify crew status — try again shortly.",
+        )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Crew only: requires an admin/moderator role.",
+        )
+    return user
+
+
+CrewUser = Annotated[dict, Depends(require_crew)]
+
+
+# --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 def utc_iso(value: str | None) -> str | None:
@@ -190,6 +272,13 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
 
 
 def _tournament_json(t: dict, registered: bool) -> dict:
+    pars_csv = t.get("pars")
+    pars = None
+    if pars_csv:
+        try:
+            pars = [int(p) for p in str(pars_csv).split(",") if p.strip()]
+        except ValueError:
+            pars = None
     return {
         "id": t["id"],
         "name": t["name"],
@@ -203,6 +292,7 @@ def _tournament_json(t: dict, registered: bool) -> dict:
         "pin_position": t.get("pin_position"),
         "wind_strength": t.get("wind_strength"),
         "green_speed": t.get("green_speed"),
+        "pars": pars,
         "registered": registered,
     }
 
@@ -255,6 +345,85 @@ class ScorecardSubmit(BaseModel):
 class PlayerUpdate(BaseModel):
     timezone: str | None = None
     golfplus_handle: str | None = None
+
+
+class TournamentCreate(BaseModel):
+    """Mirrors /tournament create: same fields, same validation, same defaults."""
+
+    name: str
+    format: str  # validated against the bot's FORMAT ids below
+    holes: int
+    course: str
+    start_date: str  # YYYY-MM-DD
+    end_date: str  # YYYY-MM-DD
+    tee_position: str = "middle"
+    pin_position: str = "white"
+    wind_strength: str = "moderate"
+    green_speed: str = "pro"
+    pars: str | None = None  # comma-separated override; auto-filled when omitted
+    description: str | None = None
+
+    @field_validator("name", "course")
+    @classmethod
+    def _nonempty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("must be non-empty")
+        return v[:80]
+
+    @field_validator("format")
+    @classmethod
+    def _known_format(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in ("stroke", "match", "best_ball", "alt_shot", "scramble"):
+            raise ValueError(f"Unknown format '{v}'")
+        return v
+
+    @field_validator("holes")
+    @classmethod
+    def _nine_or_eighteen(cls, v: int) -> int:
+        if v not in (9, 18):
+            raise ValueError("holes must be 9 or 18")
+        return v
+
+    @field_validator("tee_position")
+    @classmethod
+    def _tee(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in ("front", "middle", "back"):
+            raise ValueError(f"Unknown tee position '{v}'")
+        return v
+
+    @field_validator("pin_position")
+    @classmethod
+    def _pin(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in ("black", "white", "red"):
+            raise ValueError(f"Unknown pin position '{v}'")
+        return v
+
+    @field_validator("wind_strength")
+    @classmethod
+    def _wind(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in ("low", "moderate", "severe"):
+            raise ValueError(f"Unknown wind strength '{v}'")
+        return v
+
+    @field_validator("green_speed")
+    @classmethod
+    def _green(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in ("veryfast", "pro"):
+            raise ValueError(f"Unknown green speed '{v}'")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def _desc_len(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip()[:500] or None
 
 
 # --------------------------------------------------------------------------
@@ -331,6 +500,23 @@ async def oauth_callback(request: Request):
 # --------------------------------------------------------------------------
 # Tournaments
 # --------------------------------------------------------------------------
+@app.get("/api/courses")
+async def list_courses(user: CurrentUser) -> list[dict]:
+    """Golf+ course catalog with official hole-by-hole pars.
+
+    Used by the app's tournament-creation picker and score-entry
+    indicators. Pars come from the bot's verified course database.
+    """
+    return [
+        {
+            "name": name,
+            "pars": list(gc.COURSE_PARS[name]),
+            "par_total": sum(gc.COURSE_PARS[name]),
+        }
+        for name in gc.COURSES
+    ]
+
+
 @app.get("/api/tournaments")
 async def list_tournaments(user: CurrentUser) -> list[dict]:
     rows = await db.list_tournaments(DB_PATH, GUILD_ID)
@@ -339,6 +525,59 @@ async def list_tournaments(user: CurrentUser) -> list[dict]:
         registered = await db.is_registered(DB_PATH, t["id"], user["discord_id"])
         out.append(_tournament_json(t, registered))
     return out
+
+
+@app.post("/api/tournaments", status_code=status.HTTP_201_CREATED)
+async def create_tournament(body: TournamentCreate, user: CrewUser) -> dict:
+    """Create a tournament (crew only). Mirrors /tournament create.
+
+    Pars auto-fill from the course database for known courses, exactly
+    like the bot. The bot picks the new tournament up from the outbox
+    within a minute: it attaches the persistent Register button and
+    refreshes the Tee Sheet board.
+    """
+    try:
+        start_d, end_d = sl.validate_date_range(body.start_date, body.end_date)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
+
+    pars_clean = None
+    if body.pars:
+        try:
+            parsed = sl.parse_pars(body.pars, body.holes)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Bad pars: {e}",
+            )
+        pars_clean = ",".join(str(p) for p in parsed)
+    else:
+        auto = gc.course_pars(body.course, body.holes)
+        if auto:
+            pars_clean = ",".join(str(p) for p in auto)
+
+    tid = await db.create_tournament(
+        DB_PATH,
+        GUILD_ID,
+        body.name,
+        body.format,
+        body.holes,
+        body.course,
+        pars_clean,
+        body.description,
+        user["discord_id"],
+        start_date=start_d.isoformat(),
+        end_date=end_d.isoformat(),
+        tee_position=body.tee_position,
+        pin_position=body.pin_position,
+        wind_strength=body.wind_strength,
+        green_speed=body.green_speed,
+    )
+    await db.enqueue_outbox(DB_PATH, "tournament_created", {"tournament_id": tid})
+    t = await db.get_tournament(DB_PATH, tid)
+    return _tournament_json(t, registered=False)
 
 
 @app.post("/api/tournaments/{tournament_id}/register")
@@ -733,18 +972,20 @@ async def season_standings(user: CurrentUser) -> dict:
 # --------------------------------------------------------------------------
 # Player profile
 # --------------------------------------------------------------------------
-def _profile_json(row: dict) -> dict:
+def _profile_json(row: dict, is_crew: bool = False) -> dict:
     return {
         "discord_id": row["discord_id"],
         "display_name": row["display_name"],
         "golfplus_handle": row.get("golfplus_handle"),
         "timezone": row.get("timezone"),
+        "is_crew": is_crew,
     }
 
 
 @app.get("/api/players/me")
 async def get_me(user: CurrentUser) -> dict:
-    return _profile_json(user)
+    crew = await fetch_crew_status(user["discord_id"])
+    return _profile_json(user, is_crew=bool(crew))
 
 
 @app.patch("/api/players/me")

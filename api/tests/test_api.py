@@ -34,6 +34,11 @@ async def fake_fetch_discord_user(token: str):
     return None
 
 
+async def fake_fetch_crew_status(discord_id: str):
+    """Default: not crew. Tests override per-case via self._crew(value)."""
+    return False
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -49,6 +54,7 @@ class ApiTestCase(unittest.TestCase):
         main.DB_PATH = self.db_path
         main.GUILD_ID = GUILD
         main.fetch_discord_user = fake_fetch_discord_user
+        main.fetch_crew_status = fake_fetch_crew_status
         self.client = None
         self._enter_client()
 
@@ -664,6 +670,135 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(s["rounds_played"], 0)
         self.assertIsNone(s["best_total"])
         self.assertEqual(s["match_record"], {"wins": 0, "losses": 0, "ties": 0})
+
+    # -- courses ------------------------------------------------------
+    def test_courses_no_auth_401(self):
+        r = self.client.get("/api/courses")
+        self.assertEqual(r.status_code, 401)
+
+    def test_list_courses(self):
+        r = self.client.get("/api/courses", headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        courses = r.json()
+        self.assertEqual(len(courses), 18)
+        pebble = next(
+            c for c in courses if c["name"] == "Pebble Beach Golf Links")
+        self.assertEqual(len(pebble["pars"]), 18)
+        self.assertEqual(pebble["par_total"], sum(pebble["pars"]))
+        self.assertEqual(pebble["par_total"], 72)
+
+    # -- create tournament (crew-gated) --------------------------------
+    def _crew(self, value):
+        async def fake(discord_id):
+            return value
+        main.fetch_crew_status = fake
+
+    def _create_body(self, **over):
+        body = {
+            "name": "App Open",
+            "format": "stroke",
+            "holes": 18,
+            "course": "Pebble Beach Golf Links",
+            "start_date": "2026-10-03",
+            "end_date": "2026-10-10",
+        }
+        body.update(over)
+        return body
+
+    def test_create_tournament_403_not_crew(self):
+        self._crew(False)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body())
+        self.assertEqual(r.status_code, 403, r.text)
+
+    def test_create_tournament_503_unverifiable(self):
+        self._crew(None)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body())
+        self.assertEqual(r.status_code, 503, r.text)
+
+    def test_create_tournament_happy_autofills_pars(self):
+        self._crew(True)
+        r = self.client.post(
+            "/api/tournaments", headers=self.h("123"),
+            json=self._create_body(
+                tee_position="back", pin_position="black",
+                wind_strength="severe", green_speed="veryfast",
+                description="created from the app"))
+        self.assertEqual(r.status_code, 201, r.text)
+        t = r.json()
+        self.assertEqual(t["name"], "App Open")
+        self.assertEqual(t["status"], "registration_open")
+        self.assertEqual(t["tee_position"], "back")
+        self.assertEqual(t["pin_position"], "black")
+        self.assertEqual(t["wind_strength"], "severe")
+        self.assertEqual(t["green_speed"], "veryfast")
+        # Pars auto-filled from the course database.
+        row = run(db.get_tournament(self.db_path, t["id"]))
+        self.assertEqual(len(row["pars"].split(",")), 18)
+        # Outbox row enqueued for the bot to pick up.
+        outbox = run(db.poll_outbox(self.db_path))
+        self.assertEqual(len(outbox), 1)
+        self.assertEqual(outbox[0]["kind"], "tournament_created")
+        self.assertEqual(outbox[0]["payload"]["tournament_id"], t["id"])
+
+    def test_create_tournament_round_setting_defaults(self):
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body())
+        self.assertEqual(r.status_code, 201, r.text)
+        t = r.json()
+        self.assertEqual(t["tee_position"], "middle")
+        self.assertEqual(t["pin_position"], "white")
+        self.assertEqual(t["wind_strength"], "moderate")
+        self.assertEqual(t["green_speed"], "pro")
+
+    def test_create_tournament_explicit_pars(self):
+        self._crew(True)
+        pars = ",".join(["4"] * 18)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(pars=pars))
+        self.assertEqual(r.status_code, 201, r.text)
+        row = run(db.get_tournament(self.db_path, r.json()["id"]))
+        self.assertEqual(row["pars"], pars)
+
+    def test_create_tournament_bad_dates_400(self):
+        self._crew(True)
+        r = self.client.post(
+            "/api/tournaments", headers=self.h("123"),
+            json=self._create_body(start_date="2026-10-10",
+                                   end_date="2026-10-03"))
+        self.assertEqual(r.status_code, 400, r.text)
+
+    def test_create_tournament_bad_pars_400(self):
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(pars="4,4,4"))
+        self.assertEqual(r.status_code, 400, r.text)
+
+    def test_create_tournament_bad_format_422(self):
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(format="stableford"))
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_create_tournament_nine_holes_autofills_front_nine(self):
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(holes=9))
+        self.assertEqual(r.status_code, 201, r.text)
+        row = run(db.get_tournament(self.db_path, r.json()["id"]))
+        self.assertEqual(len(row["pars"].split(",")), 9)
+
+    # -- profile crew flag ---------------------------------------------
+    def test_me_includes_is_crew(self):
+        self._crew(True)
+        r = self.client.get("/api/players/me", headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["is_crew"])
+        self._crew(False)
+        r = self.client.get("/api/players/me", headers=self.h("123"))
+        self.assertFalse(r.json()["is_crew"])
 
 
 if __name__ == "__main__":

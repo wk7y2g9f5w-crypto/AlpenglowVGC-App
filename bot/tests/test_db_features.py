@@ -77,6 +77,32 @@ class TempDbTest(unittest.IsolatedAsyncioTestCase):
         return tt_id
 
 
+class TestOutbox(TempDbTest):
+    async def test_enqueue_poll_ack_roundtrip(self):
+        self.assertEqual(await db.poll_outbox(self.db_path), [])
+        oid = await db.enqueue_outbox(
+            self.db_path, "tournament_created", {"tournament_id": 7})
+        self.assertIsInstance(oid, int)
+        rows = await db.poll_outbox(self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "tournament_created")
+        self.assertEqual(rows[0]["payload"], {"tournament_id": 7})
+        await db.ack_outbox(self.db_path, [rows[0]["id"]])
+        self.assertEqual(await db.poll_outbox(self.db_path), [])
+
+    async def test_bad_payload_json_survives(self):
+        await db._execute(
+            self.db_path,
+            "INSERT INTO outbox (kind, payload, created_at) VALUES (?,?,?)",
+            ("tournament_created", "not-json{{{", db.utcnow_iso()),
+        )
+        rows = await db.poll_outbox(self.db_path)
+        self.assertEqual(rows[0]["payload"], {})
+
+    async def test_ack_empty_is_noop(self):
+        await db.ack_outbox(self.db_path, [])
+
+
 class TestMigration(TempDbTest):
     async def test_old_db_gets_dates_and_scramble(self):
         # Build a legacy database (pre-dates, pre-scramble) by hand.

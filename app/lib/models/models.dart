@@ -195,12 +195,14 @@ class PlayerMe {
   final String displayName;
   final String? golfplusHandle;
   final String? timezone;
+  final bool isCrew;
 
   PlayerMe({
     required this.discordId,
     required this.displayName,
     this.golfplusHandle,
     this.timezone,
+    this.isCrew = false,
   });
 
   factory PlayerMe.fromJson(Map<String, dynamic> j) => PlayerMe(
@@ -208,5 +210,23 @@ class PlayerMe {
         displayName: (j['display_name'] ?? j['discord_id']).toString(),
         golfplusHandle: j['golfplus_handle']?.toString(),
         timezone: j['timezone']?.toString(),
+        isCrew: j['is_crew'] == true,
+      );
+}
+
+/// A Golf+ course with official hole-by-hole pars, from /api/courses.
+class GolfCourse {
+  final String name;
+  final List<int> pars;
+
+  GolfCourse({required this.name, required this.pars});
+
+  int get parTotal => pars.fold(0, (a, b) => a + b);
+
+  factory GolfCourse.fromJson(Map<String, dynamic> j) => GolfCourse(
+        name: j['name'].toString(),
+        pars: ((j['pars'] as List?) ?? [])
+            .map((e) => (e as num).toInt())
+            .toList(growable: false),
       );
 }
