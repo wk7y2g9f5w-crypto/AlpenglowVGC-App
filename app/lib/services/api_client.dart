@@ -507,4 +507,86 @@ class ApiClient {
         .map((e) => AltShotRecord.fromJson(e as Map<String, dynamic>))
         .toList();
   }
+
+  // ------------------------------------------------------------ match-play
+  Future<List<MatchPlayTeeTime>> listMatchPlayTeeTimes() async {
+    final body = await _get('/api/matchplay/tee-times');
+    final items = (body as Map<String, dynamic>)['tee_times'] as List;
+    return items
+        .map((e) => MatchPlayTeeTime.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<MatchPlayTeeTime> getMatchPlayTeeTime(String id) async {
+    final body = await _get('/api/matchplay/tee-times/$id');
+    return MatchPlayTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<MatchPlayTeeTime> createMatchPlayTeeTime(
+      Map<String, dynamic> payload) async {
+    final body = await _post('/api/matchplay/tee-times', payload);
+    return MatchPlayTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<MatchPlayTeeTime> updateMatchPlayTeeTime(
+      String id, Map<String, dynamic> payload) async {
+    final body = await _patch('/api/matchplay/tee-times/$id', payload);
+    return MatchPlayTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<void> deleteMatchPlayTeeTime(String id) async {
+    await _delete('/api/matchplay/tee-times/$id');
+  }
+
+  Future<MatchPlayTeeTime> joinMatchPlayTeeTime(String id,
+      {int sideNumber = 1}) async {
+    final body = await _post('/api/matchplay/tee-times/$id/join',
+        {'side_number': sideNumber});
+    return MatchPlayTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<MatchPlayTeeTime> leaveMatchPlayTeeTime(String id) async {
+    final body = await _post('/api/matchplay/tee-times/$id/leave');
+    return MatchPlayTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  Future<MatchPlayScore?> getMatchPlayScore(String id) async {
+    final body = await _get('/api/matchplay/tee-times/$id/score');
+    final s = (body as Map<String, dynamic>)['score'];
+    return s == null
+        ? null
+        : MatchPlayScore.fromJson(s as Map<String, dynamic>);
+  }
+
+  /// Live-save the 18 hole results (+1 / -1 / 0 / null). The server
+  /// recomputes lead, status, and result text on every save.
+  Future<MatchPlayScore> saveMatchPlayScore(
+      String id, List<int?> holeResults) async {
+    final body = await _put('/api/matchplay/tee-times/$id/score',
+        {'hole_results': holeResults});
+    return MatchPlayScore.fromJson(
+        (body as Map<String, dynamic>)['score'] as Map<String, dynamic>);
+  }
+
+  Future<void> deleteMatchPlayScore(String id) async {
+    await _delete('/api/matchplay/tee-times/$id/score');
+  }
+
+  Future<List<MatchPlayRecord>> getMatchPlayRecords(String course,
+      {String teePosition = 'back',
+      String pinPosition = 'black',
+      String windStrength = 'moderate',
+      String greenSpeed = 'pro'}) async {
+    final body = await _get('/api/matchplay/records', {
+      'course': course,
+      'tee_position': teePosition,
+      'pin_position': pinPosition,
+      'wind_strength': windStrength,
+      'green_speed': greenSpeed,
+    });
+    final items = (body as Map<String, dynamic>)['records'] as List;
+    return items
+        .map((e) => MatchPlayRecord.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
 }

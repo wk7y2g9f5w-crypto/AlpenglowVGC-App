@@ -318,6 +318,75 @@ CREATE TABLE IF NOT EXISTS altshot_scores(
   submitted_by TEXT NOT NULL,
   submitted_at TEXT NOT NULL
 );
+
+-- Match-play records: head-to-head (single) or best-ball team matches.
+-- Every tee time has exactly 2 sides. 'single' = 1 player per side;
+-- 'bestball' = team_size (2-4) players per side, same size both sides,
+-- with an optional team name per side. All participants must be registered
+-- app users (Discord-linked) — win/loss records need identity, so there
+-- are no text-name guests. Both sides must be full before any score can be
+-- saved. Scores are live (hole-by-hole); the server auto-completes the
+-- match when the result is decided (3&2, 2 UP, All Square, ...).
+-- matchplay_records holds per-player W-L-T tallies keyed by course+setup.
+CREATE TABLE IF NOT EXISTS matchplay_tee_times(
+  id TEXT PRIMARY KEY,
+  creator_discord_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  course TEXT NOT NULL,
+  pars TEXT NOT NULL,
+  tee_position TEXT NOT NULL DEFAULT 'back',
+  pin_position TEXT NOT NULL DEFAULT 'black',
+  wind_strength TEXT NOT NULL DEFAULT 'moderate',
+  green_speed TEXT NOT NULL DEFAULT 'pro',
+  starts_at TEXT NOT NULL,
+  format TEXT NOT NULL DEFAULT 'single',
+  team_size INTEGER NOT NULL DEFAULT 1,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS matchplay_sides(
+  id TEXT PRIMARY KEY,
+  tee_time_id TEXT NOT NULL,
+  side_number INTEGER NOT NULL,
+  team_name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE (tee_time_id, side_number)
+);
+CREATE INDEX IF NOT EXISTS idx_matchplay_sides_tt
+  ON matchplay_sides(tee_time_id);
+CREATE TABLE IF NOT EXISTS matchplay_side_members(
+  id TEXT PRIMARY KEY,
+  side_id TEXT NOT NULL,
+  discord_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (side_id, discord_id)
+);
+CREATE INDEX IF NOT EXISTS idx_matchplay_side_members_side
+  ON matchplay_side_members(side_id);
+CREATE TABLE IF NOT EXISTS matchplay_scores(
+  tee_time_id TEXT PRIMARY KEY,
+  hole_results TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'in_progress',
+  winner_side INTEGER,
+  result_text TEXT NOT NULL DEFAULT '',
+  submitted_by TEXT NOT NULL,
+  submitted_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS matchplay_records(
+  id TEXT PRIMARY KEY,
+  course TEXT NOT NULL,
+  tee_position TEXT NOT NULL,
+  pin_position TEXT NOT NULL,
+  wind_strength TEXT NOT NULL,
+  green_speed TEXT NOT NULL,
+  discord_id TEXT NOT NULL,
+  player_name TEXT NOT NULL DEFAULT '',
+  wins INTEGER NOT NULL DEFAULT 0,
+  losses INTEGER NOT NULL DEFAULT 0,
+  ties INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (course, tee_position, pin_position, wind_strength, green_speed,
+          discord_id)
+);
 """
 
 
@@ -2815,5 +2884,550 @@ async def get_altshot_records(db_path, course: str,
             "wind_strength": r["wind_strength"],
             "green_speed": r["green_speed"],
             "submitted_at": r["submitted_at"],
+        })
+    return records
+
+
+# ---------------------------------------------------------------- match-play
+class MatchPlayError(Exception):
+    """Match-play domain errors. str(e) is one of:
+    'not_found', 'bad_format', 'bad_team_size', 'bad_side', 'full',
+    'already_in', 'sides_not_full', 'bad_results'."""
+
+
+def matchplay_outcome(hole_results: list) -> dict:
+    """Pure match-play result computation from an 18-list of nullable ints
+    (1 = side 1 wins the hole, -1 = side 2 wins, 0 = halved).
+
+    lead is side-1's net holes won; remaining = holes not yet played."""
+    played = sum(1 for r in hole_results if r is not None)
+    lead = sum(r for r in hole_results if r is not None)
+    remaining = 18 - played
+    base = {"lead": lead, "played": played, "remaining": remaining}
+    if remaining > 0:
+        if lead > remaining:
+            return {**base, "status": "completed", "winner_side": 1,
+                    "result_text": f"{lead}&{remaining}"}
+        if -lead > remaining:
+            return {**base, "status": "completed", "winner_side": 2,
+                    "result_text": f"{-lead}&{remaining}"}
+    if played == 18:
+        if lead > 0:
+            return {**base, "status": "completed", "winner_side": 1,
+                    "result_text": f"{lead} UP"}
+        if lead < 0:
+            return {**base, "status": "completed", "winner_side": 2,
+                    "result_text": f"{-lead} UP"}
+        return {**base, "status": "completed", "winner_side": None,
+                "result_text": "All Square"}
+    return {**base, "status": "in_progress", "winner_side": None,
+            "result_text": ""}
+
+
+def matchplay_live_text(outcome: dict, side1_name: str,
+                        side2_name: str) -> str:
+    """Human status line. Completed matches get a result banner
+    ('Alumec wins 3&2' / 'All Square'); live matches get the UP / Dormie /
+    All Square line."""
+    if outcome["status"] == "completed":
+        if outcome["winner_side"] == 1:
+            return f"{side1_name} wins {outcome['result_text']}"
+        if outcome["winner_side"] == 2:
+            return f"{side2_name} wins {outcome['result_text']}"
+        return "All Square"
+    lead, remaining = outcome["lead"], outcome["remaining"]
+    if lead == 0:
+        return "All Square"
+    if remaining > 0 and abs(lead) == remaining:
+        return "Dormie"
+    if lead > 0:
+        return f"{side1_name} {lead} UP"
+    return f"{side2_name} {-lead} UP"
+
+
+async def _matchplay_side_members(db_path, side_id: str) -> list[dict]:
+    return await _fetchall(
+        db_path,
+        "SELECT * FROM matchplay_side_members WHERE side_id = ?"
+        " ORDER BY created_at",
+        (side_id,))
+
+
+async def _matchplay_member_names(db_path, members: list[dict]) -> list[str]:
+    names = []
+    for m in members:
+        player = await get_player(db_path, m["discord_id"])
+        names.append(display_name_of(player, m["discord_id"]))
+    return names
+
+
+async def _matchplay_side_json(db_path, side: dict) -> dict:
+    members = await _matchplay_side_members(db_path, side["id"])
+    names = await _matchplay_member_names(db_path, members)
+    team_name = (side.get("team_name") or "").strip()
+    return {
+        "id": side["id"],
+        "side_number": side["side_number"],
+        "team_name": team_name,
+        "member_discord_ids": [m["discord_id"] for m in members],
+        "member_names": names,
+        "size": len(names),
+        "display_name": team_name if team_name else " & ".join(names),
+    }
+
+
+async def _matchplay_score_json(db_path, tt: dict,
+                                score: dict | None) -> dict | None:
+    """Score row enriched with computed outcome fields and the live-text
+    banner. None when no score has been saved yet."""
+    if not score:
+        return None
+    import json
+    sides = await _fetchall(
+        db_path,
+        "SELECT * FROM matchplay_sides WHERE tee_time_id = ?"
+        " ORDER BY side_number",
+        (tt["id"],))
+    side_jsons = [await _matchplay_side_json(db_path, s) for s in sides]
+    s1 = side_jsons[0]["display_name"] if side_jsons else "Side 1"
+    s2 = (side_jsons[1]["display_name"] if len(side_jsons) > 1
+          else "Side 2")
+    results = json.loads(score["hole_results"])
+    outcome = matchplay_outcome(results)
+    return {
+        "hole_results": results,
+        "status": score["status"],
+        "winner_side": score["winner_side"],
+        "result_text": score["result_text"],
+        "lead": outcome["lead"],
+        "played": outcome["played"],
+        "remaining": outcome["remaining"],
+        "live_text": matchplay_live_text(
+            {"status": score["status"],
+             "winner_side": score["winner_side"],
+             "result_text": score["result_text"],
+             "lead": outcome["lead"],
+             "played": outcome["played"],
+             "remaining": outcome["remaining"]},
+            s1 or "Side 1", s2 or "Side 2"),
+        "submitted_by": score["submitted_by"],
+        "submitted_at": score["submitted_at"],
+    }
+
+
+async def _matchplay_tee_time_json(db_path, row: dict) -> dict:
+    sides = await _fetchall(
+        db_path,
+        "SELECT * FROM matchplay_sides WHERE tee_time_id = ?"
+        " ORDER BY side_number",
+        (row["id"],))
+    side_jsons = [await _matchplay_side_json(db_path, s) for s in sides]
+    cap = 1 if row["format"] == "single" else (row["team_size"] or 2)
+    score = await _fetchone(
+        db_path, "SELECT * FROM matchplay_scores WHERE tee_time_id = ?",
+        (row["id"],))
+    return {
+        "id": row["id"],
+        "creator_discord_id": row["creator_discord_id"],
+        "label": row["label"],
+        "course": row["course"],
+        "pars": row["pars"],
+        "tee_position": row["tee_position"],
+        "pin_position": row["pin_position"],
+        "wind_strength": row["wind_strength"],
+        "green_speed": row["green_speed"],
+        "starts_at": row["starts_at"],
+        "format": row["format"],
+        "team_size": row["team_size"],
+        "side_cap": cap,
+        "notes": row["notes"],
+        "created_at": row["created_at"],
+        "sides": side_jsons,
+        "both_full": all(s["size"] >= cap for s in side_jsons)
+        and len(side_jsons) == 2,
+        "score": await _matchplay_score_json(db_path, row, score),
+    }
+
+
+async def create_matchplay_tee_time(
+    db_path, creator_discord_id: str, label: str, course: str, pars: str,
+    tee_position: str = "back", pin_position: str = "black",
+    wind_strength: str = "moderate", green_speed: str = "pro",
+    starts_at: str = "", format: str = "single", team_size: int = 1,
+    notes: str = "", side1_team_name: str = "",
+    side2_team_name: str = "",
+) -> str:
+    import uuid
+    if format not in ("single", "bestball"):
+        raise MatchPlayError("bad_format")
+    if format == "single":
+        if team_size not in (1, None):
+            raise MatchPlayError("bad_team_size")
+        team_size = 1
+    elif team_size not in (2, 3, 4):
+        raise MatchPlayError("bad_team_size")
+    tt_id = uuid.uuid4().hex[:12]
+    await _execute(
+        db_path,
+        "INSERT INTO matchplay_tee_times (id, creator_discord_id, label,"
+        " course, pars, tee_position, pin_position, wind_strength,"
+        " green_speed, starts_at, format, team_size, notes, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tt_id, creator_discord_id, label, course, pars, tee_position,
+         pin_position, wind_strength, green_speed, starts_at, format,
+         team_size, notes, utcnow_iso()),
+    )
+    for n, tname in ((1, side1_team_name), (2, side2_team_name)):
+        side_id = uuid.uuid4().hex[:12]
+        await _execute(
+            db_path,
+            "INSERT INTO matchplay_sides (id, tee_time_id, side_number,"
+            " team_name, created_at) VALUES (?,?,?,?,?)",
+            (side_id, tt_id, n, (tname or "").strip(), utcnow_iso()),
+        )
+        if n == 1:
+            # The creator takes side 1's first spot.
+            await _execute(
+                db_path,
+                "INSERT INTO matchplay_side_members (id, side_id,"
+                " discord_id, created_at) VALUES (?,?,?,?)",
+                (uuid.uuid4().hex[:12], side_id, creator_discord_id,
+                 utcnow_iso()),
+            )
+    return tt_id
+
+
+async def list_matchplay_tee_times(db_path, upcoming_only: bool = True,
+                                   limit: int = 100) -> list[dict]:
+    if upcoming_only:
+        rows = await _fetchall(
+            db_path,
+            "SELECT * FROM matchplay_tee_times WHERE starts_at >= ?"
+            " ORDER BY starts_at ASC LIMIT ?",
+            (utcnow_iso(), limit),
+        )
+    else:
+        rows = await _fetchall(
+            db_path,
+            "SELECT * FROM matchplay_tee_times ORDER BY starts_at DESC"
+            " LIMIT ?",
+            (limit,),
+        )
+    return [await _matchplay_tee_time_json(db_path, r) for r in rows]
+
+
+async def get_matchplay_tee_time(db_path, tt_id: str) -> dict | None:
+    row = await _fetchone(
+        db_path, "SELECT * FROM matchplay_tee_times WHERE id = ?",
+        (tt_id,))
+    if not row:
+        return None
+    return await _matchplay_tee_time_json(db_path, row)
+
+
+async def _matchplay_member_side(db_path, tt_id: str,
+                                 discord_id: str) -> dict | None:
+    """The side (in this tee time) that has discord_id on its roster."""
+    return await _fetchone(
+        db_path,
+        "SELECT s.* FROM matchplay_sides s"
+        " JOIN matchplay_side_members m ON m.side_id = s.id"
+        " WHERE s.tee_time_id = ? AND m.discord_id = ?",
+        (tt_id, discord_id),
+    )
+
+
+async def matchplay_member_ids(db_path, tt_id: str) -> list[str]:
+    rows = await _fetchall(
+        db_path,
+        "SELECT m.discord_id FROM matchplay_side_members m"
+        " JOIN matchplay_sides s ON s.id = m.side_id"
+        " WHERE s.tee_time_id = ?",
+        (tt_id,))
+    return [r["discord_id"] for r in rows]
+
+
+async def join_matchplay_tee_time(db_path, tt_id: str, discord_id: str,
+                                  side_number: int) -> dict:
+    tt = await _fetchone(
+        db_path, "SELECT * FROM matchplay_tee_times WHERE id = ?", (tt_id,))
+    if not tt:
+        raise MatchPlayError("not_found")
+    if side_number not in (1, 2):
+        raise MatchPlayError("bad_side")
+    if await _matchplay_member_side(db_path, tt_id, discord_id):
+        raise MatchPlayError("already_in")
+    side = await _fetchone(
+        db_path,
+        "SELECT * FROM matchplay_sides WHERE tee_time_id = ?"
+        " AND side_number = ?",
+        (tt_id, side_number))
+    if not side:
+        raise MatchPlayError("not_found")
+    members = await _matchplay_side_members(db_path, side["id"])
+    cap = 1 if tt["format"] == "single" else (tt["team_size"] or 2)
+    if len(members) >= cap:
+        raise MatchPlayError("full")
+    import uuid
+    await _execute(
+        db_path,
+        "INSERT INTO matchplay_side_members (id, side_id, discord_id,"
+        " created_at) VALUES (?,?,?,?)",
+        (uuid.uuid4().hex[:12], side["id"], discord_id, utcnow_iso()),
+    )
+    return await get_matchplay_tee_time(db_path, tt_id)
+
+
+async def leave_matchplay_tee_time(db_path, tt_id: str,
+                                   discord_id: str) -> dict | None:
+    tt = await _fetchone(
+        db_path, "SELECT * FROM matchplay_tee_times WHERE id = ?", (tt_id,))
+    if not tt:
+        return None
+    side = await _matchplay_member_side(db_path, tt_id, discord_id)
+    if not side:
+        return await _matchplay_tee_time_json(db_path, tt)
+    await _execute(
+        db_path,
+        "DELETE FROM matchplay_side_members WHERE side_id = ?"
+        " AND discord_id = ?",
+        (side["id"], discord_id),
+    )
+    return await get_matchplay_tee_time(db_path, tt_id)
+
+
+async def update_matchplay_tee_time(db_path, tt_id: str,
+                                    fields: dict) -> dict | None:
+    tt = await _fetchone(
+        db_path, "SELECT * FROM matchplay_tee_times WHERE id = ?", (tt_id,))
+    if not tt:
+        return None
+    allowed = {"label", "course", "pars", "tee_position", "pin_position",
+               "wind_strength", "green_speed", "starts_at", "notes"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if updates:
+        sets = [f"{k} = ?" for k in updates]
+        await _execute(
+            db_path,
+            f"UPDATE matchplay_tee_times SET {', '.join(sets)} WHERE id = ?",
+            tuple(updates[k] for k in updates) + (tt_id,),
+        )
+    for key, side_number in (("side1_team_name", 1), ("side2_team_name", 2)):
+        if key in fields:
+            await _execute(
+                db_path,
+                "UPDATE matchplay_sides SET team_name = ?"
+                " WHERE tee_time_id = ? AND side_number = ?",
+                ((fields[key] or "").strip(), tt_id, side_number),
+            )
+    return await get_matchplay_tee_time(db_path, tt_id)
+
+
+async def delete_matchplay_tee_time(db_path, tt_id: str) -> None:
+    side_ids = await _fetchall(
+        db_path, "SELECT id FROM matchplay_sides WHERE tee_time_id = ?",
+        (tt_id,))
+    for s in side_ids:
+        await _execute(
+            db_path, "DELETE FROM matchplay_side_members WHERE side_id = ?",
+            (s["id"],))
+    await _execute(db_path, "DELETE FROM matchplay_sides WHERE tee_time_id = ?",
+                   (tt_id,))
+    await _execute(db_path, "DELETE FROM matchplay_scores WHERE tee_time_id = ?",
+                   (tt_id,))
+    await _execute(db_path, "DELETE FROM matchplay_tee_times WHERE id = ?",
+                   (tt_id,))
+
+
+def _matchplay_validate_results(hole_results) -> list:
+    if (not isinstance(hole_results, list) or len(hole_results) != 18
+            or any(r is not None and r not in (-1, 0, 1)
+                   for r in hole_results)):
+        raise MatchPlayError("bad_results")
+    return list(hole_results)
+
+
+async def _matchplay_sides_full(db_path, tt: dict) -> bool:
+    sides = await _fetchall(
+        db_path,
+        "SELECT * FROM matchplay_sides WHERE tee_time_id = ?"
+        " ORDER BY side_number",
+        (tt["id"],))
+    if len(sides) != 2:
+        return False
+    cap = 1 if tt["format"] == "single" else (tt["team_size"] or 2)
+    for s in sides:
+        members = await _matchplay_side_members(db_path, s["id"])
+        if len(members) < cap:
+            return False
+    return True
+
+
+async def _matchplay_apply_records(db_path, tt: dict, winner_side: int | None,
+                                   delta: int) -> None:
+    """Apply (+1) or un-apply (-1) W-L-T tallies for a completed match.
+    Called with +1 when a match completes and -1 when a previous completion
+    is undone (score edited back to in-progress, changed, or cleared)."""
+    import uuid
+    sides = await _fetchall(
+        db_path,
+        "SELECT * FROM matchplay_sides WHERE tee_time_id = ?"
+        " ORDER BY side_number",
+        (tt["id"],))
+    if len(sides) != 2:
+        return
+    rosters = []
+    for s in sides:
+        members = await _matchplay_side_members(db_path, s["id"])
+        rosters.append(members)
+    for idx, members in enumerate(rosters):
+        side_no = idx + 1
+        if winner_side is None:
+            col = "ties"
+        elif winner_side == side_no:
+            col = "wins"
+        else:
+            col = "losses"
+        for m in members:
+            player = await get_player(db_path, m["discord_id"])
+            name = display_name_of(player, m["discord_id"])
+            await _execute(
+                db_path,
+                "INSERT INTO matchplay_records (id, course, tee_position,"
+                " pin_position, wind_strength, green_speed, discord_id,"
+                " player_name, wins, losses, ties)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT (course, tee_position, pin_position,"
+                " wind_strength, green_speed, discord_id)"
+                " DO UPDATE SET player_name = excluded.player_name,"
+                f" {col} = {col} + ?",
+                (uuid.uuid4().hex[:12], tt["course"], tt["tee_position"],
+                 tt["pin_position"], tt["wind_strength"], tt["green_speed"],
+                 m["discord_id"], name,
+                 1 if col == "wins" else 0, 1 if col == "losses" else 0,
+                 1 if col == "ties" else 0, delta),
+            )
+
+
+async def get_matchplay_score(db_path, tt_id: str) -> dict | None:
+    return await _fetchone(
+        db_path, "SELECT * FROM matchplay_scores WHERE tee_time_id = ?",
+        (tt_id,))
+
+
+async def matchplay_score_json(db_path, tt_id: str) -> dict | None:
+    """The enriched score payload for a tee time (None if never saved)."""
+    tt = await _fetchone(
+        db_path, "SELECT * FROM matchplay_tee_times WHERE id = ?", (tt_id,))
+    if not tt:
+        return None
+    score = await get_matchplay_score(db_path, tt_id)
+    return await _matchplay_score_json(db_path, tt, score)
+
+
+async def save_matchplay_score(db_path, tt_id: str, hole_results: list,
+                               submitted_by: str) -> dict:
+    """Save (live) hole results. Both sides must be full. Computes the
+    outcome server-side; completing the match applies W-L-T records.
+    Re-saving a completed match first un-applies the old result's records
+    (the API layer gates that to mod/admin)."""
+    import json
+    tt = await _fetchone(
+        db_path, "SELECT * FROM matchplay_tee_times WHERE id = ?", (tt_id,))
+    if not tt:
+        raise MatchPlayError("not_found")
+    results = _matchplay_validate_results(hole_results)
+    if not await _matchplay_sides_full(db_path, tt):
+        raise MatchPlayError("sides_not_full")
+    outcome = matchplay_outcome(results)
+    existing = await get_matchplay_score(db_path, tt_id)
+    if existing and existing["status"] == "completed":
+        await _matchplay_apply_records(
+            db_path, tt, existing["winner_side"], -1)
+    now = utcnow_iso()
+    await _execute(
+        db_path,
+        "INSERT INTO matchplay_scores (tee_time_id, hole_results, status,"
+        " winner_side, result_text, submitted_by, submitted_at)"
+        " VALUES (?,?,?,?,?,?,?)"
+        " ON CONFLICT(tee_time_id) DO UPDATE SET"
+        " hole_results = excluded.hole_results,"
+        " status = excluded.status, winner_side = excluded.winner_side,"
+        " result_text = excluded.result_text,"
+        " submitted_by = excluded.submitted_by,"
+        " submitted_at = excluded.submitted_at",
+        (tt_id, json.dumps(results), outcome["status"],
+         outcome["winner_side"], outcome["result_text"], submitted_by, now),
+    )
+    if outcome["status"] == "completed":
+        await _matchplay_apply_records(
+            db_path, tt, outcome["winner_side"], +1)
+    score = await get_matchplay_score(db_path, tt_id)
+    return await _matchplay_score_json(db_path, tt, score)
+
+
+async def delete_matchplay_score(db_path, tt_id: str) -> None:
+    """Clear a score back to 18 nulls / in_progress. Un-applies W-L-T
+    records when the score had completed the match (the API layer gates
+    that case to mod/admin)."""
+    import json
+    tt = await _fetchone(
+        db_path, "SELECT * FROM matchplay_tee_times WHERE id = ?", (tt_id,))
+    if not tt:
+        raise MatchPlayError("not_found")
+    existing = await get_matchplay_score(db_path, tt_id)
+    if existing and existing["status"] == "completed":
+        await _matchplay_apply_records(
+            db_path, tt, existing["winner_side"], -1)
+    await _execute(
+        db_path,
+        "INSERT INTO matchplay_scores (tee_time_id, hole_results, status,"
+        " winner_side, result_text, submitted_by, submitted_at)"
+        " VALUES (?,?,?,?,?,?,?)"
+        " ON CONFLICT(tee_time_id) DO UPDATE SET"
+        " hole_results = excluded.hole_results,"
+        " status = excluded.status, winner_side = excluded.winner_side,"
+        " result_text = excluded.result_text,"
+        " submitted_by = excluded.submitted_by,"
+        " submitted_at = excluded.submitted_at",
+        (tt_id, json.dumps([None] * 18), "in_progress", None, "",
+         "", utcnow_iso()),
+    )
+
+
+async def get_matchplay_records(db_path, course: str,
+                                tee_position: str | None = None,
+                                pin_position: str | None = None,
+                                wind_strength: str | None = None,
+                                green_speed: str | None = None) -> list[dict]:
+    """Per-course, per-setup player W-L-T leaderboard, wins first."""
+    clauses = ["course = ?"]
+    params: list = [course]
+    for col, val in (("tee_position", tee_position),
+                     ("pin_position", pin_position),
+                     ("wind_strength", wind_strength),
+                     ("green_speed", green_speed)):
+        if val:
+            clauses.append(f"{col} = ?")
+            params.append(val)
+    rows = await _fetchall(
+        db_path,
+        "SELECT discord_id, player_name, wins, losses, ties"
+        " FROM matchplay_records"
+        f" WHERE {' AND '.join(clauses)}"
+        " ORDER BY wins DESC, losses ASC, ties DESC, player_name ASC",
+        tuple(params),
+    )
+    records = []
+    for r in rows:
+        played = r["wins"] + r["losses"] + r["ties"]
+        records.append({
+            "discord_id": r["discord_id"],
+            "player_name": r["player_name"],
+            "wins": r["wins"],
+            "losses": r["losses"],
+            "ties": r["ties"],
+            "win_pct": (round(r["wins"] / played, 3)
+                        if played else 0.0),
         })
     return records

@@ -453,7 +453,219 @@ class CasualPlayer {
 String _capWord(String s) =>
     s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 
-/// Alt-shot records: team alternate-shot rounds. A tee time holds 1-2 teams;
+/// Match-play: 2-sided tee times, single (1v1) or best-ball (2-4 per side).
+/// Scoring is hole-by-hole: +1 = side 1 wins the hole, -1 = side 2 wins,
+/// 0 = halved, null = unplayed. The server computes lead/played/remaining
+/// and the result text ("3&2", "Dormie", "All Square", "2 UP").
+class MatchPlayScore {
+  final List<int?> holeResults;
+  final int lead;
+  final int played;
+  final int remaining;
+  final String status; // in_progress | completed
+  final int? winnerSide;
+  final String? resultText;
+  final String liveText;
+  final String submittedBy;
+  final String submittedAt;
+
+  MatchPlayScore({
+    required this.holeResults,
+    required this.lead,
+    required this.played,
+    required this.remaining,
+    required this.status,
+    this.winnerSide,
+    this.resultText,
+    required this.liveText,
+    required this.submittedBy,
+    required this.submittedAt,
+  });
+
+  factory MatchPlayScore.fromJson(Map<String, dynamic> j) =>
+      MatchPlayScore(
+        holeResults: ((j['hole_results'] as List?) ?? [])
+            .map((e) => e == null ? null : (e as num).toInt())
+            .toList(),
+        lead: (j['lead'] as num?)?.toInt() ?? 0,
+        played: (j['played'] as num?)?.toInt() ?? 0,
+        remaining: (j['remaining'] as num?)?.toInt() ?? 18,
+        status: (j['status'] ?? 'in_progress').toString(),
+        winnerSide: (j['winner_side'] as num?)?.toInt(),
+        resultText: j['result_text']?.toString(),
+        liveText: (j['live_text'] ?? '').toString(),
+        submittedBy: (j['submitted_by'] ?? '').toString(),
+        submittedAt: (j['submitted_at'] ?? '').toString(),
+      );
+
+  bool get isCompleted => status == 'completed';
+
+  String get thruLine => played == 0 ? '' : 'thru $played';
+}
+
+class MatchPlaySide {
+  final String id;
+  final int sideNumber;
+  final String teamName;
+  final List<String> memberDiscordIds;
+  final List<String> memberNames;
+  final int size;
+  final String displayName;
+
+  MatchPlaySide({
+    required this.id,
+    required this.sideNumber,
+    required this.teamName,
+    required this.memberDiscordIds,
+    required this.memberNames,
+    required this.size,
+    required this.displayName,
+  });
+
+  factory MatchPlaySide.fromJson(Map<String, dynamic> j) => MatchPlaySide(
+        id: j['id'].toString(),
+        sideNumber: (j['side_number'] as num?)?.toInt() ?? 1,
+        teamName: (j['team_name'] ?? '').toString(),
+        memberDiscordIds: ((j['member_discord_ids'] as List?) ?? [])
+            .map((e) => e.toString())
+            .toList(),
+        memberNames: ((j['member_names'] as List?) ?? [])
+            .map((e) => e.toString())
+            .toList(),
+        size: (j['size'] as num?)?.toInt() ?? 0,
+        displayName: (j['display_name'] ?? '').toString(),
+      );
+
+  bool isMember(String discordId) => memberDiscordIds.contains(discordId);
+}
+
+class MatchPlayTeeTime {
+  final String id;
+  final String creatorDiscordId;
+  final String label;
+  final String course;
+  final List<int> pars;
+  final String teePosition;
+  final String pinPosition;
+  final String windStrength;
+  final String greenSpeed;
+  final String startsAt;
+  final String format; // single | bestball
+  final int teamSize;
+  final int sideCap;
+  final String notes;
+  final String createdAt;
+  final List<MatchPlaySide> sides;
+  final bool bothFull;
+  final MatchPlayScore? score;
+
+  MatchPlayTeeTime({
+    required this.id,
+    required this.creatorDiscordId,
+    required this.label,
+    required this.course,
+    required this.pars,
+    required this.teePosition,
+    required this.pinPosition,
+    required this.windStrength,
+    required this.greenSpeed,
+    required this.startsAt,
+    required this.format,
+    required this.teamSize,
+    required this.sideCap,
+    required this.notes,
+    required this.createdAt,
+    required this.sides,
+    required this.bothFull,
+    this.score,
+  });
+
+  factory MatchPlayTeeTime.fromJson(Map<String, dynamic> j) =>
+      MatchPlayTeeTime(
+        id: j['id'].toString(),
+        creatorDiscordId: (j['creator_discord_id'] ?? '').toString(),
+        label: (j['label'] ?? '').toString(),
+        course: (j['course'] ?? '').toString(),
+        pars: ((j['pars'] ?? '').toString().split(','))
+            .map((e) => int.tryParse(e.trim()) ?? 4)
+            .toList(),
+        teePosition: (j['tee_position'] ?? 'back').toString(),
+        pinPosition: (j['pin_position'] ?? 'black').toString(),
+        windStrength: (j['wind_strength'] ?? 'moderate').toString(),
+        greenSpeed: (j['green_speed'] ?? 'pro').toString(),
+        startsAt: (j['starts_at'] ?? '').toString(),
+        format: (j['format'] ?? 'single').toString(),
+        teamSize: (j['team_size'] as num?)?.toInt() ?? 1,
+        sideCap: (j['side_cap'] as num?)?.toInt() ?? 1,
+        notes: (j['notes'] ?? '').toString(),
+        createdAt: (j['created_at'] ?? '').toString(),
+        sides: ((j['sides'] as List?) ?? [])
+            .map((e) => MatchPlaySide.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        bothFull: j['both_full'] == true,
+        score: j['score'] == null
+            ? null
+            : MatchPlayScore.fromJson(j['score'] as Map<String, dynamic>),
+      );
+
+  bool get isSingle => format == 'single';
+
+  MatchPlaySide? mySide(String discordId) {
+    for (final s in sides) {
+      if (s.isMember(discordId)) return s;
+    }
+    return null;
+  }
+
+  bool get canScore => bothFull;
+
+  String get settingsSummary {
+    final parts = <String>[
+      '${_capWord(teePosition)} tees',
+      '${_capWord(pinPosition)} pins',
+      '${_capWord(windStrength)} wind',
+      greenSpeed == 'veryfast' ? 'Very fast greens' : 'Pro greens',
+    ];
+    return parts.join(' · ');
+  }
+
+  String get formatSummary =>
+      isSingle ? 'Single match play' : 'Best-ball · $teamSize per side';
+}
+
+/// Per-player match-play record: wins, losses, ties for one course + setup.
+class MatchPlayRecord {
+  final String discordId;
+  final String playerName;
+  final int wins;
+  final int losses;
+  final int ties;
+  final double winPct;
+
+  MatchPlayRecord({
+    required this.discordId,
+    required this.playerName,
+    required this.wins,
+    required this.losses,
+    required this.ties,
+    required this.winPct,
+  });
+
+  factory MatchPlayRecord.fromJson(Map<String, dynamic> j) =>
+      MatchPlayRecord(
+        discordId: j['discord_id'].toString(),
+        playerName: (j['player_name'] ?? j['discord_id']).toString(),
+        wins: (j['wins'] as num?)?.toInt() ?? 0,
+        losses: (j['losses'] as num?)?.toInt() ?? 0,
+        ties: (j['ties'] as num?)?.toInt() ?? 0,
+        winPct: (j['win_pct'] as num?)?.toDouble() ?? 0.0,
+      );
+
+  String get recordLine => '$wins–$losses–$ties';
+
+  String get winPctLine => '${(winPct * 100).toStringAsFixed(1)}%';
+}
+
 /// each team is one registered player plus an optional partner name. Scores
 /// are submitted once per team (not live); a team needs both players attached
 /// to submit to the per-course record leaderboard.

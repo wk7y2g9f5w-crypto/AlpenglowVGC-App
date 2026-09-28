@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'screens/altshot_screen.dart';
 import 'screens/casual_screen.dart';
 import 'screens/login_screen.dart';
+import 'screens/matchplay_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/tournaments_screen.dart';
@@ -99,6 +100,7 @@ class _HomeShellState extends State<HomeShell> {
       TournamentsScreen(auth: widget.auth, settings: widget.settings),
       CasualScreen(auth: widget.auth, settings: widget.settings),
       AltShotScreen(auth: widget.auth, settings: widget.settings),
+      MatchplayScreen(auth: widget.auth, settings: widget.settings),
       ProfileScreen(auth: widget.auth, settings: widget.settings),
       SettingsScreen(auth: widget.auth, settings: widget.settings),
     ];
@@ -112,6 +114,8 @@ class _HomeShellState extends State<HomeShell> {
               icon: Icon(Icons.emoji_events), label: 'Tournaments'),
           NavigationDestination(icon: Icon(Icons.golf_course), label: 'Casual'),
           NavigationDestination(icon: Icon(Icons.groups), label: 'AltShot'),
+          NavigationDestination(
+              icon: Icon(Icons.sports_golf), label: 'Matchplay'),
           NavigationDestination(icon: Icon(Icons.person), label: 'Profile'),
           NavigationDestination(
               icon: Icon(Icons.settings), label: 'Settings'),

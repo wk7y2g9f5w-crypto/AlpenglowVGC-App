@@ -1755,6 +1755,152 @@ async def leave_casual_tee_time(tt_id: str, user: CurrentUser) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Match-play records
+# --------------------------------------------------------------------------
+class MatchPlayTeeTimeCreate(BaseModel):
+    label: str = ""
+    course: str = ""
+    tee_position: str = "back"
+    pin_position: str = "black"
+    wind_strength: str = "moderate"
+    green_speed: str = "pro"
+    starts_at: str = ""
+    format: str = "single"
+    team_size: int | None = None
+    notes: str = ""
+    side1_team_name: str = ""
+    side2_team_name: str = ""
+
+    @field_validator("label", "course")
+    @classmethod
+    def _nonempty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("must not be empty")
+        return v
+
+    @field_validator("tee_position")
+    @classmethod
+    def _tee(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("front", "middle", "back"):
+            raise ValueError(f"Unknown tee position '{v}'")
+        return v
+
+    @field_validator("pin_position")
+    @classmethod
+    def _pin(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("black", "white", "red"):
+            raise ValueError(f"Unknown pin position '{v}'")
+        return v
+
+    @field_validator("wind_strength")
+    @classmethod
+    def _wind(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("low", "moderate", "severe"):
+            raise ValueError(f"Unknown wind strength '{v}'")
+        return v
+
+    @field_validator("green_speed")
+    @classmethod
+    def _green(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("veryfast", "pro"):
+            raise ValueError(f"Unknown green speed '{v}'")
+        return v
+
+    @field_validator("format")
+    @classmethod
+    def _format(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("single", "bestball"):
+            raise ValueError("format must be 'single' or 'bestball'")
+        return v
+
+    @model_validator(mode="after")
+    def _size(self):
+        if self.format == "single":
+            if self.team_size not in (None, 1):
+                raise ValueError(
+                    "team_size must be 1 (or omitted) for single match play")
+            self.team_size = 1
+        elif self.team_size not in (2, 3, 4):
+            raise ValueError(
+                "team_size (2-4) is required for best-ball match play")
+        return self
+
+
+class MatchPlayTeeTimeUpdate(BaseModel):
+    label: str | None = None
+    course: str | None = None
+    tee_position: str | None = None
+    pin_position: str | None = None
+    wind_strength: str | None = None
+    green_speed: str | None = None
+    starts_at: str | None = None
+    notes: str | None = None
+    side1_team_name: str | None = None
+    side2_team_name: str | None = None
+
+    @field_validator("tee_position")
+    @classmethod
+    def _tee(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in ("front", "middle", "back"):
+            raise ValueError(f"Unknown tee position '{v}'")
+        return v
+
+    @field_validator("pin_position")
+    @classmethod
+    def _pin(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in ("black", "white", "red"):
+            raise ValueError(f"Unknown pin position '{v}'")
+        return v
+
+    @field_validator("wind_strength")
+    @classmethod
+    def _wind(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in ("low", "moderate", "severe"):
+            raise ValueError(f"Unknown wind strength '{v}'")
+        return v
+
+    @field_validator("green_speed")
+    @classmethod
+    def _green(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in ("veryfast", "pro"):
+            raise ValueError(f"Unknown green speed '{v}'")
+        return v
+
+
+class MatchPlayJoin(BaseModel):
+    side_number: int = 1
+
+    @field_validator("side_number")
+    @classmethod
+    def _side(cls, v: int) -> int:
+        if v not in (1, 2):
+            raise ValueError("side_number must be 1 or 2")
+        return v
+
+
+class MatchPlayScoreSave(BaseModel):
+    hole_results: list[int | None] = []
+
+
+# --------------------------------------------------------------------------
 # Alt-shot records
 # --------------------------------------------------------------------------
 class AltShotTeeTimeCreate(BaseModel):
@@ -2156,6 +2302,231 @@ async def altshot_records(user: CurrentUser, course: str, team_size: int,
         wind_strength=wind_strength.strip().lower(),
         green_speed=green_speed.strip().lower())
     return {"course": course.strip(), "team_size": team_size,
+            "tee_position": tee_position.strip().lower(),
+            "pin_position": pin_position.strip().lower(),
+            "wind_strength": wind_strength.strip().lower(),
+            "green_speed": green_speed.strip().lower(),
+            "records": records}
+
+
+# --------------------------------------------------------------------------
+# Match-play
+# --------------------------------------------------------------------------
+async def _matchplay_or_404(tt_id: str) -> dict:
+    tt = await db.get_matchplay_tee_time(DB_PATH, tt_id)
+    if tt is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Match-play tee time not found.")
+    return tt
+
+
+async def _matchplay_member_guard(tt: dict, user: CurrentUser) -> None:
+    """Any side member or crew may save/clear an in-progress score."""
+    member_ids = await db.matchplay_member_ids(DB_PATH, tt["id"])
+    if user["discord_id"] in member_ids:
+        return
+    crew = await fetch_crew_status(user["discord_id"])
+    if not crew:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only a match player or crew can do this.")
+
+
+async def _require_mod_admin(user: CurrentUser) -> None:
+    """Completed match-play scores are mod/admin only — tournament
+    directors and players may not change them."""
+    ok = await fetch_mod_admin_status(user["discord_id"])
+    if ok is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify mod/admin status — try again shortly.")
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a mod or admin can change a completed score.")
+
+
+@app.get("/api/matchplay/tee-times")
+async def list_matchplay_tee_times(user: CurrentUser) -> dict:
+    tts = await db.list_matchplay_tee_times(DB_PATH)
+    return {"tee_times": tts}
+
+
+@app.post("/api/matchplay/tee-times")
+async def create_matchplay_tee_time(body: MatchPlayTeeTimeCreate,
+                                    user: CurrentUser) -> dict:
+    auto = gc.course_pars(body.course.strip(), 18)
+    if not auto:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Unknown course — pick one from the course list.",
+        )
+    pars = ",".join(str(x) for x in auto)
+    try:
+        tt_id = await db.create_matchplay_tee_time(
+            DB_PATH, user["discord_id"], body.label.strip(),
+            body.course.strip(), pars, tee_position=body.tee_position,
+            pin_position=body.pin_position, wind_strength=body.wind_strength,
+            green_speed=body.green_speed, starts_at=body.starts_at.strip(),
+            format=body.format, team_size=body.team_size or 1,
+            notes=body.notes.strip(),
+            side1_team_name=body.side1_team_name.strip(),
+            side2_team_name=body.side2_team_name.strip(),
+        )
+    except db.MatchPlayError as e:
+        msg = str(e)
+        if msg == "bad_format":
+            detail = "format must be 'single' or 'bestball'."
+        elif msg == "bad_team_size":
+            detail = ("team_size must be 1 for single match play and 2-4"
+                      " for best-ball match play.")
+        else:
+            detail = "Could not create this match-play tee time."
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
+    return await _matchplay_or_404(tt_id)
+
+
+@app.get("/api/matchplay/tee-times/{tt_id}")
+async def get_matchplay_tee_time(tt_id: str, user: CurrentUser) -> dict:
+    return await _matchplay_or_404(tt_id)
+
+
+@app.patch("/api/matchplay/tee-times/{tt_id}")
+async def update_matchplay_tee_time(tt_id: str, body: MatchPlayTeeTimeUpdate,
+                                    user: CurrentUser) -> dict:
+    tt = await _matchplay_or_404(tt_id)
+    crew = await fetch_crew_status(user["discord_id"])
+    if tt["creator_discord_id"] != user["discord_id"] and not crew:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only the creator or crew can edit this.")
+    fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()
+              if v is not None}
+    if "course" in fields:
+        auto = gc.course_pars(fields["course"].strip(), 18)
+        if not auto:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Unknown course — pick one from the course list.")
+        fields["pars"] = ",".join(str(x) for x in auto)
+    return await db.update_matchplay_tee_time(DB_PATH, tt_id, fields)
+
+
+@app.delete("/api/matchplay/tee-times/{tt_id}")
+async def delete_matchplay_tee_time(tt_id: str, user: CurrentUser) -> dict:
+    tt = await _matchplay_or_404(tt_id)
+    crew = await fetch_crew_status(user["discord_id"])
+    if tt["creator_discord_id"] != user["discord_id"] and not crew:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only the creator or crew can delete this.")
+    await db.delete_matchplay_tee_time(DB_PATH, tt_id)
+    return {"ok": True}
+
+
+@app.post("/api/matchplay/tee-times/{tt_id}/join")
+async def join_matchplay_tee_time(tt_id: str, body: MatchPlayJoin,
+                                  user: CurrentUser) -> dict:
+    await _matchplay_or_404(tt_id)
+    try:
+        return await db.join_matchplay_tee_time(
+            DB_PATH, tt_id, user["discord_id"], body.side_number)
+    except db.MatchPlayError as e:
+        msg = str(e)
+        if msg == "not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Match-play tee time not found.")
+        if msg == "already_in":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You are already in this match.")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="That side is full.")
+
+
+@app.post("/api/matchplay/tee-times/{tt_id}/leave")
+async def leave_matchplay_tee_time(tt_id: str, user: CurrentUser) -> dict:
+    await _matchplay_or_404(tt_id)
+    return await db.leave_matchplay_tee_time(DB_PATH, tt_id,
+                                             user["discord_id"])
+
+
+@app.get("/api/matchplay/tee-times/{tt_id}/score")
+async def get_matchplay_score(tt_id: str, user: CurrentUser) -> dict:
+    await _matchplay_or_404(tt_id)
+    score = await db.matchplay_score_json(DB_PATH, tt_id)
+    return {"score": score}
+
+
+@app.put("/api/matchplay/tee-times/{tt_id}/score")
+async def save_matchplay_score(tt_id: str, body: MatchPlayScoreSave,
+                               user: CurrentUser) -> dict:
+    tt = await _matchplay_or_404(tt_id)
+    existing = await db.get_matchplay_score(DB_PATH, tt_id)
+    if existing is not None and existing["status"] == "completed":
+        # Changing a completed match is mod/admin only — tournament
+        # directors and players may not do it.
+        await _require_mod_admin(user)
+    else:
+        await _matchplay_member_guard(tt, user)
+    try:
+        score = await db.save_matchplay_score(
+            DB_PATH, tt_id, body.hole_results, user["discord_id"])
+    except db.MatchPlayError as e:
+        msg = str(e)
+        if msg == "not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Match-play tee time not found.")
+        if msg == "sides_not_full":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Both sides must be full before scoring can start.")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Send 18 hole results: 1 (side 1 wins), -1 (side 2"
+                   " wins), 0 (halved), or null (not played).")
+    return {"score": score}
+
+
+@app.delete("/api/matchplay/tee-times/{tt_id}/score")
+async def delete_matchplay_score(tt_id: str, user: CurrentUser) -> dict:
+    tt = await _matchplay_or_404(tt_id)
+    existing = await db.get_matchplay_score(DB_PATH, tt_id)
+    if existing is not None and existing["status"] == "completed":
+        # Clearing a completed match is mod/admin only.
+        await _require_mod_admin(user)
+    else:
+        await _matchplay_member_guard(tt, user)
+    try:
+        await db.delete_matchplay_score(DB_PATH, tt_id)
+    except db.MatchPlayError as e:
+        if str(e) == "not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Match-play tee time not found.")
+        raise
+    return {"ok": True}
+
+
+@app.get("/api/matchplay/records")
+async def matchplay_records(user: CurrentUser, course: str,
+                            tee_position: str = "back",
+                            pin_position: str = "black",
+                            wind_strength: str = "moderate",
+                            green_speed: str = "pro") -> dict:
+    for name, val, ok in (
+            ("tee_position", tee_position, ("front", "middle", "back")),
+            ("pin_position", pin_position, ("black", "white", "red")),
+            ("wind_strength", wind_strength, ("low", "moderate", "severe")),
+            ("green_speed", green_speed, ("veryfast", "pro"))):
+        if (val or "").strip().lower() not in ok:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown {name} '{val}'.")
+    records = await db.get_matchplay_records(
+        DB_PATH, course.strip(),
+        tee_position=tee_position.strip().lower(),
+        pin_position=pin_position.strip().lower(),
+        wind_strength=wind_strength.strip().lower(),
+        green_speed=green_speed.strip().lower())
+    return {"course": course.strip(),
             "tee_position": tee_position.strip().lower(),
             "pin_position": pin_position.strip().lower(),
             "wind_strength": wind_strength.strip().lower(),

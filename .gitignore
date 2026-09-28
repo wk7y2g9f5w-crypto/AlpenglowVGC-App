@@ -5,6 +5,7 @@ app/.flutter-plugins
 app/.flutter-plugins-dependencies
 .dart_tool/
 # Python
+.venv/
 api/.venv/
 api/__pycache__/
 **/__pycache__/
