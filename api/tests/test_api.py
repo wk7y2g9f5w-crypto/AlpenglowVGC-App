@@ -655,6 +655,69 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(card["total"], 90)
         self.assertEqual(card["submitted_by"], "123")
 
+    def test_scorecard_resubmit_locked_for_non_crew(self):
+        # First submission by a member is fine; a second PUT by a non-crew
+        # member is rejected with scorecard_locked.
+        self.with_tz("123")
+        self.with_tz("456")
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        body = {"player_discord_id": "123", "scores": [4] * 18}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        # Same player tries to change their own submitted card.
+        body2 = {"player_discord_id": "123", "scores": [3] * 18}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body2)
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["code"], "scorecard_locked")
+        # A partner also can't overwrite someone else's submitted card.
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("456"), json=body2)
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["code"], "scorecard_locked")
+
+    def test_scorecard_resubmit_crew_can_edit(self):
+        self.with_tz("123")
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        body = {"player_discord_id": "123", "scores": [4] * 18}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+
+        async def fake_crew(discord_id):
+            return True
+        main.fetch_crew_status = fake_crew
+        try:
+            body2 = {"player_discord_id": "123", "scores": [3] * 18}
+            r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                                headers=self.h("123"), json=body2)
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["card"]["total"], 54)
+        finally:
+            main.fetch_crew_status = fake_fetch_crew_status
+
+    def test_scorecard_get_other_player_card(self):
+        # The player picker loads another tee-time member's card for the
+        # read-only submitted view.
+        self.with_tz("123")
+        self.with_tz("456")
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        run(db.upsert_scorecard(self.db_path, self.t_open, "123", None, tt_id,
+                                [4] * 18, "verified", submitted_by="123"))
+        r = self.client.get(
+            f"/api/tee-times/{tt_id}/scorecard?player_discord_id=123",
+            headers=self.h("456"))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["card"]["total"], 72)
+        # Someone outside the tee time gets a 403.
+        r = self.client.get(
+            f"/api/tee-times/{tt_id}/scorecard?player_discord_id=999",
+            headers=self.h("456"))
+        self.assertEqual(r.status_code, 403)
+
     # -- leaderboard --------------------------------------------------
     def test_leaderboard_stroke(self):
         self.with_tz("123")

@@ -40,6 +40,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   bool _loading = true;
   bool _submitting = false;
   String? _existingStatus;
+  bool _isCrew = false;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -67,18 +68,29 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     _player =
         widget.teeTime.players.isNotEmpty ? widget.teeTime.players.first : null;
     _loadExisting();
+    _loadCrew();
+  }
+
+  Future<void> _loadCrew() async {
+    try {
+      final me = await _api.getMe();
+      if (mounted) setState(() => _isCrew = me.isCrew);
+    } catch (_) {
+      // Leave as non-crew; the server still enforces the lock.
+    }
   }
 
   Future<void> _loadExisting() async {
-    await _loadRound(_roundNumber);
+    await _loadCard(null, _roundNumber); // null = my own card
     if (mounted) setState(() => _loading = false);
   }
 
-  /// Load the saved card (if any) for the current player + round.
-  Future<void> _loadRound(int roundNumber) async {
+  /// Load the saved card (if any) for [playerDiscordId] (null = me) + round.
+  /// The displayed card always belongs to the selected player.
+  Future<void> _loadCard(String? playerDiscordId, int roundNumber) async {
     try {
       final card = await _api.getScorecard(widget.teeTime.id,
-          roundNumber: roundNumber);
+          roundNumber: roundNumber, playerDiscordId: playerDiscordId);
       if (!mounted) return;
       if (card != null && card.scores.length == _holeCount) {
         setState(() {
@@ -114,7 +126,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       _roundNumber = rn;
       _loading = true;
     });
-    _loadRound(rn).then((_) {
+    _loadCard(_player?.discordId, rn).then((_) {
       if (mounted) setState(() => _loading = false);
     });
   }
@@ -223,7 +235,9 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           ? const Center(child: CircularProgressIndicator())
           : _locked
               ? _lockedBody()
-              : _entryBody(),
+              : (_existingStatus != null && !_isCrew)
+                  ? _submittedBody()
+                  : _entryBody(),
     );
   }
 
@@ -248,6 +262,58 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  /// Read-only view shown when a card is already submitted and the viewer
+  /// isn't crew. The server rejects any edit attempt with scorecard_locked.
+  Widget _submittedBody() {
+    final pars = _pars;
+    final total = _scores.fold<int>(0, (a, s) => a + (s ?? 0));
+    final playerName = _player?.displayName ?? 'this player';
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Icon(Icons.lock_outline, size: 48, color: Colors.grey),
+        const SizedBox(height: 12),
+        Text(
+          'Round $_roundNumber submitted',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '$playerName\'s scorecard is already submitted — only crew '
+          '(admins, mods, tournament directors) can change scores. '
+          'Ask a crew member if something needs fixing.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.grey),
+        ),
+        const SizedBox(height: 16),
+        ...List.generate(_holeCount, (i) {
+          final s = _scores[i];
+          final par = pars != null ? pars[i] : null;
+          final rel = (par != null && s != null) ? s - par : null;
+          final relLabel = rel == null || rel == 0
+              ? ''
+              : ' (${rel > 0 ? '+' : ''}$rel)';
+          return ListTile(
+            dense: true,
+            title: Text('Hole ${i + 1}'),
+            trailing: Text(
+              s == null ? '–' : '$s$relLabel',
+              style: const TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+          );
+        }),
+        const Divider(),
+        Text(
+          'Total $total',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+      ],
     );
   }
 
@@ -303,7 +369,16 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                       .map((p) => DropdownMenuItem(
                           value: p, child: Text(p.displayName)))
                       .toList(),
-                  onChanged: (p) => setState(() => _player = p),
+                  onChanged: (p) {
+                    if (p == null || p.discordId == _player?.discordId) return;
+                    setState(() {
+                      _player = p;
+                      _loading = true;
+                    });
+                    _loadCard(p.discordId, _roundNumber).then((_) {
+                      if (mounted) setState(() => _loading = false);
+                    });
+                  },
                 ),
               ),
               const SizedBox(width: 12),

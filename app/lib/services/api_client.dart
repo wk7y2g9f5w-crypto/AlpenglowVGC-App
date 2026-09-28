@@ -34,6 +34,8 @@ String friendlyApiMessage(ApiException e) {
       return "You're not in this tee time — join it first, then enter scores.";
     case 'player_not_in_tee_time':
       return "That player isn't in this tee time.";
+    case 'scorecard_locked':
+      return 'That scorecard is already submitted — only crew (admins, mods, tournament directors) can change it.';
     default:
       return e.message;
   }
@@ -263,10 +265,16 @@ class ApiClient {
     await _post('/api/tee-times/$teeTimeId/requests/$requestId/decline');
   }
 
-  Future<Scorecard?> getScorecard(String teeTimeId, {int? roundNumber}) async {
-    final path = roundNumber != null
-        ? '/api/tee-times/$teeTimeId/scorecard?round_number=$roundNumber'
-        : '/api/tee-times/$teeTimeId/scorecard';
+  Future<Scorecard?> getScorecard(String teeTimeId,
+      {int? roundNumber, String? playerDiscordId}) async {
+    final params = <String>[];
+    if (roundNumber != null) params.add('round_number=$roundNumber');
+    if (playerDiscordId != null) {
+      params.add('player_discord_id=$playerDiscordId');
+    }
+    final path = params.isEmpty
+        ? '/api/tee-times/$teeTimeId/scorecard'
+        : '/api/tee-times/$teeTimeId/scorecard?${params.join('&')}';
     final body = await _get(path);
     if (body is! Map<String, dynamic>) return null;
     final card = body['card'];

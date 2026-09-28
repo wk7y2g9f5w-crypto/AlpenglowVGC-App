@@ -19,6 +19,7 @@ from src.cogs.common import (
     active_tournament_autocomplete,
     admin_role_mention,
     inprogress_tournament_autocomplete,
+    is_admin,
     require_admin,
     resolve_tournament,
     viewer_tee_time_when,
@@ -494,6 +495,21 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     # Verification: 2+ players in the tee time = partners present.
     player_count = await db.tee_time_player_count(db_path, tt["id"])
     status = "verified" if player_count >= 2 else "pending"
+    # Crew-only edit rule: a submitted card can only be changed by crew
+    # (admins, mods, tournament directors). First submissions stay open to
+    # tee-time members.
+    existing = await db.find_scorecard(
+        db_path, t["id"],
+        player_discord_id=card_player_id, team_id=team_id,
+        tee_time_id=tt["id"], round_number=round_number,
+    )
+    if existing is not None and not await is_admin(interaction):
+        await interaction.followup.send(
+            "❌ That scorecard is already submitted — only crew (admins, mods,"
+            " tournament directors) can change it. Ask a crew member to fix it.",
+            ephemeral=True,
+        )
+        return
     card_id = await db.upsert_scorecard(
         db_path, t["id"], card_player_id, team_id, tt["id"], scores, status,
         submitted_by=submitter_id, round_number=round_number,

@@ -1174,17 +1174,29 @@ async def decline_request(
 # --------------------------------------------------------------------------
 @app.get("/api/tee-times/{tee_time_id}/scorecard")
 async def get_scorecard(
-    tee_time_id: int, user: CurrentUser, round_number: int | None = None
+    tee_time_id: int,
+    user: CurrentUser,
+    round_number: int | None = None,
+    player_discord_id: str | None = None,
 ) -> dict:
     tt, t = await _tee_time_or_404(tee_time_id)
-    # The caller's latest card *for this tee time* (get_latest_player_card is
+    target_id = player_discord_id or user["discord_id"]
+    if player_discord_id is not None:
+        # Only cards for players in this tee time are visible here.
+        tt_players = await db.get_tee_time_players(DB_PATH, tt["id"])
+        if not any(p["discord_id"] == target_id for p in tt_players):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "player_not_in_tee_time"},
+            )
+    # The target's latest card *for this tee time* (get_latest_player_card is
     # tournament-wide, so filter down to this tee time).
     cards = await db.get_scorecards(DB_PATH, t["id"])
     mine = next(
         (
             c
             for c in reversed(cards)
-            if c.get("player_discord_id") == user["discord_id"]
+            if c.get("player_discord_id") == target_id
             and c.get("tee_time_id") == tt["id"]
             and (round_number is None
                  or (c.get("round_number") or 1) == round_number)
@@ -1234,6 +1246,27 @@ async def put_scorecard(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "tee_time_not_passed"},
         )
+    # Gate 5: a submitted card can only be changed by crew (admins, mods,
+    # tournament directors). First submissions stay open to tee-time members.
+    existing = await db.find_scorecard(
+        DB_PATH,
+        t["id"],
+        player_discord_id=body.player_discord_id,
+        tee_time_id=tt["id"],
+        round_number=body.round_number,
+    )
+    if existing is not None:
+        is_crew = await fetch_crew_status(user["discord_id"])
+        if is_crew is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify crew status with Discord — try again shortly.",
+            )
+        if not is_crew:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "scorecard_locked"},
+            )
     # Verification rule from the bot: 2+ players in the tee time = partners
     # present -> auto-verified; solo rounds stay pending.
     player_count = await db.tee_time_player_count(DB_PATH, tt["id"])

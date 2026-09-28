@@ -1272,6 +1272,35 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
     return lastrowid
 
 
+async def find_scorecard(db_path, tournament_id, *, player_discord_id=None,
+                         team_id=None, tee_time_id=None,
+                         round_number=1) -> dict | None:
+    """Return the card an upsert_scorecard call would overwrite, or None.
+
+    Used to enforce the crew-only edit rule: a submission with no matching
+    card is a first submission (open to tee-time members); a matching card
+    means an edit, which only crew may perform.
+    """
+    round_number = max(1, min(5, int(round_number or 1)))
+    if team_id is not None:
+        return await _fetchone(
+            db_path,
+            "SELECT * FROM scorecards WHERE tournament_id = ? AND team_id = ?"
+            " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+            " AND round_number = ? ORDER BY submitted_at DESC LIMIT 1",
+            (tournament_id, team_id, tee_time_id, round_number),
+        )
+    return await _fetchone(
+        db_path,
+        "SELECT * FROM scorecards WHERE tournament_id = ?"
+        " AND player_discord_id = ?"
+        " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+        " AND team_id IS NULL AND round_number = ?"
+        " ORDER BY submitted_at DESC LIMIT 1",
+        (tournament_id, player_discord_id, tee_time_id, round_number),
+    )
+
+
 async def get_scorecard(db_path, card_id) -> dict | None:
     return await _fetchone(db_path, "SELECT * FROM scorecards WHERE id = ?",
                            (card_id,))
