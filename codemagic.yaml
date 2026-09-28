@@ -65,9 +65,18 @@ workflows:
         script: |
           cd app
           flutter pub get
+          # Bake the OAuth/API config into the build so fresh installs can
+          # sign in with Discord immediately (no manual Settings entry).
+          # DISCORD_CLIENT_ID must be added in Codemagic as an environment
+          # variable (App settings > Environment variables). It is the
+          # Discord application's *client ID* (public, not the secret).
           flutter build ipa --release \
             --export-options-plist="$HOME/export_options.plist" \
-            --build-number=$BUILD_NUMBER
+            --build-number=$BUILD_NUMBER \
+            --dart-define=DISCORD_CLIENT_ID="$DISCORD_CLIENT_ID" \
+            --dart-define=DISCORD_REDIRECT_URI="https://alpenglowvgc-app-1.onrender.com/oauth/callback" \
+            --dart-define=APP_URL_SCHEME="com.alpenglow.vgc.app" \
+            --dart-define=API_BASE_URL="https://alpenglow-vgc.onrender.com"
 
       - name: Publish to App Store Connect
         script: |

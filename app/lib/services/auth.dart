@@ -8,7 +8,10 @@ class SettingsService extends ChangeNotifier {
   static const _kClientId = 'discord_client_id';
   static const _kRedirectUri = 'discord_redirect_uri';
 
-  static const defaultBaseUrl = 'http://localhost:8420';
+  static const defaultBaseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'http://localhost:8420',
+  );
 
   final SharedPreferences _prefs;
 
