@@ -18,9 +18,11 @@ import UserNotifications
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
+    let registrar =
+      engineBridge.pluginRegistry.registrar(forPlugin: "com.alpenglow.vgc.app.push")
     let channel = FlutterMethodChannel(
       name: "com.alpenglow.vgc.app/push",
-      binaryMessenger: engineBridge.binaryMessenger)
+      binaryMessenger: registrar.messenger())
     self.pushChannel = channel
     channel.setMethodCallHandler { call, result in
       switch call.method {
