@@ -131,8 +131,9 @@ class ApiClient {
     String windStrength = 'moderate',
     String greenSpeed = 'pro',
     String? description,
+    List<Map<String, String>>? rounds,
   }) async {
-    final body = await _post('/api/tournaments', {
+    final payload = <String, dynamic>{
       'name': name,
       'format': format,
       'holes': holes,
@@ -145,7 +146,9 @@ class ApiClient {
       'green_speed': greenSpeed,
       if (description != null && description.isNotEmpty)
         'description': description,
-    });
+    };
+    if (rounds != null) payload['rounds'] = rounds;
+    final body = await _post('/api/tournaments', payload);
     return Tournament.fromJson(body as Map<String, dynamic>);
   }
 
@@ -217,8 +220,11 @@ class ApiClient {
     await _post('/api/tee-times/$teeTimeId/requests/$requestId/decline');
   }
 
-  Future<Scorecard?> getScorecard(String teeTimeId) async {
-    final body = await _get('/api/tee-times/$teeTimeId/scorecard');
+  Future<Scorecard?> getScorecard(String teeTimeId, {int? roundNumber}) async {
+    final path = roundNumber != null
+        ? '/api/tee-times/$teeTimeId/scorecard?round_number=$roundNumber'
+        : '/api/tee-times/$teeTimeId/scorecard';
+    final body = await _get(path);
     if (body is! Map<String, dynamic>) return null;
     final card = body['card'];
     if (card == null) return null;
@@ -226,10 +232,12 @@ class ApiClient {
   }
 
   Future<void> submitScorecard(
-      String teeTimeId, String playerDiscordId, List<int> scores) async {
+      String teeTimeId, String playerDiscordId, List<int> scores,
+      {int roundNumber = 1}) async {
     await _put('/api/tee-times/$teeTimeId/scorecard', {
       'player_discord_id': playerDiscordId,
       'scores': scores,
+      'round_number': roundNumber,
     });
   }
 

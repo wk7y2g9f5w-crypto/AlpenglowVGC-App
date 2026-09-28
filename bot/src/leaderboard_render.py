@@ -37,12 +37,24 @@ def _total_suffix(total: int, pars: list[int] | None) -> str:
     return f" ({tp})" if tp else ""
 
 
-def _latest_by_player(cards: list[dict]) -> dict[str, dict]:
-    latest: dict[str, dict] = {}
-    for c in sorted(cards, key=lambda c: c["submitted_at"]):
-        if c["player_discord_id"]:
-            latest[c["player_discord_id"]] = c
-    return latest
+def _round_settings_line(r: dict) -> str:
+    """'Middle tees • White pins • Moderate wind' for a rounds row."""
+    tee = sl.TEE_LABELS.get(r.get("tee_position"), r.get("tee_position"))
+    pin = sl.PIN_LABELS.get(r.get("pin_position"), r.get("pin_position"))
+    wind = sl.WIND_LABELS.get(r.get("wind_strength"), r.get("wind_strength"))
+    return f"{tee} tees • {pin} pins • {wind} wind"
+
+
+async def _rounds_block(db_path: str, t: dict) -> tuple[int, str]:
+    """(num_rounds, settings text) for embeds/announcements."""
+    rounds = await db.list_rounds(db_path, t["id"])
+    n = len(rounds)
+    if n <= 1:
+        return n, ""
+    lines = [f"🔁 {n} rounds × {t['holes']} holes"]
+    for r in rounds:
+        lines.append(f"R{r['round_number']}: {_round_settings_line(r)}")
+    return n, "\n".join(lines)
 
 
 async def build_leaderboard_embed(db_path: str, tournament_id: int,
@@ -53,11 +65,17 @@ async def build_leaderboard_embed(db_path: str, tournament_id: int,
         return None
     fmt = t["format"]
     pars = _pars_list(t)
+    num_rounds, rounds_text = await _rounds_block(db_path, t)
+    if num_rounds > 1:
+        header = f"{_format_label(fmt)} • {t['course']}"
+        settings_text = rounds_text
+    else:
+        header = f"{_format_label(fmt)} • {t['holes']} holes • {t['course']}"
+        settings_text = f"⛳ {sl.format_settings(t)}"
     title = f"🏆 {t['name']} — {'Final Standings' if final else 'Live Leaderboard'}"
     embed = discord.Embed(
         title=title,
-        description=f"{_format_label(fmt)} • {t['holes']} holes • {t['course']}\n"
-                    f"⛳ {sl.format_settings(t)}",
+        description=f"{header}\n{settings_text}",
         color=0x2E7D32 if final else 0x1B6CA8,
     )
     if fmt == "stroke":
@@ -75,12 +93,79 @@ async def build_leaderboard_embed(db_path: str, tournament_id: int,
 
 async def _stroke_ranked(db_path: str, t: dict
                       ) -> tuple[list[dict], list[dict]]:
-    """Latest cards per player: (verified ranked by total, pending by total)."""
+    """Multi-round stroke leaderboard: (ranked, pending).
+
+    Ranked rows carry player_discord_id, name, total (verified aggregate),
+    to_par (vs par x rounds_played), rounds_played, pending_rounds, and a
+    per-round "rounds" breakdown. Players rank by cumulative to-par (total
+    when pars are unknown). Players with no verified round appear in
+    pending with their latest pending card (historic shape).
+    """
+    rounds = await db.list_rounds(db_path, t["id"])
     cards = await db.get_scorecards(db_path, t["id"])
-    latest = _latest_by_player(cards)
-    verified = [c for c in latest.values() if c["status"] == "verified"]
-    pending = [c for c in latest.values() if c["status"] == "pending"]
-    return sl.rank_stroke(verified), sorted(pending, key=lambda c: c["total"])
+    pars = _pars_list(t)
+    par_round = sum(pars) if pars else None
+
+    latest: dict[tuple[str, int], dict] = {}
+    for c in sorted(cards, key=lambda c: c["submitted_at"]):
+        if c["player_discord_id"] is None:
+            continue
+        latest[(c["player_discord_id"], c.get("round_number") or 1)] = c
+
+    by_player: dict[str, dict[int, dict]] = {}
+    for (pid, rnd), c in latest.items():
+        by_player.setdefault(pid, {})[rnd] = c
+
+    ranked, pending = [], []
+    for pid, by_round in by_player.items():
+        player = await db.get_player(db_path, pid)
+        name = db.display_name_of(player, pid)
+        verified = {r: c for r, c in by_round.items()
+                    if c["status"] == "verified"}
+        if not verified:
+            pending.append(max(by_round.values(),
+                               key=lambda c: c["submitted_at"]))
+            continue
+        total = sum(c["total"] for c in verified.values())
+        to_par = (total - par_round * len(verified)
+                  if par_round is not None else None)
+        detail, pend_rounds = [], 0
+        for r in rounds:
+            rn = r["round_number"]
+            c = by_round.get(rn)
+            if c is not None and c["status"] == "verified":
+                detail.append({
+                    "round_number": rn, "total": c["total"],
+                    "to_par": (c["total"] - par_round
+                               if par_round is not None else None),
+                    "status": "verified",
+                })
+            else:
+                if c is not None:
+                    pend_rounds += 1
+                detail.append({
+                    "round_number": rn, "total": None, "to_par": None,
+                    "status": c["status"] if c else "not_started",
+                })
+        sort_key = to_par if to_par is not None else total
+        ranked.append({
+            "player_discord_id": pid, "name": name,
+            "total": total, "to_par": to_par,
+            "rounds_played": len(verified),
+            "pending_rounds": pend_rounds,
+            "rounds": detail,
+            "_sort": (sort_key, total, name),
+        })
+    ranked.sort(key=lambda r: r.pop("_sort"))
+    pending.sort(key=lambda c: c["total"])
+    return ranked, pending
+
+
+def _agg_suffix(total: int, pars: list[int] | None,
+                rounds_played: int) -> str:
+    """'(+6)' style suffix for an aggregate total across N rounds."""
+    tp = sl.format_to_par(sl.to_par(total, (pars or []) * rounds_played))
+    return f" ({tp})" if tp else ""
 
 
 async def _render_stroke(embed: discord.Embed, t: dict,
@@ -93,11 +178,25 @@ async def _render_stroke(embed: discord.Embed, t: dict,
                         inline=False)
         return
 
+    multi = any(len(r["rounds"]) > 1 for r in ranked)
     lines = []
-    for i, c in enumerate(ranked, start=1):
-        player = await db.get_player(db_path, c["player_discord_id"])
-        name = db.display_name_of(player, c["player_discord_id"])
-        lines.append(f"**{i}.** {name} — **{c['total']}**{_total_suffix(c['total'], pars)}")
+    for i, r in enumerate(ranked, start=1):
+        mark = " ⏳" if r["pending_rounds"] else ""
+        prog = (f" ({r['rounds_played']}/{len(r['rounds'])} rounds)"
+                if multi and r["rounds_played"] < len(r["rounds"]) else "")
+        lines.append(f"**{i}.** {r['name']} — **{r['total']}**"
+                     f"{_agg_suffix(r['total'], pars, r['rounds_played'])}"
+                     f"{prog}{mark}")
+        if multi:
+            bits = []
+            for d in r["rounds"]:
+                if d["status"] == "verified":
+                    bits.append(f"R{d['round_number']} {d['total']}"
+                                f"{_total_suffix(d['total'], pars)}")
+                elif d["status"] == "pending":
+                    bits.append(f"R{d['round_number']} ⏳")
+            if bits:
+                lines.append("  ↳ " + " · ".join(bits))
     if lines:
         embed.add_field(name="Standings", value="\n".join(lines[:25]), inline=False)
     if pending:
@@ -114,50 +213,87 @@ async def _render_stroke(embed: discord.Embed, t: dict,
 
 
 async def _team_rows(db_path: str, t: dict) -> tuple[list[dict], list[str]]:
-    """Ranked team rows (each includes team_id) plus scoreless team names."""
+    """Ranked team rows (each includes team_id) plus scoreless team names.
+
+    Round-aware: best_ball takes the per-hole best within each round, then
+    sums round totals; alt_shot/scramble sum each round's shared team card.
+    Rows carry total (aggregate), to_par, rounds_played, pending, and a
+    per-round "rounds" breakdown.
+    """
     teams = await db.get_teams(db_path, t["id"])
+    rounds = await db.list_rounds(db_path, t["id"])
+    pars = _pars_list(t)
+    par_round = sum(pars) if pars else None
     rows: list[dict] = []
     scoreless: list[str] = []
     for team in teams:
         members = await db.get_team_members(db_path, team["id"])
-        member_cards: list[list[int]] = []
+        round_totals: dict[int, int] = {}
         has_pending = False
-        if t["format"] in ("alt_shot", "scramble"):
-            # One shared team card (submitted under the team name).
-            card = await db.get_latest_team_card(db_path, t["id"], team["id"])
-            cards = [card] if card else []
-        else:
-            cards = [await db.get_latest_player_card(db_path, t["id"], m["discord_id"])
-                     for m in members]
-        for card in cards:
-            if card is None:
-                continue
-            if card["status"] != "verified":
-                has_pending = True
+        mismatch = False
+        detail: list[dict] = []
+        for r in rounds:
+            rn = r["round_number"]
+            member_cards: list[list[int]] = []
+            round_pending = False
+            if t["format"] in ("alt_shot", "scramble"):
+                # One shared team card per round (submitted under the team name).
+                cards = [await db.get_latest_team_card(db_path, t["id"],
+                                                       team["id"], rn)]
+            else:
+                cards = [await db.get_latest_player_card(
+                    db_path, t["id"], m["discord_id"], rn) for m in members]
+            for card in cards:
+                if card is None:
+                    continue
+                if card["status"] != "verified":
+                    has_pending = True
+                    round_pending = True
+                    continue
+                try:
+                    member_cards.append(json.loads(card["holes_json"]))
+                except (ValueError, TypeError):
+                    continue
+            if not member_cards:
+                detail.append({"round_number": rn, "total": None,
+                               "to_par": None,
+                               "status": "pending" if round_pending
+                               else "not_started"})
                 continue
             try:
-                member_cards.append(json.loads(card["holes_json"]))
-            except (ValueError, TypeError):
-                continue
-        if not member_cards:
-            scoreless.append(team["name"])
-            continue
-        try:
-            if t["format"] == "best_ball":
-                team_total = sl.best_ball_total(member_cards)
-            else:  # alt_shot / scramble: one shared team card
-                team_total = sum(member_cards[0])
-        except ValueError:
+                if t["format"] == "best_ball":
+                    rt = sl.best_ball_total(member_cards)
+                else:  # alt_shot / scramble: one shared team card
+                    rt = sum(member_cards[0])
+            except ValueError:
+                mismatch = True
+                break
+            round_totals[rn] = rt
+            detail.append({
+                "round_number": rn, "total": rt,
+                "to_par": (rt - par_round if par_round is not None else None),
+                "status": "verified",
+            })
+        if mismatch:
             scoreless.append(f"{team['name']} (card mismatch)")
             continue
+        if not round_totals:
+            scoreless.append(team["name"])
+            continue
+        total = sum(round_totals.values())
+        to_par = (total - par_round * len(round_totals)
+                  if par_round is not None else None)
+        sort_key = to_par if to_par is not None else total
         rows.append({"team_id": team["id"], "name": team["name"],
-                     "total": team_total, "members": len(members),
-                     "pending": has_pending})
-
-    if t["format"] == "scramble":
-        rows = sl.rank_scramble(rows)
-    else:
-        rows.sort(key=lambda r: r["total"])
+                     "total": total, "to_par": to_par,
+                     "members": len(members), "pending": has_pending,
+                     "rounds_played": len(round_totals),
+                     "rounds": detail, "_sort": (sort_key, total,
+                                                 team["name"])})
+    for r in rows:
+        r.pop("_sort", None)
+    rows.sort(key=lambda r: (r["to_par"] if r["to_par"] is not None
+                             else r["total"], r["total"], r["name"]))
     return rows, scoreless
 
 
@@ -171,14 +307,28 @@ async def _render_teams(embed: discord.Embed, t: dict,
         return
     rows, scoreless = await _team_rows(db_path, t)
 
+    multi = any(len(r["rounds"]) > 1 for r in rows)
     if rows:
         lines = []
         for i, r in enumerate(rows, start=1):
             mark = " ⏳" if r["pending"] else ""
+            prog = (f" ({r['rounds_played']}/{len(r['rounds'])} rounds)"
+                    if multi and r["rounds_played"] < len(r["rounds"]) else "")
             lines.append(
                 f"**{i}.** {r['name']} — **{r['total']}**"
-                f"{_total_suffix(r['total'], pars)} ({r['members']} players){mark}"
+                f"{_agg_suffix(r['total'], pars, r['rounds_played'])}"
+                f" ({r['members']} players){prog}{mark}"
             )
+            if multi:
+                bits = []
+                for d in r["rounds"]:
+                    if d["status"] == "verified":
+                        bits.append(f"R{d['round_number']} {d['total']}"
+                                    f"{_total_suffix(d['total'], pars)}")
+                    elif d["status"] == "pending":
+                        bits.append(f"R{d['round_number']} ⏳")
+                if bits:
+                    lines.append("  ↳ " + " · ".join(bits))
         embed.add_field(name="Team standings", value="\n".join(lines[:25]), inline=False)
     if scoreless:
         embed.add_field(name="No verified scores yet",
@@ -252,11 +402,11 @@ async def get_leader(db_path: str, tournament_id: int) -> dict | None:
         if not ranked:
             return None
         c = ranked[0]
-        player = await db.get_player(db_path, c["player_discord_id"])
         return {
             "key": c["player_discord_id"],
-            "name": db.display_name_of(player, c["player_discord_id"]),
-            "scoreline": f"{c['total']}{_total_suffix(c['total'], pars)}",
+            "name": c["name"],
+            "scoreline": f"{c['total']}"
+                         f"{_agg_suffix(c['total'], pars, c['rounds_played'])}",
             "sort_value": _leader_sort_str(fmt, c["total"]),
         }
     if fmt in ("best_ball", "alt_shot", "scramble"):
@@ -267,7 +417,8 @@ async def get_leader(db_path: str, tournament_id: int) -> dict | None:
         return {
             "key": r["name"],
             "name": r["name"],
-            "scoreline": f"{r['total']}{_total_suffix(r['total'], pars)}",
+            "scoreline": f"{r['total']}"
+                         f"{_agg_suffix(r['total'], pars, r['rounds_played'])}",
             "sort_value": _leader_sort_str(fmt, r["total"]),
         }
     if fmt == "match":
@@ -299,6 +450,10 @@ async def final_standings_points(db_path: str, tournament_id: int) -> list[dict]
     fmt = t["format"]
     rows: list[dict] = []
 
+    def _rank_key(r: dict):
+        """Ranking key shared with display order (to-par when known)."""
+        return r["to_par"] if r.get("to_par") is not None else r["total"]
+
     def award(ranked: list[tuple[int, list[str]]]) -> None:
         """ranked = [(total_or_key, [player_ids...])] in standing order."""
         prev = None
@@ -314,13 +469,13 @@ async def final_standings_points(db_path: str, tournament_id: int) -> list[dict]
 
     if fmt == "stroke":
         ranked, _ = await _stroke_ranked(db_path, t)
-        award([(c["total"], [c["player_discord_id"]]) for c in ranked])
+        award([(_rank_key(c), [c["player_discord_id"]]) for c in ranked])
     elif fmt in ("best_ball", "alt_shot", "scramble"):
         team_rows, _ = await _team_rows(db_path, t)
         ranked: list[tuple[int, list[str]]] = []
         for r in team_rows:
             members = await db.get_team_members(db_path, r["team_id"])
-            ranked.append((r["total"], [m["discord_id"] for m in members]))
+            ranked.append((_rank_key(r), [m["discord_id"] for m in members]))
         award(ranked)
     elif fmt == "match":
         matches = await db.list_matches(db_path, t["id"], status="confirmed")

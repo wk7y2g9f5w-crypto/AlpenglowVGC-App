@@ -53,6 +53,8 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
         greenSpeed: _tournament.greenSpeed,
         registered: registered,
         pars: _tournament.pars,
+        numRounds: _tournament.numRounds,
+        rounds: _tournament.rounds,
       );
 
   Future<void> _register() async {
@@ -160,12 +162,23 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
             const SizedBox(height: 8),
             Text(t.course ?? 'Course TBD'),
             Text(
-                '${t.format ?? 'Format TBD'}${t.holes != null ? ' · ${t.holes} holes' : ''}'),
+                '${t.format ?? 'Format TBD'}${t.holes != null ? ' · ${t.holes} holes' : ''}${t.isMultiRound ? ' · 🔁 ${t.numRounds} rounds' : ''}'),
             Text(formatDateRange(t.startDate, t.endDate)),
             if (t.settingsSummary.isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(t.settingsSummary,
                   style: const TextStyle(color: Colors.grey, fontSize: 13)),
+            ],
+            if (t.isMultiRound) ...[
+              const SizedBox(height: 8),
+              ...t.rounds.map((r) => Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Round ${r.roundNumber}: ${r.settingsSummary}',
+                      style: const TextStyle(
+                          color: Colors.grey, fontSize: 13),
+                    ),
+                  )),
             ],
             const SizedBox(height: 12),
             SizedBox(
@@ -495,7 +508,13 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
           itemBuilder: (context, i) {
             final e = entries[i];
             final rank = e.rank ?? '${i + 1}';
-            return ListTile(
+            final rp = e.roundsPlayed;
+            final nr = e.numRounds;
+            final progress = (rp != null && nr != null && nr > 1)
+                ? '$rp/$nr rounds'
+                : null;
+            final breakdown = e.roundBreakdown;
+            return ExpansionTile(
               leading: CircleAvatar(
                 backgroundColor:
                     i == 0 ? Colors.amber.shade700 : Colors.grey.shade300,
@@ -506,6 +525,7 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
               ),
               title: Text(e.name,
                   style: const TextStyle(fontWeight: FontWeight.w600)),
+              subtitle: progress != null ? Text(progress) : null,
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -517,6 +537,36 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
                       style: const TextStyle(color: Colors.grey)),
                 ],
               ),
+              children: breakdown.isEmpty
+                  ? []
+                  : [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                        child: Column(
+                          children: breakdown.map((d) {
+                            final rn =
+                                (d['round_number'] as num?)?.toInt() ?? 0;
+                            final tot =
+                                (d['total'] as num?)?.toInt();
+                            final tp =
+                                (d['to_par'] as num?)?.toInt();
+                            return Row(
+                              mainAxisAlignment:
+                                  MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text('Round $rn',
+                                    style: const TextStyle(
+                                        color: Colors.grey)),
+                                Text(
+                                    '${_formatToPar(tp?.toString())} · ${tot ?? '–'}',
+                                    style: const TextStyle(
+                                        color: Colors.grey)),
+                              ],
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ],
             );
           },
         );

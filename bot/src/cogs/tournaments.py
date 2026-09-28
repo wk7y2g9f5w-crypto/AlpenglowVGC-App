@@ -122,6 +122,7 @@ class Tournaments(commands.Cog):
         pin_position="Pin color for the round (default: White)",
         wind_strength="Wind strength for the round (default: Moderate)",
         green_speed="Green speed: Very Fast or Pro (default: Pro)",
+        rounds="Number of 18-hole rounds, 1-5 (default: 1). Every round uses the same course; each round copies these tee/pin/wind settings (tune per round later with /tournament set_round or the app)",
         pars="Optional — auto-fills from the course database when you pick a known course; enter comma-separated pars to override",
         description="Optional blurb shown on the announcement",
     )
@@ -140,12 +141,25 @@ class Tournaments(commands.Cog):
         pin_position: Literal["black", "white", "red"] = "white",
         wind_strength: Literal["low", "moderate", "severe"] = "moderate",
         green_speed: Literal["veryfast", "pro"] = "pro",
+        rounds: Literal[1, 2, 3, 4, 5] = 1,
         pars: Optional[str] = None,
         description: Optional[str] = None,
     ):
         if not await require_admin(interaction):
             return
         await interaction.response.defer(ephemeral=True)
+
+        if format == "match" and rounds > 1:
+            await interaction.followup.send(
+                "❌ Match play tournaments are single-round.", ephemeral=True
+            )
+            return
+        if rounds > 1 and holes != 18:
+            await interaction.followup.send(
+                "❌ Multi-round tournaments are 18 holes per round.",
+                ephemeral=True,
+            )
+            return
 
         try:
             start_d, end_d = sl.validate_date_range(start_date, end_date)
@@ -184,6 +198,12 @@ class Tournaments(commands.Cog):
             pin_position=pin_position,
             wind_strength=wind_strength,
             green_speed=green_speed,
+            rounds=[
+                {"tee_position": tee_position,
+                 "pin_position": pin_position,
+                 "wind_strength": wind_strength}
+                for _ in range(rounds)
+            ],
         )
         self.bot.add_view(RegisterView(tid))
 
@@ -196,19 +216,36 @@ class Tournaments(commands.Cog):
         embed.add_field(name="Format", value=fmt_label, inline=True)
         embed.add_field(name="Holes", value=str(holes), inline=True)
         embed.add_field(name="Course", value=course.strip(), inline=True)
+        if rounds > 1:
+            embed.add_field(name="Rounds", value=f"🔁 {rounds} rounds",
+                            inline=True)
         embed.add_field(
             name="Dates",
             value=f"🗓️ {sl.format_date_range(start_d.isoformat(), end_d.isoformat())}",
             inline=True,
         )
-        embed.add_field(
-            name="Settings",
-            value=f"⛳ {sl.TEE_LABELS[tee_position]} tees • "
-                  f"📍 {sl.PIN_LABELS[pin_position]} pins • "
-                  f"💨 {sl.WIND_LABELS[wind_strength]} wind • "
-                  f"🟢 {sl.GREEN_LABELS[green_speed]} greens",
-            inline=True,
-        )
+        if rounds > 1:
+            round_lines = "\n".join(
+                f"R{i}: {sl.TEE_LABELS[tee_position]} tees • "
+                f"{sl.PIN_LABELS[pin_position]} pins • "
+                f"{sl.WIND_LABELS[wind_strength]} wind"
+                for i in range(1, rounds + 1)
+            )
+            embed.add_field(
+                name="Round settings",
+                value=f"{round_lines}\n🟢 {sl.GREEN_LABELS[green_speed]} greens "
+                      f"(all rounds)\n_Tune per round with /tournament set_round._",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Settings",
+                value=f"⛳ {sl.TEE_LABELS[tee_position]} tees • "
+                      f"📍 {sl.PIN_LABELS[pin_position]} pins • "
+                      f"💨 {sl.WIND_LABELS[wind_strength]} wind • "
+                      f"🟢 {sl.GREEN_LABELS[green_speed]} greens",
+                inline=True,
+            )
         if pars_clean:
             par_total = sum(int(p) for p in pars_clean.split(","))
             par_label = f"{par_total} (course pars)" if pars_auto else str(par_total)
@@ -226,6 +263,53 @@ class Tournaments(commands.Cog):
         await interaction.followup.send(
             f"✅ Tournament **{name.strip()}** created and announced.", ephemeral=True
         )
+
+    @tournament.command(name="set_round",
+                        description="Change a round's tee/pin/wind (admin)")
+    @app_commands.autocomplete(tournament=active_tournament_autocomplete)
+    @app_commands.describe(
+        tournament="Defaults to the single active tournament",
+        round_number="Which round (1-5) to change",
+        tee_position="Which tees to play from",
+        pin_position="Pin color for the round",
+        wind_strength="Wind strength for the round",
+    )
+    async def tournament_set_round(
+        self,
+        interaction: discord.Interaction,
+        round_number: Literal[1, 2, 3, 4, 5],
+        tournament: Optional[int] = None,
+        tee_position: Optional[Literal["front", "middle", "back"]] = None,
+        pin_position: Optional[Literal["black", "white", "red"]] = None,
+        wind_strength: Optional[Literal["low", "moderate", "severe"]] = None,
+    ):
+        if not await require_admin(interaction):
+            return
+        t, err = await resolve_tournament(
+            interaction, tournament, ["registration_open", "in_progress"]
+        )
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        rnd = await db.update_round(
+            self.bot.db_path, t["id"], round_number,
+            tee_position=tee_position, pin_position=pin_position,
+            wind_strength=wind_strength,
+        )
+        if rnd is None:
+            await interaction.response.send_message(
+                f"❌ Round {round_number} doesn't exist for **{t['name']}**.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"✅ **{t['name']}** — Round {round_number}: "
+            f"{sl.TEE_LABELS[rnd['tee_position']]} tees • "
+            f"{sl.PIN_LABELS[rnd['pin_position']]} pins • "
+            f"{sl.WIND_LABELS[rnd['wind_strength']]} wind.",
+            ephemeral=True,
+        )
+        await ts.maybe_refresh(self.bot, str(interaction.guild_id))
 
     @tournament.command(name="list", description="List tournaments in this server")
     async def tournament_list(self, interaction: discord.Interaction):
@@ -246,10 +330,15 @@ class Tournaments(commands.Cog):
             status = t["status"].replace("_", " ")
             fmt_label = FORMAT_LABELS.get(t["format"], t["format"])
             dates = sl.format_date_range(t.get("start_date"), t.get("end_date"))
+            rounds = await db.list_rounds(self.bot.db_path, t["id"])
+            if len(rounds) > 1:
+                settings_line = f"🔁 {len(rounds)} rounds • ⛳ {sl.format_settings(t)}"
+            else:
+                settings_line = f"⛳ {sl.format_settings(t)}"
             embed.add_field(
                 name=f"{t['name']} (ID {t['id']})",
                 value=(f"{fmt_label} • {t['holes']} holes • {t['course']}\n"
-                       f"⛳ {sl.format_settings(t)}\n"
+                       f"{settings_line}\n"
                        f"🗓️ {dates}\nStatus: **{status}**"),
                 inline=False,
             )

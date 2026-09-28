@@ -36,6 +36,18 @@ CREATE TABLE IF NOT EXISTS tournaments(
   green_speed TEXT NOT NULL DEFAULT 'pro'
     CHECK(green_speed IN ('veryfast','pro'))
 );
+CREATE TABLE IF NOT EXISTS rounds(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  round_number INTEGER NOT NULL CHECK(round_number BETWEEN 1 AND 5),
+  tee_position TEXT NOT NULL DEFAULT 'middle'
+    CHECK(tee_position IN ('front','middle','back')),
+  pin_position TEXT NOT NULL DEFAULT 'white'
+    CHECK(pin_position IN ('black','white','red')),
+  wind_strength TEXT NOT NULL DEFAULT 'moderate'
+    CHECK(wind_strength IN ('low','moderate','severe')),
+  UNIQUE(tournament_id, round_number)
+);
 CREATE TABLE IF NOT EXISTS players(
   discord_id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
@@ -87,6 +99,7 @@ CREATE TABLE IF NOT EXISTS boards(
 CREATE TABLE IF NOT EXISTS scorecards(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  round_number INTEGER NOT NULL DEFAULT 1 CHECK(round_number BETWEEN 1 AND 5),
   player_discord_id TEXT,
   team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
   tee_time_id INTEGER REFERENCES tee_times(id) ON DELETE SET NULL,
@@ -236,6 +249,29 @@ async def _migrate(db_path: str) -> None:
         if "submitted_by" not in card_cols:
             await con.execute("ALTER TABLE scorecards ADD COLUMN submitted_by TEXT")
             await con.commit()
+        if "round_number" not in card_cols:
+            await con.execute(
+                "ALTER TABLE scorecards ADD COLUMN round_number INTEGER"
+                " NOT NULL DEFAULT 1"
+            )
+            await con.commit()
+
+        # Every tournament gets at least round 1 (copies the tournament's
+        # own tee/pin/wind). The rounds table itself is created by SCHEMA.
+        cur = await con.execute(
+            "SELECT id, tee_position, pin_position, wind_strength"
+            " FROM tournaments t WHERE NOT EXISTS"
+            " (SELECT 1 FROM rounds r WHERE r.tournament_id = t.id)"
+        )
+        for tid, tee, pin, wind in await cur.fetchall():
+            await con.execute(
+                "INSERT INTO rounds (tournament_id, round_number,"
+                " tee_position, pin_position, wind_strength)"
+                " VALUES (?,?,?,?,?)",
+                (tid, 1, tee or "middle", pin or "white",
+                 wind or "moderate"),
+            )
+        await con.commit()
 
         cur = await con.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tournaments'"
@@ -324,7 +360,13 @@ async def create_tournament(db_path, guild_id, name, format, holes, course,
                             start_date=None, end_date=None,
                             tee_position="middle", pin_position="white",
                             wind_strength="moderate",
-                            green_speed="pro") -> int:
+                            green_speed="pro", rounds=None) -> int:
+    """Create a tournament plus its rounds.
+
+    ``rounds`` is an optional list of dicts with tee_position/pin_position/
+    wind_strength keys (round numbers implied by order, 1-based). When
+    omitted, a single round copies the tournament-level settings.
+    """
     lastrowid, _ = await _execute(
         db_path,
         "INSERT INTO tournaments (guild_id, name, format, holes, course, pars,"
@@ -335,7 +377,90 @@ async def create_tournament(db_path, guild_id, name, format, holes, course,
          created_by, utcnow_iso(), start_date, end_date,
          tee_position, pin_position, wind_strength, green_speed),
     )
+    if not rounds:
+        rounds = [{"tee_position": tee_position,
+                   "pin_position": pin_position,
+                   "wind_strength": wind_strength}]
+    for i, r in enumerate(rounds, start=1):
+        await create_round(
+            db_path, lastrowid, i,
+            r.get("tee_position") or "middle",
+            r.get("pin_position") or "white",
+            r.get("wind_strength") or "moderate",
+        )
     return lastrowid
+
+
+async def create_round(db_path, tournament_id: int, round_number: int,
+                       tee_position: str = "middle",
+                       pin_position: str = "white",
+                       wind_strength: str = "moderate") -> int:
+    lastrowid, _ = await _execute(
+        db_path,
+        "INSERT INTO rounds (tournament_id, round_number,"
+        " tee_position, pin_position, wind_strength)"
+        " VALUES (?,?,?,?,?)"
+        " ON CONFLICT(tournament_id, round_number) DO UPDATE SET"
+        " tee_position = excluded.tee_position,"
+        " pin_position = excluded.pin_position,"
+        " wind_strength = excluded.wind_strength",
+        (tournament_id, round_number, tee_position, pin_position,
+         wind_strength),
+    )
+    return lastrowid
+
+
+async def list_rounds(db_path, tournament_id: int) -> list[dict]:
+    """Rounds for a tournament, ordered by round_number (never empty)."""
+    rows = await _fetchall(
+        db_path,
+        "SELECT * FROM rounds WHERE tournament_id = ? ORDER BY round_number",
+        (tournament_id,),
+    )
+    if rows:
+        return rows
+    # Defensive: tournaments predating the rounds table.
+    t = await get_tournament(db_path, tournament_id)
+    if t is None:
+        return []
+    await create_round(db_path, tournament_id, 1,
+                       t.get("tee_position") or "middle",
+                       t.get("pin_position") or "white",
+                       t.get("wind_strength") or "moderate")
+    return await _fetchall(
+        db_path,
+        "SELECT * FROM rounds WHERE tournament_id = ? ORDER BY round_number",
+        (tournament_id,),
+    )
+
+
+async def get_round(db_path, tournament_id: int,
+                    round_number: int) -> dict | None:
+    return await _fetchone(
+        db_path,
+        "SELECT * FROM rounds WHERE tournament_id = ? AND round_number = ?",
+        (tournament_id, round_number),
+    )
+
+
+async def update_round(db_path, tournament_id: int, round_number: int,
+                       tee_position: str | None = None,
+                       pin_position: str | None = None,
+                       wind_strength: str | None = None) -> dict | None:
+    """Patch a round's settings; returns the updated round (or None)."""
+    rnd = await get_round(db_path, tournament_id, round_number)
+    if rnd is None:
+        return None
+    await _execute(
+        db_path,
+        "UPDATE rounds SET tee_position = ?, pin_position = ?,"
+        " wind_strength = ? WHERE tournament_id = ? AND round_number = ?",
+        (tee_position or rnd["tee_position"],
+         pin_position or rnd["pin_position"],
+         wind_strength or rnd["wind_strength"],
+         tournament_id, round_number),
+    )
+    return await get_round(db_path, tournament_id, round_number)
 
 
 async def get_tournament(db_path, tournament_id) -> dict | None:
@@ -982,24 +1107,29 @@ async def set_leader(db_path, tournament_id, leader_key, leader_sort) -> None:
 # ---------------------------------------------------------------- scorecards
 async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_id,
                            scores: list[int], status: str,
-                           submitted_by: str | None = None) -> int:
+                           submitted_by: str | None = None,
+                           round_number: int = 1) -> int:
     holes_json = json.dumps(scores)
     total = sum(scores)
     now = utcnow_iso()
+    round_number = max(1, min(5, int(round_number or 1)))
     if team_id is not None:
         existing = await _fetchone(
             db_path,
             "SELECT id FROM scorecards WHERE tournament_id = ? AND team_id = ?"
-            " AND tee_time_id = ? ORDER BY submitted_at DESC LIMIT 1",
-            (tournament_id, team_id, tee_time_id),
+            " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+            " AND round_number = ?"
+            " ORDER BY submitted_at DESC LIMIT 1",
+            (tournament_id, team_id, tee_time_id, round_number),
         )
     else:
         existing = await _fetchone(
             db_path,
             "SELECT id FROM scorecards WHERE tournament_id = ? AND player_discord_id = ?"
-            " AND tee_time_id = ? AND team_id IS NULL"
+            " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+            " AND team_id IS NULL AND round_number = ?"
             " ORDER BY submitted_at DESC LIMIT 1",
-            (tournament_id, player_id, tee_time_id),
+            (tournament_id, player_id, tee_time_id, round_number),
         )
     if existing:
         await _execute(
@@ -1011,11 +1141,12 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
         return existing["id"]
     lastrowid, _ = await _execute(
         db_path,
-        "INSERT INTO scorecards (tournament_id, player_discord_id, team_id, tee_time_id,"
-        " holes_json, total, status, submitted_at, submitted_by)"
-        " VALUES (?,?,?,?,?,?,?,?,?)",
-        (tournament_id, player_id, team_id, tee_time_id, holes_json, total,
-         status, now, submitted_by),
+        "INSERT INTO scorecards (tournament_id, round_number, player_discord_id,"
+        " team_id, tee_time_id, holes_json, total, status, submitted_at,"
+        " submitted_by)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (tournament_id, round_number, player_id, team_id, tee_time_id,
+         holes_json, total, status, now, submitted_by),
     )
     return lastrowid
 
@@ -1035,22 +1166,27 @@ async def get_scorecards(db_path, tournament_id, status=None) -> list[dict]:
     return await _fetchall(db_path, sql, tuple(params))
 
 
-async def get_latest_player_card(db_path, tournament_id, discord_id) -> dict | None:
-    return await _fetchone(
-        db_path,
-        "SELECT * FROM scorecards WHERE tournament_id = ? AND player_discord_id = ?"
-        " AND team_id IS NULL ORDER BY submitted_at DESC LIMIT 1",
-        (tournament_id, discord_id),
-    )
+async def get_latest_player_card(db_path, tournament_id, discord_id,
+                                 round_number: int | None = None) -> dict | None:
+    sql = ("SELECT * FROM scorecards WHERE tournament_id = ?"
+           " AND player_discord_id = ? AND team_id IS NULL")
+    params: list = [tournament_id, discord_id]
+    if round_number is not None:
+        sql += " AND round_number = ?"
+        params.append(round_number)
+    sql += " ORDER BY submitted_at DESC LIMIT 1"
+    return await _fetchone(db_path, sql, tuple(params))
 
 
-async def get_latest_team_card(db_path, tournament_id, team_id) -> dict | None:
-    return await _fetchone(
-        db_path,
-        "SELECT * FROM scorecards WHERE tournament_id = ? AND team_id = ?"
-        " ORDER BY submitted_at DESC LIMIT 1",
-        (tournament_id, team_id),
-    )
+async def get_latest_team_card(db_path, tournament_id, team_id,
+                               round_number: int | None = None) -> dict | None:
+    sql = "SELECT * FROM scorecards WHERE tournament_id = ? AND team_id = ?"
+    params: list = [tournament_id, team_id]
+    if round_number is not None:
+        sql += " AND round_number = ?"
+        params.append(round_number)
+    sql += " ORDER BY submitted_at DESC LIMIT 1"
+    return await _fetchone(db_path, sql, tuple(params))
 
 
 async def verify_scorecard(db_path, card_id, verified_by) -> bool:

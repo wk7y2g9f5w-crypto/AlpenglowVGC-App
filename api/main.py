@@ -60,7 +60,7 @@ GUILD_ID = str(config.GUILD_ID)
 
 import httpx  # noqa: E402
 from fastapi import Depends, FastAPI, HTTPException, Request, status  # noqa: E402
-from pydantic import BaseModel, Field, field_validator  # noqa: E402
+from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -276,6 +276,7 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
     pars = _parse_pars(pars_csv)
     return {
         "player_discord_id": card["player_discord_id"],
+        "round_number": card.get("round_number") or 1,
         "scores": scores,
         "total": card["total"],
         "to_par": sl.to_par(card["total"], pars),
@@ -284,7 +285,8 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
     }
 
 
-def _tournament_json(t: dict, registered: bool) -> dict:
+def _tournament_json(t: dict, registered: bool,
+                     rounds: list[dict] | None = None) -> dict:
     pars_csv = t.get("pars")
     pars = None
     if pars_csv:
@@ -292,6 +294,7 @@ def _tournament_json(t: dict, registered: bool) -> dict:
             pars = [int(p) for p in str(pars_csv).split(",") if p.strip()]
         except ValueError:
             pars = None
+    rounds = rounds or []
     return {
         "id": t["id"],
         "name": t["name"],
@@ -307,6 +310,16 @@ def _tournament_json(t: dict, registered: bool) -> dict:
         "green_speed": t.get("green_speed"),
         "pars": pars,
         "registered": registered,
+        "num_rounds": len(rounds) or 1,
+        "rounds": [
+            {
+                "round_number": r["round_number"],
+                "tee_position": r["tee_position"],
+                "pin_position": r["pin_position"],
+                "wind_strength": r["wind_strength"],
+            }
+            for r in rounds
+        ],
     }
 
 
@@ -345,6 +358,7 @@ class TeeTimeCreate(BaseModel):
 class ScorecardSubmit(BaseModel):
     player_discord_id: str
     scores: list[int]
+    round_number: int = Field(default=1, ge=1, le=5)
 
     @field_validator("scores")
     @classmethod
@@ -358,6 +372,38 @@ class ScorecardSubmit(BaseModel):
 class PlayerUpdate(BaseModel):
     timezone: str | None = None
     golfplus_handle: str | None = None
+
+
+class RoundCreate(BaseModel):
+    """Per-round Golf+ settings. Round numbers are implied by list order."""
+
+    tee_position: str = "middle"
+    pin_position: str = "white"
+    wind_strength: str = "moderate"
+
+    @field_validator("tee_position")
+    @classmethod
+    def _tee(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in ("front", "middle", "back"):
+            raise ValueError(f"Unknown tee position '{v}'")
+        return v
+
+    @field_validator("pin_position")
+    @classmethod
+    def _pin(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in ("black", "white", "red"):
+            raise ValueError(f"Unknown pin position '{v}'")
+        return v
+
+    @field_validator("wind_strength")
+    @classmethod
+    def _wind(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in ("low", "moderate", "severe"):
+            raise ValueError(f"Unknown wind strength '{v}'")
+        return v
 
 
 class TournamentCreate(BaseModel):
@@ -375,6 +421,20 @@ class TournamentCreate(BaseModel):
     green_speed: str = "pro"
     pars: str | None = None  # comma-separated override; auto-filled when omitted
     description: str | None = None
+    # 1-5 rounds; each is one full play of the course (18 holes).
+    # When omitted, a single round copies the top-level tee/pin/wind.
+    rounds: list[RoundCreate] | None = None
+
+    @model_validator(mode="after")
+    def _rounds_valid(self) -> "TournamentCreate":
+        if self.rounds is not None:
+            if not 1 <= len(self.rounds) <= 5:
+                raise ValueError("rounds must have 1-5 entries")
+            if self.format == "match" and len(self.rounds) > 1:
+                raise ValueError("match play tournaments are single-round")
+            if len(self.rounds) > 1 and self.holes != 18:
+                raise ValueError("multi-round tournaments are 18 holes per round")
+        return self
 
     @field_validator("name", "course")
     @classmethod
@@ -536,7 +596,8 @@ async def list_tournaments(user: CurrentUser) -> list[dict]:
     out = []
     for t in rows:
         registered = await db.is_registered(DB_PATH, t["id"], user["discord_id"])
-        out.append(_tournament_json(t, registered))
+        rounds = await db.list_rounds(DB_PATH, t["id"])
+        out.append(_tournament_json(t, registered, rounds))
     return out
 
 
@@ -587,10 +648,23 @@ async def create_tournament(body: TournamentCreate, user: CrewUser) -> dict:
         pin_position=body.pin_position,
         wind_strength=body.wind_strength,
         green_speed=body.green_speed,
+        rounds=(
+            [
+                {
+                    "tee_position": r.tee_position,
+                    "pin_position": r.pin_position,
+                    "wind_strength": r.wind_strength,
+                }
+                for r in body.rounds
+            ]
+            if body.rounds
+            else None
+        ),
     )
     await db.enqueue_outbox(DB_PATH, "tournament_created", {"tournament_id": tid})
     t = await db.get_tournament(DB_PATH, tid)
-    return _tournament_json(t, registered=False)
+    rounds = await db.list_rounds(DB_PATH, tid)
+    return _tournament_json(t, registered=False, rounds=rounds)
 
 
 @app.post("/api/tournaments/{tournament_id}/register")
@@ -805,7 +879,9 @@ async def decline_request(
 # Scorecards
 # --------------------------------------------------------------------------
 @app.get("/api/tee-times/{tee_time_id}/scorecard")
-async def get_scorecard(tee_time_id: int, user: CurrentUser) -> dict:
+async def get_scorecard(
+    tee_time_id: int, user: CurrentUser, round_number: int | None = None
+) -> dict:
     tt, t = await _tee_time_or_404(tee_time_id)
     # The caller's latest card *for this tee time* (get_latest_player_card is
     # tournament-wide, so filter down to this tee time).
@@ -816,6 +892,8 @@ async def get_scorecard(tee_time_id: int, user: CurrentUser) -> dict:
             for c in reversed(cards)
             if c.get("player_discord_id") == user["discord_id"]
             and c.get("tee_time_id") == tt["id"]
+            and (round_number is None
+                 or (c.get("round_number") or 1) == round_number)
         ),
         None,
     )
@@ -849,6 +927,13 @@ async def put_scorecard(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Expected {t['holes']} hole scores but got {len(body.scores)}.",
         )
+    # Gate 3b: the round must exist on this tournament.
+    rnd = await db.get_round(DB_PATH, t["id"], body.round_number)
+    if rnd is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Round {body.round_number} does not exist for this tournament.",
+        )
     # Gate 4: the tee time must have started (bot's tee-time gate).
     if not sl.tee_time_passed(tt.get("starts_at") or ""):
         raise HTTPException(
@@ -868,6 +953,7 @@ async def put_scorecard(
         body.scores,
         status_value,
         submitted_by=user["discord_id"],
+        round_number=body.round_number,
     )
     card = await db.get_scorecard(DB_PATH, card_id)
     return {"card": _card_json(card, t.get("pars"))}
@@ -880,6 +966,7 @@ async def put_scorecard(
 async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
     t = await _tournament_or_404(tournament_id)
     pars = _parse_pars(t.get("pars"))
+    rounds = await db.list_rounds(DB_PATH, t["id"])
     base = {
         "tournament_id": t["id"],
         "name": t["name"],
@@ -888,31 +975,58 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
         "course": t["course"],
         "status": t["status"],
         "settings": sl.format_settings(t),
+        "num_rounds": len(rounds) or 1,
+        "rounds": [
+            {
+                "round_number": r["round_number"],
+                "tee_position": r["tee_position"],
+                "pin_position": r["pin_position"],
+                "wind_strength": r["wind_strength"],
+            }
+            for r in rounds
+        ],
     }
     fmt = t["format"]
     if fmt == "stroke":
-        # Same ranking helpers the bot uses (lr._stroke_ranked -> sl.rank_stroke).
+        # Same ranking helpers the bot uses (lr._stroke_ranked aggregates
+        # verified cards across rounds; to_par is the cumulative value).
         ranked, pending = await lr._stroke_ranked(DB_PATH, t)
 
-        async def _row(i: int, c: dict) -> dict:
-            player = await db.get_player(DB_PATH, c["player_discord_id"])
+        def _row(i: int, c: dict, verified: bool) -> dict:
+            tp = c.get("to_par")
+            if tp is None:
+                tp = sl.to_par(c["total"], pars)
             return {
                 "position": i,
                 "discord_id": c["player_discord_id"],
-                "display_name": db.display_name_of(player, c["player_discord_id"]),
+                "display_name": c.get("name")
+                or db.display_name_of(None, c["player_discord_id"]),
                 "total": c["total"],
-                "to_par": sl.to_par(c["total"], pars),
-                "to_par_display": sl.format_to_par(sl.to_par(c["total"], pars)),
-                "status": c["status"],
+                "to_par": tp,
+                "to_par_display": sl.format_to_par(tp),
+                "status": "verified" if verified else c["status"],
+                "rounds_played": c.get("rounds_played", 1),
+                "rounds": c.get("rounds", []),
             }
+
+        async def _pending_row(c: dict) -> dict:
+            player = await db.get_player(DB_PATH, c["player_discord_id"])
+            return _row(
+                0,
+                {**c,
+                 "name": db.display_name_of(player, c["player_discord_id"])},
+                False,
+            )
 
         return {
             **base,
-            "standings": [await _row(i, c) for i, c in enumerate(ranked, 1)],
-            "pending": [await _row(0, c) for c in pending],
+            "standings": [_row(i, c, True)
+                          for i, c in enumerate(ranked, 1)],
+            "pending": [await _pending_row(c) for c in pending],
         }
     if fmt in ("best_ball", "alt_shot", "scramble"):
-        # Same ranking the bot uses (lr._team_rows -> sl.rank_scramble etc.).
+        # Same ranking the bot uses (lr._team_rows aggregates per round,
+        # then sums; to_par is the cumulative value).
         rows, scoreless = await lr._team_rows(DB_PATH, t)
         standings = [
             {
@@ -920,10 +1034,18 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
                 "team_id": r["team_id"],
                 "team_name": r["name"],
                 "total": r["total"],
-                "to_par": sl.to_par(r["total"], pars),
-                "to_par_display": sl.format_to_par(sl.to_par(r["total"], pars)),
+                "to_par": r["to_par"]
+                if r["to_par"] is not None
+                else sl.to_par(r["total"], pars),
+                "to_par_display": sl.format_to_par(
+                    r["to_par"]
+                    if r["to_par"] is not None
+                    else sl.to_par(r["total"], pars)
+                ),
                 "players": r["members"],
                 "pending": r["pending"],
+                "rounds_played": r["rounds_played"],
+                "rounds": r["rounds"],
             }
             for i, r in enumerate(rows, 1)
         ]

@@ -21,6 +21,13 @@ class CreateTournamentScreen extends StatefulWidget {
   State<CreateTournamentScreen> createState() => _CreateTournamentScreenState();
 }
 
+class _RoundSettings {
+  String tee;
+  String pin;
+  String wind;
+  _RoundSettings({this.tee = 'middle', this.pin = 'white', this.wind = 'moderate'});
+}
+
 class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
@@ -39,6 +46,8 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
   String _pinPosition = 'white';
   String _windStrength = 'moderate';
   String _greenSpeed = 'pro';
+  int _numRounds = 1;
+  List<_RoundSettings> _roundSettings = [_RoundSettings()];
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -121,6 +130,29 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
   String _iso(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
+  void _setNumRounds(int n) {
+    setState(() {
+      if (n > _numRounds) {
+        // New rounds start from the base settings — tune each below.
+        for (var i = _numRounds; i < n; i++) {
+          _roundSettings.add(_RoundSettings(
+              tee: _teePosition, pin: _pinPosition, wind: _windStrength));
+        }
+      } else {
+        _roundSettings = _roundSettings.sublist(0, n);
+      }
+      _numRounds = n;
+      if (n > 1) _holes = 18; // multi-round is 18 holes per round
+    });
+  }
+
+  void _setFormat(String v) {
+    setState(() {
+      _format = v;
+      if (v == 'match' && _numRounds > 1) _setNumRounds(1);
+    });
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_course == null) {
@@ -138,6 +170,21 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
     }
     setState(() => _submitting = true);
     try {
+      final rounds = _numRounds > 1
+          ? List.generate(
+              _numRounds,
+              (i) => {
+                'tee_position': _roundSettings[i].tee,
+                'pin_position': _roundSettings[i].pin,
+                'wind_strength': _roundSettings[i].wind,
+              })
+          : [
+              {
+                'tee_position': _teePosition,
+                'pin_position': _pinPosition,
+                'wind_strength': _windStrength,
+              }
+            ];
       await _api.createTournament(
         name: _nameCtrl.text.trim(),
         format: _format,
@@ -151,6 +198,7 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
         greenSpeed: _greenSpeed,
         description:
             _descCtrl.text.trim().isEmpty ? null : _descCtrl.text.trim(),
+        rounds: rounds,
       );
       if (mounted) {
         showSnack(context, 'Tournament created.');
@@ -165,9 +213,63 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
     }
   }
 
+  /// Per-round tee/pin/wind card shown when the tournament has 2-5 rounds.
+  Widget _roundCard(int i) {
+    final rs = _roundSettings[i];
+    DropdownButtonFormField<String> field(
+        String label, String value, Map<String, String> options,
+        void Function(String) onChanged) {
+      return DropdownButtonFormField<String>(
+        initialValue: value,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: options.entries
+            .map((e) =>
+                DropdownMenuItem(value: e.key, child: Text(e.value)))
+            .toList(),
+        onChanged: (v) {
+          if (v != null) setState(() => onChanged(v));
+        },
+      );
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Round ${i + 1}',
+                style:
+                    const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                    child: field('Tees', rs.tee, _tees,
+                        (v) => rs.tee = v)),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: field('Pins', rs.pin, _pins,
+                        (v) => rs.pin = v)),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: field('Wind', rs.wind, _winds,
+                        (v) => rs.wind = v)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
+  Widget build(BuildContext context) {    return Scaffold(
       appBar: AppBar(title: const Text('New tournament')),
       body: _loadingCourses
           ? const Center(child: CircularProgressIndicator())
@@ -198,7 +300,7 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
                             value: e.key, child: Text(e.value)))
                         .toList(),
                     onChanged: (v) =>
-                        setState(() => _format = v ?? 'stroke'),
+                        _setFormat(v ?? 'stroke'),
                   ),
                   const SizedBox(height: 12),
                   Row(
@@ -206,16 +308,21 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
                       Expanded(
                         child: DropdownButtonFormField<int>(
                           initialValue: _holes,
-                          decoration: const InputDecoration(
+                          decoration: InputDecoration(
                             labelText: 'Holes',
-                            border: OutlineInputBorder(),
+                            border: const OutlineInputBorder(),
+                            helperText: _numRounds > 1
+                                ? 'Multi-round is 18 holes'
+                                : null,
                           ),
                           items: const [9, 18]
                               .map((h) => DropdownMenuItem(
                                   value: h, child: Text('$h holes')))
                               .toList(),
-                          onChanged: (v) =>
-                              setState(() => _holes = v ?? 18),
+                          onChanged: _numRounds > 1
+                              ? null
+                              : (v) =>
+                                  setState(() => _holes = v ?? 18),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -270,85 +377,147 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  const Text('Round settings',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Rounds',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold)),
+                      Row(
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.remove),
+                            onPressed: _numRounds > 1
+                                ? () => _setNumRounds(_numRounds - 1)
+                                : null,
+                          ),
+                          Text('$_numRounds',
+                              style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold)),
+                          IconButton(
+                            icon: const Icon(Icons.add),
+                            onPressed: _numRounds < 5 && _format != 'match'
+                                ? () => _setNumRounds(_numRounds + 1)
+                                : null,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  if (_format == 'match')
+                    const Text(
+                        'Match play is single-round.',
+                        style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  if (_numRounds > 1) ...[
+                    const Text(
+                      'Same course and pars every round — only tee, pin and '
+                      'wind change. Green speed applies to all rounds.',
+                      style: TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
+                    const SizedBox(height: 8),
+                    for (var i = 0; i < _numRounds; i++) _roundCard(i),
+                  ],
+                  const SizedBox(height: 16),
+                  Text(
+                      _numRounds > 1
+                          ? 'Green speed (all rounds)'
+                          : 'Round settings',
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          initialValue: _teePosition,
-                          decoration: const InputDecoration(
-                            labelText: 'Tees',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                  if (_numRounds == 1) ...[
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            initialValue: _teePosition,
+                            decoration: const InputDecoration(
+                              labelText: 'Tees',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                            items: _tees.entries
+                                .map((e) => DropdownMenuItem(
+                                    value: e.key, child: Text(e.value)))
+                                .toList(),
+                            onChanged: (v) =>
+                                setState(() => _teePosition = v ?? 'middle'),
                           ),
-                          items: _tees.entries
-                              .map((e) => DropdownMenuItem(
-                                  value: e.key, child: Text(e.value)))
-                              .toList(),
-                          onChanged: (v) =>
-                              setState(() => _teePosition = v ?? 'middle'),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          initialValue: _pinPosition,
-                          decoration: const InputDecoration(
-                            labelText: 'Pins',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            initialValue: _pinPosition,
+                            decoration: const InputDecoration(
+                              labelText: 'Pins',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                            items: _pins.entries
+                                .map((e) => DropdownMenuItem(
+                                    value: e.key, child: Text(e.value)))
+                                .toList(),
+                            onChanged: (v) =>
+                                setState(() => _pinPosition = v ?? 'white'),
                           ),
-                          items: _pins.entries
-                              .map((e) => DropdownMenuItem(
-                                  value: e.key, child: Text(e.value)))
-                              .toList(),
-                          onChanged: (v) =>
-                              setState(() => _pinPosition = v ?? 'white'),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          initialValue: _windStrength,
-                          decoration: const InputDecoration(
-                            labelText: 'Wind',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            initialValue: _windStrength,
+                            decoration: const InputDecoration(
+                              labelText: 'Wind',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                            items: _winds.entries
+                                .map((e) => DropdownMenuItem(
+                                    value: e.key, child: Text(e.value)))
+                                .toList(),
+                            onChanged: (v) => setState(
+                                () => _windStrength = v ?? 'moderate'),
                           ),
-                          items: _winds.entries
-                              .map((e) => DropdownMenuItem(
-                                  value: e.key, child: Text(e.value)))
-                              .toList(),
-                          onChanged: (v) =>
-                              setState(() => _windStrength = v ?? 'moderate'),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          initialValue: _greenSpeed,
-                          decoration: const InputDecoration(
-                            labelText: 'Greens',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            initialValue: _greenSpeed,
+                            decoration: const InputDecoration(
+                              labelText: 'Greens',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                            items: _greens.entries
+                                .map((e) => DropdownMenuItem(
+                                    value: e.key, child: Text(e.value)))
+                                .toList(),
+                            onChanged: (v) =>
+                                setState(() => _greenSpeed = v ?? 'pro'),
                           ),
-                          items: _greens.entries
-                              .map((e) => DropdownMenuItem(
-                                  value: e.key, child: Text(e.value)))
-                              .toList(),
-                          onChanged: (v) =>
-                              setState(() => _greenSpeed = v ?? 'pro'),
                         ),
+                      ],
+                    ),
+                  ] else ...[
+                    DropdownButtonFormField<String>(
+                      initialValue: _greenSpeed,
+                      decoration: const InputDecoration(
+                        labelText: 'Greens',
+                        border: OutlineInputBorder(),
+                        isDense: true,
                       ),
-                    ],
-                  ),
+                      items: _greens.entries
+                          .map((e) => DropdownMenuItem(
+                              value: e.key, child: Text(e.value)))
+                          .toList(),
+                      onChanged: (v) =>
+                          setState(() => _greenSpeed = v ?? 'pro'),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: _descCtrl,

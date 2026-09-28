@@ -94,13 +94,17 @@ class ScoreEntryView(discord.ui.View):
     """
 
     def __init__(self, bot: commands.Bot, t: dict, tt: dict,
-                 players: list[dict], teams: list[dict], submitter_id: str):
+                 players: list[dict], teams: list[dict], submitter_id: str,
+                 rounds: list[dict] | None = None):
         super().__init__(timeout=1800)  # 30 minutes to finish the card
         self.bot = bot
         self.db_path = bot.db_path
         self.t = t
         self.tt = tt
         self.players = players
+        self.rounds = rounds or []
+        self.round_number = 1
+        self.round_select: discord.ui.Select | None = None
         self.holes = t["holes"]
         try:
             pars = [int(x) for x in t["pars"].split(",")] if t.get("pars") else None
@@ -135,6 +139,13 @@ class ScoreEntryView(discord.ui.View):
             title=f"⛳ {self.t['name'][:40]} — Submit score",
             color=0x1B6CA8,
         )
+        if len(self.rounds) > 1:
+            rnd = next((r for r in self.rounds
+                        if r["round_number"] == self.round_number), None)
+            rlabel = (f"**Round {self.round_number}**"
+                      + (f" ({self._round_label(rnd).split(' — ', 1)[1]})"
+                         if rnd else ""))
+            embed.add_field(name="Round", value=rlabel, inline=True)
         embed.add_field(name="Card for",
                         value=f"**{self._name(self.card_owner_id)}**", inline=True)
         embed.add_field(name="Hole",
@@ -188,8 +199,32 @@ class ScoreEntryView(discord.ui.View):
             pass
 
     # ------------------------------ item building ------------------------------
+    def _round_label(self, r: dict) -> str:
+        tee = sl.TEE_LABELS.get(r["tee_position"], r["tee_position"])
+        pin = sl.PIN_LABELS.get(r["pin_position"], r["pin_position"])
+        wind = sl.WIND_LABELS.get(r["wind_strength"], r["wind_strength"])
+        return f"Round {r['round_number']} — {tee} tees, {pin} pins, {wind} wind"
+
     def _build_items(self):
         self.clear_items()
+        row = 0
+        if len(self.rounds) > 1:
+            ropts = [
+                discord.SelectOption(
+                    label=self._round_label(r)[:100],
+                    value=str(r["round_number"]),
+                    default=(r["round_number"] == self.round_number),
+                )
+                for r in self.rounds
+            ]
+            rsel = discord.ui.Select(
+                placeholder="Which round is this card for?",
+                options=ropts, min_values=1, max_values=1, row=0,
+            )
+            rsel.callback = self._on_pick_round
+            self.add_item(rsel)
+            self.round_select = rsel
+            row = 1
         opts = [
             discord.SelectOption(
                 label=p["display_name"][:100],
@@ -200,13 +235,13 @@ class ScoreEntryView(discord.ui.View):
         ]
         sel = discord.ui.Select(
             placeholder="Whose score are you entering?",
-            options=opts, min_values=1, max_values=1, row=0,
+            options=opts, min_values=1, max_values=1, row=row,
         )
         sel.callback = self._on_pick_player
         self.add_item(sel)
         self.player_select = sel
 
-        btn_row = 1
+        btn_row = row + 1
         if self.team_required:
             topts = [
                 discord.SelectOption(
@@ -218,12 +253,12 @@ class ScoreEntryView(discord.ui.View):
             ]
             tsel = discord.ui.Select(
                 placeholder="Choose the team…",
-                options=topts, min_values=1, max_values=1, row=1,
+                options=topts, min_values=1, max_values=1, row=row + 1,
             )
             tsel.callback = self._on_pick_team
             self.add_item(tsel)
             self.team_select = tsel
-            btn_row = 2
+            btn_row = row + 2
 
         par = self._par()
         cur = self.scores[self.idx]
@@ -300,6 +335,21 @@ class ScoreEntryView(discord.ui.View):
         except Exception:
             await self._fail(interaction, "❌ Couldn't open custom entry — try again.")
 
+    async def _on_pick_round(self, interaction: discord.Interaction):
+        try:
+            new_round = int(self.round_select.values[0])
+            if new_round == self.round_number:
+                await interaction.response.defer()
+                return
+            # A different round is a different card: reset entry state.
+            self.round_number = new_round
+            self.scores = [None] * self.holes
+            self.idx = 0
+            self._build_items()
+            await interaction.response.edit_message(embed=self.render(), view=self)
+        except Exception:
+            await self._fail(interaction, "❌ Couldn't switch rounds — try again.")
+
     async def _on_pick_player(self, interaction: discord.Interaction):
         try:
             new_owner = self.player_select.values[0]
@@ -342,6 +392,7 @@ class ScoreEntryView(discord.ui.View):
                 self.bot, interaction, self.t["id"], self.tt["id"],
                 self.card_owner_id, self.submit_id, self.team_id,
                 [s for s in self.scores if s is not None],
+                round_number=self.round_number,
             )
         except Exception:
             await self._fail(interaction,
@@ -351,7 +402,7 @@ class ScoreEntryView(discord.ui.View):
 async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
                           t_id: int, tt_id: int, card_owner_id: str,
                           submitter_id: str, team_id: str | None,
-                          scores: list[int]):
+                          scores: list[int], round_number: int = 1):
     """Shared save path for score entry.
 
     The SUBMITTER must be in the tee time; the card is saved under the
@@ -369,6 +420,12 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     # Defense in depth: the tee-time gate is also enforced on /submit_score.
     if not sl.tee_time_passed(tt.get("starts_at") or ""):
         await interaction.followup.send(await _locked_message(tt), ephemeral=True)
+        return
+    if not await db.get_round(db_path, t["id"], round_number):
+        await interaction.followup.send(
+            f"❌ Round {round_number} doesn't exist in **{t['name']}**.",
+            ephemeral=True,
+        )
         return
     mine = await db.get_player_tee_time(db_path, t["id"], submitter_id)
     if not mine or mine["id"] != tt["id"]:
@@ -439,7 +496,7 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     status = "verified" if player_count >= 2 else "pending"
     card_id = await db.upsert_scorecard(
         db_path, t["id"], card_player_id, team_id, tt["id"], scores, status,
-        submitted_by=submitter_id,
+        submitted_by=submitter_id, round_number=round_number,
     )
     await leaderboard_render.refresh_leaderboard(bot, db_path, t["id"])
 
@@ -460,6 +517,8 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
         who += f" (team **{team_name}**)"
     msg = (f"✅ Score submitted for {who}: **{sum(scores)}** "
            f"(card #{card_id}). {entered_by}")
+    if len(await db.list_rounds(db_path, t["id"])) > 1:
+        msg += f" — Round {round_number}."
     if status == "verified":
         msg += " Auto-verified — playing partners present. 🤝"
     else:
@@ -478,13 +537,17 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
             )
         except discord.HTTPException:
             pass
-def _card_embed(t: dict, card: dict, title_name: str, pars) -> discord.Embed:
+def _card_embed(t: dict, card: dict, title_name: str, pars,
+                show_round: bool = False) -> discord.Embed:
     scores = json.loads(card["holes_json"])
     n = len(scores)
     half = n // 2
     front = scores[:half]
     back = scores[half:]
-    embed = discord.Embed(title=f"🃏 {title_name} — {t['name']}", color=0x1B6CA8)
+    title = f"🃏 {title_name} — {t['name']}"
+    if show_round:
+        title += f" (Round {card.get('round_number', 1)})"
+    embed = discord.Embed(title=title, color=0x1B6CA8)
     embed.description = " ".join(
         f"**{i + 1}**:{s}" for i, s in enumerate(scores)
     )
@@ -584,7 +647,9 @@ class Scoring(commands.Cog):
                     ephemeral=True,
                 )
                 return
-        view = ScoreEntryView(self.bot, t, tt, players, teams, player_id)
+        rounds = await db.list_rounds(db_path, t["id"])
+        view = ScoreEntryView(self.bot, t, tt, players, teams, player_id,
+                              rounds=rounds)
         await interaction.response.send_message(
             embed=view.render(), view=view, ephemeral=True
         )
@@ -592,8 +657,10 @@ class Scoring(commands.Cog):
 
     @app_commands.command(name="my_score", description="Show your submitted scorecard")
     @app_commands.autocomplete(tournament=active_tournament_autocomplete)
+    @app_commands.describe(round_number="Which round to show (defaults to all rounds)")
     async def my_score(self, interaction: discord.Interaction,
-                       tournament: Optional[int] = None):
+                       tournament: Optional[int] = None,
+                       round_number: Optional[Literal[1, 2, 3, 4, 5]] = None):
         t, err = await resolve_tournament(
             interaction, tournament, ["in_progress", "completed"]
         )
@@ -601,29 +668,48 @@ class Scoring(commands.Cog):
             await interaction.response.send_message(err, ephemeral=True)
             return
         player_id = str(interaction.user.id)
-        card = await db.get_latest_player_card(self.bot.db_path, t["id"], player_id)
-        if card is None and t["format"] in TEAM_FORMATS:
-            for team in await db.get_player_teams(self.bot.db_path, t["id"], player_id):
-                card = await db.get_latest_team_card(self.bot.db_path, t["id"], team["id"])
-                if card:
-                    break
-        if card is None:
+        cards = await self._find_cards(t, player_id, round_number)
+        if not cards:
             await interaction.response.send_message(
                 f"You haven't submitted a score for **{t['name']}** yet.", ephemeral=True
             )
             return
         pars = [int(x) for x in t["pars"].split(",")] if t.get("pars") else None
         name = interaction.user.display_name
+        multi = len(await db.list_rounds(self.bot.db_path, t["id"])) > 1
         await interaction.response.send_message(
-            embed=_card_embed(t, card, name, pars), ephemeral=True
+            embeds=[_card_embed(t, c, name, pars, show_round=multi) for c in cards],
+            ephemeral=True,
         )
+
+    async def _find_cards(self, t: dict, target_id: str,
+                          round_number: Optional[int]) -> list[dict]:
+        """Latest card(s) for a player (or their team): one per round asked."""
+        rounds = await db.list_rounds(self.bot.db_path, t["id"])
+        want = [round_number] if round_number else [r["round_number"] for r in rounds]
+        cards = []
+        for rn in want:
+            card = await db.get_latest_player_card(
+                self.bot.db_path, t["id"], target_id, round_number=rn)
+            if card is None and t["format"] in TEAM_FORMATS:
+                for team in await db.get_player_teams(
+                        self.bot.db_path, t["id"], target_id):
+                    card = await db.get_latest_team_card(
+                        self.bot.db_path, t["id"], team["id"], round_number=rn)
+                    if card:
+                        break
+            if card:
+                cards.append(card)
+        return cards
 
     @app_commands.command(name="scorecard", description="Show someone's scorecard")
     @app_commands.autocomplete(tournament=active_tournament_autocomplete)
-    @app_commands.describe(target="Whose scorecard to view")
+    @app_commands.describe(target="Whose scorecard to view",
+                           round_number="Which round to show (defaults to all rounds)")
     async def scorecard(self, interaction: discord.Interaction,
                         target: discord.Member,
-                        tournament: Optional[int] = None):
+                        tournament: Optional[int] = None,
+                        round_number: Optional[Literal[1, 2, 3, 4, 5]] = None):
         t, err = await resolve_tournament(
             interaction, tournament, ["in_progress", "completed"]
         )
@@ -631,13 +717,8 @@ class Scoring(commands.Cog):
             await interaction.response.send_message(err, ephemeral=True)
             return
         tid = str(target.id)
-        card = await db.get_latest_player_card(self.bot.db_path, t["id"], tid)
-        if card is None and t["format"] in TEAM_FORMATS:
-            for team in await db.get_player_teams(self.bot.db_path, t["id"], tid):
-                card = await db.get_latest_team_card(self.bot.db_path, t["id"], team["id"])
-                if card:
-                    break
-        if card is None:
+        cards = await self._find_cards(t, tid, round_number)
+        if not cards:
             await interaction.response.send_message(
                 f"**{target.display_name}** hasn't submitted a score for "
                 f"**{t['name']}** yet.",
@@ -645,8 +726,11 @@ class Scoring(commands.Cog):
             )
             return
         pars = [int(x) for x in t["pars"].split(",")] if t.get("pars") else None
+        multi = len(await db.list_rounds(self.bot.db_path, t["id"])) > 1
         await interaction.response.send_message(
-            embed=_card_embed(t, card, target.display_name, pars), ephemeral=True
+            embeds=[_card_embed(t, c, target.display_name, pars, show_round=multi)
+                    for c in cards],
+            ephemeral=True,
         )
 
     # ------------------------------ admin tools -----------------------------
@@ -679,10 +763,12 @@ class Scoring(commands.Cog):
     @app_commands.command(name="correct_score", description="Fix a hole score on someone's card (admin)")
     @app_commands.autocomplete(tournament=active_tournament_autocomplete)
     @app_commands.describe(target="Player whose card to fix", hole="Hole number (1-based)",
-                           score="Corrected score for that hole")
+                           score="Corrected score for that hole",
+                           round_number="Which round's card to fix (defaults to latest)")
     async def correct_score(self, interaction: discord.Interaction,
                             target: discord.Member, hole: int, score: int,
-                            tournament: Optional[int] = None):
+                            tournament: Optional[int] = None,
+                            round_number: Optional[Literal[1, 2, 3, 4, 5]] = None):
         if not await require_admin(interaction):
             return
         if not 1 <= score <= 15:
@@ -702,12 +788,19 @@ class Scoring(commands.Cog):
             )
             return
         tid = str(target.id)
-        card = await db.get_latest_player_card(self.bot.db_path, t["id"], tid)
-        if card is None and t["format"] in TEAM_FORMATS:
-            for team in await db.get_player_teams(self.bot.db_path, t["id"], tid):
-                card = await db.get_latest_team_card(self.bot.db_path, t["id"], team["id"])
-                if card:
-                    break
+        if round_number is None:
+            # Legacy behavior: the most recently submitted card, any round.
+            card = await db.get_latest_player_card(self.bot.db_path, t["id"], tid)
+            if card is None and t["format"] in TEAM_FORMATS:
+                for team in await db.get_player_teams(
+                        self.bot.db_path, t["id"], tid):
+                    card = await db.get_latest_team_card(
+                        self.bot.db_path, t["id"], team["id"])
+                    if card:
+                        break
+        else:
+            cards = await self._find_cards(t, tid, round_number)
+            card = cards[0] if cards else None
         if card is None:
             await interaction.response.send_message(
                 f"❌ No scorecard found for **{target.display_name}** in **{t['name']}**.",

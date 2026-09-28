@@ -184,6 +184,20 @@ def _tee_time_value(tt: dict, players: list[dict], pending: list[dict]) -> str:
     return value
 
 
+async def _rounds_line(db_path: str, tournament_id: int) -> str:
+    """Compact per-round settings line, or '' for single-round events."""
+    rounds = await db.list_rounds(db_path, tournament_id)
+    if len(rounds) <= 1:
+        return ""
+    bits = []
+    for r in rounds:
+        tee = sl.TEE_LABELS.get(r["tee_position"], r["tee_position"])
+        pin = sl.PIN_LABELS.get(r["pin_position"], r["pin_position"])
+        wind = sl.WIND_LABELS.get(r["wind_strength"], r["wind_strength"])
+        bits.append(f"R{r['round_number']} {tee}/{pin}/{wind}")
+    return f"🔁 {len(rounds)} rounds: " + " · ".join(bits)
+
+
 async def build_register_board(bot, guild_id):
     """Returns (embed, tournaments) for the registration board."""
     tournaments = await db.list_tournaments(
@@ -203,11 +217,15 @@ async def build_register_board(bot, guild_id):
         roster = await db.get_roster(bot.db_path, t["id"])
         dates = sl.format_date_range(t.get("start_date"), t.get("end_date"))
         fmt = FORMAT_LABELS.get(t["format"], t["format"])
+        rounds_line = await _rounds_line(bot.db_path, t["id"])
+        value = (f"{fmt} • {t['holes']} holes • {t['course']}\n"
+                 f"⛳ {sl.format_settings(t)}\n"
+                 f"🗓️ {dates}\n👥 {len(roster)} registered")
+        if rounds_line:
+            value += f"\n{rounds_line}"
         embed.add_field(
             name=f"{t['name']} (ID {t['id']})",
-            value=(f"{fmt} • {t['holes']} holes • {t['course']}\n"
-                   f"⛳ {sl.format_settings(t)}\n"
-                   f"🗓️ {dates}\n👥 {len(roster)} registered"),
+            value=value,
             inline=False,
         )
     return embed, tournaments
@@ -241,10 +259,14 @@ async def build_teesheet_board(bot, guild_id):
         if not sections or sections[-1][0]["id"] != t["id"]:
             fmt = FORMAT_LABELS.get(t["format"], t["format"])
             dates = sl.format_date_range(t.get("start_date"), t.get("end_date"))
+            rounds_line = await _rounds_line(bot.db_path, t["id"])
+            value = (f"{fmt} • {t['holes']} holes • {t['course']}\n"
+                     f"⛳ {sl.format_settings(t)} • 🗓️ {dates}")
+            if rounds_line:
+                value += f"\n{rounds_line}"
             embed.add_field(
                 name=f"━━ {t['name']} ━━",
-                value=(f"{fmt} • {t['holes']} holes • {t['course']}\n"
-                       f"⛳ {sl.format_settings(t)} • 🗓️ {dates}"),
+                value=value,
                 inline=False,
             )
             sections.append((t, []))

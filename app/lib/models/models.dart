@@ -4,6 +4,40 @@
 /// Field names mirror the FastAPI backend's JSON keys. Nullable where the
 /// backend may omit them.
 
+/// One round of a multi-round tournament: same course as the tournament,
+/// with its own tee/pin/wind settings. Green speed is tournament-wide.
+class TournamentRound {
+  final int roundNumber;
+  final String? teePosition;
+  final String? pinPosition;
+  final String? windStrength;
+
+  TournamentRound({
+    required this.roundNumber,
+    this.teePosition,
+    this.pinPosition,
+    this.windStrength,
+  });
+
+  factory TournamentRound.fromJson(Map<String, dynamic> j) => TournamentRound(
+        roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
+        teePosition: j['tee_position']?.toString(),
+        pinPosition: j['pin_position']?.toString(),
+        windStrength: j['wind_strength']?.toString(),
+      );
+
+  String get settingsSummary {
+    final parts = <String>[];
+    if (teePosition != null) parts.add('${_cap(teePosition!)} tees');
+    if (pinPosition != null) parts.add('${_cap(pinPosition!)} pins');
+    if (windStrength != null) parts.add('${_cap(windStrength!)} wind');
+    return parts.join(' · ');
+  }
+
+  static String _cap(String s) =>
+      s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+}
+
 class Tournament {
   final String id;
   final String name;
@@ -19,6 +53,8 @@ class Tournament {
   final String? greenSpeed;
   final bool registered;
   final List<int>? pars;
+  final int numRounds;
+  final List<TournamentRound> rounds;
 
   Tournament({
     required this.id,
@@ -35,6 +71,8 @@ class Tournament {
     this.greenSpeed,
     required this.registered,
     this.pars,
+    this.numRounds = 1,
+    this.rounds = const [],
   });
 
   factory Tournament.fromJson(Map<String, dynamic> j) => Tournament(
@@ -54,7 +92,14 @@ class Tournament {
         pars: (j['pars'] as List?)
             ?.map((e) => (e as num).toInt())
             .toList(growable: false),
+        numRounds: (j['num_rounds'] as num?)?.toInt() ?? 1,
+        rounds: ((j['rounds'] as List?) ?? [])
+            .map((e) => TournamentRound.fromJson(e as Map<String, dynamic>))
+            .toList(growable: false),
       );
+
+  /// True when the tournament has more than one round configured.
+  bool get isMultiRound => numRounds > 1 || rounds.length > 1;
 
   String get settingsSummary {
     final parts = <String>[];
@@ -154,6 +199,7 @@ class Scorecard {
   final int? toPar;
   final String? status;
   final String? submittedBy;
+  final int roundNumber;
 
   Scorecard({
     required this.playerDiscordId,
@@ -162,6 +208,7 @@ class Scorecard {
     this.toPar,
     this.status,
     this.submittedBy,
+    this.roundNumber = 1,
   });
 
   factory Scorecard.fromJson(Map<String, dynamic> j) => Scorecard(
@@ -173,6 +220,7 @@ class Scorecard {
         toPar: (j['to_par'] as num?)?.toInt(),
         status: j['status']?.toString(),
         submittedBy: j['submitted_by']?.toString(),
+        roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
       );
 }
 
@@ -188,6 +236,15 @@ class LeaderboardEntry {
   String? get rank => raw['rank']?.toString();
   String? get total => raw['total']?.toString();
   String? get toPar => raw['to_par']?.toString() ?? raw['toPar']?.toString();
+
+  /// Multi-round fields: how many rounds this entry has completed, out of
+  /// the tournament's round count, plus the per-round breakdown.
+  int? get roundsPlayed => (raw['rounds_played'] as num?)?.toInt();
+  int? get numRounds => (raw['num_rounds'] as num?)?.toInt();
+  List<Map<String, dynamic>> get roundBreakdown =>
+      ((raw['rounds'] as List?) ?? [])
+          .whereType<Map<String, dynamic>>()
+          .toList(growable: false);
 }
 
 class PlayerMe {

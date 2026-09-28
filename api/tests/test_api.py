@@ -790,6 +790,174 @@ class ApiTestCase(unittest.TestCase):
         row = run(db.get_tournament(self.db_path, r.json()["id"]))
         self.assertEqual(len(row["pars"].split(",")), 9)
 
+    def test_create_tournament_multi_round(self):
+        self._crew(True)
+        rounds = [
+            {"tee_position": "back", "pin_position": "black",
+             "wind_strength": "severe"},
+            {"tee_position": "middle", "pin_position": "white",
+             "wind_strength": "moderate"},
+            {"tee_position": "front", "pin_position": "red",
+             "wind_strength": "low"},
+        ]
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=rounds))
+        self.assertEqual(r.status_code, 201, r.text)
+        t = r.json()
+        self.assertEqual(t["num_rounds"], 3)
+        self.assertEqual(len(t["rounds"]), 3)
+        self.assertEqual(
+            [x["round_number"] for x in t["rounds"]], [1, 2, 3])
+        self.assertEqual(t["rounds"][0]["tee_position"], "back")
+        self.assertEqual(t["rounds"][2]["pin_position"], "red")
+        # Round 1 copies the top-level settings too (defaults here).
+        self.assertEqual(t["rounds"][0]["wind_strength"], "severe")
+        db_rounds = run(db.list_rounds(self.db_path, t["id"]))
+        self.assertEqual(len(db_rounds), 3)
+        self.assertEqual(db_rounds[1]["tee_position"], "middle")
+
+    def test_create_tournament_rounds_validation(self):
+        self._crew(True)
+        good = [{"tee_position": "middle", "pin_position": "white",
+                 "wind_strength": "moderate"}]
+        # 0 rounds and 6 rounds are rejected.
+        for n in (0, 6):
+            r = self.client.post(
+                "/api/tournaments", headers=self.h("123"),
+                json=self._create_body(rounds=good * n))
+            self.assertEqual(r.status_code, 422, f"n={n}: {r.text}")
+        # Bad per-round value rejected.
+        bad = [{"tee_position": "tips", "pin_position": "white",
+                "wind_strength": "moderate"}]
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=bad))
+        self.assertEqual(r.status_code, 422, r.text)
+        # Match play is single-round.
+        r = self.client.post(
+            "/api/tournaments", headers=self.h("123"),
+            json=self._create_body(format="match", rounds=good * 2))
+        self.assertEqual(r.status_code, 422, r.text)
+        # Multi-round must be 18 holes per round.
+        r = self.client.post(
+            "/api/tournaments", headers=self.h("123"),
+            json=self._create_body(holes=9, rounds=good * 2))
+        self.assertEqual(r.status_code, 422, r.text)
+        # A single explicit round works and is the default shape.
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=good))
+        self.assertEqual(r.status_code, 201, r.text)
+        self.assertEqual(r.json()["num_rounds"], 1)
+
+    def test_scorecard_multi_round_get_filter(self):
+        self.with_tz("123")
+        self.with_tz("456")
+        tid = run(db.create_tournament(
+            self.db_path, GUILD, "Two Rounds", "stroke", 18,
+            "Pebble Beach Golf Links", PARS_18, "mr", "1",
+            rounds=[
+                {"tee_position": "back", "pin_position": "black",
+                 "wind_strength": "severe"},
+                {"tee_position": "middle", "pin_position": "white",
+                 "wind_strength": "moderate"},
+            ]))
+        tt_id = self._past_tee_time(tid, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        for rn, score in ((1, 4), (2, 5)):
+            body = {"player_discord_id": "123", "scores": [score] * 18,
+                    "round_number": rn}
+            r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                                headers=self.h("123"), json=body)
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["card"]["round_number"], rn)
+        # Round filter picks the right card; unfiltered returns the latest.
+        r = self.client.get(f"/api/tee-times/{tt_id}/scorecard?round_number=1",
+                            headers=self.h("123"))
+        self.assertEqual(r.json()["card"]["total"], 72)
+        r = self.client.get(f"/api/tee-times/{tt_id}/scorecard?round_number=2",
+                            headers=self.h("123"))
+        self.assertEqual(r.json()["card"]["total"], 90)
+        r = self.client.get(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"))
+        self.assertEqual(r.json()["card"]["total"], 90)
+
+    def test_scorecard_bad_round_422(self):
+        self.with_tz("123")
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "round_number": 2}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_leaderboard_multi_round_aggregation(self):
+        self.with_tz("123")
+        self.with_tz("456")
+        tid = run(db.create_tournament(
+            self.db_path, GUILD, "Two Rounds", "stroke", 18,
+            "Pebble Beach Golf Links", PARS_18, "mr", "1",
+            rounds=[
+                {"tee_position": "back", "pin_position": "black",
+                 "wind_strength": "severe"},
+                {"tee_position": "middle", "pin_position": "white",
+                 "wind_strength": "moderate"},
+            ]))
+        tt_id = self._past_tee_time(tid, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        # 123: 72 + 90 = 162 (+18). 456: 76 + 76 = 152 (+8) — wins on to-par.
+        run(db.upsert_scorecard(self.db_path, tid, "123", None, tt_id,
+                                [4] * 18, "verified", round_number=1))
+        run(db.upsert_scorecard(self.db_path, tid, "123", None, tt_id,
+                                [5] * 18, "verified", round_number=2))
+        run(db.upsert_scorecard(self.db_path, tid, "456", None, tt_id,
+                                [4] * 17 + [8], "verified", round_number=1))
+        run(db.upsert_scorecard(self.db_path, tid, "456", None, tt_id,
+                                [4] * 17 + [8], "verified", round_number=2))
+        r = self.client.get(f"/api/tournaments/{tid}/leaderboard",
+                            headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        lb = r.json()
+        self.assertEqual(lb["num_rounds"], 2)
+        self.assertEqual(len(lb["rounds"]), 2)
+        rows = lb["standings"]
+        self.assertEqual([x["discord_id"] for x in rows], ["456", "123"])
+        self.assertEqual(rows[0]["total"], 152)
+        self.assertEqual(rows[0]["to_par"], 8)
+        self.assertEqual(rows[0]["rounds_played"], 2)
+        self.assertEqual([d["round_number"] for d in rows[0]["rounds"]],
+                         [1, 2])
+        self.assertEqual(rows[0]["rounds"][0]["total"], 76)
+        self.assertEqual(rows[1]["total"], 162)
+        self.assertEqual(rows[1]["to_par"], 18)
+
+    def test_leaderboard_multi_round_partial(self):
+        # A player who only finished round 1 still ranks, on to-par.
+        self.with_tz("123")
+        self.with_tz("456")
+        tid = run(db.create_tournament(
+            self.db_path, GUILD, "Two Rounds", "stroke", 18,
+            "Pebble Beach Golf Links", PARS_18, "mr", "1",
+            rounds=[
+                {"tee_position": "back", "pin_position": "black",
+                 "wind_strength": "severe"},
+                {"tee_position": "middle", "pin_position": "white",
+                 "wind_strength": "moderate"},
+            ]))
+        tt_id = self._past_tee_time(tid, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        run(db.upsert_scorecard(self.db_path, tid, "123", None, tt_id,
+                                [4] * 18, "verified", round_number=1))
+        run(db.upsert_scorecard(self.db_path, tid, "456", None, tt_id,
+                                [5] * 18, "verified", round_number=1))
+        run(db.upsert_scorecard(self.db_path, tid, "456", None, tt_id,
+                                [5] * 18, "verified", round_number=2))
+        r = self.client.get(f"/api/tournaments/{tid}/leaderboard",
+                            headers=self.h("123"))
+        rows = r.json()["standings"]
+        # 123 is E through 1 round; 456 is +36 through 2 — 123 leads.
+        self.assertEqual([x["discord_id"] for x in rows], ["123", "456"])
+        self.assertEqual(rows[0]["rounds_played"], 1)
+        self.assertEqual(rows[1]["rounds_played"], 2)
+
     # -- profile crew flag ---------------------------------------------
     def test_me_includes_is_crew(self):
         self._crew(True)

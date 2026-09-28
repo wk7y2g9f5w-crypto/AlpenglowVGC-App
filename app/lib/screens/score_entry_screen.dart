@@ -36,6 +36,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   TeeTimePlayer? _player;
   late List<int?> _scores;
   int _hole = 0; // 0-based current hole
+  int _roundNumber = 1;
   bool _loading = true;
   bool _submitting = false;
   String? _existingStatus;
@@ -69,22 +70,63 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   }
 
   Future<void> _loadExisting() async {
+    await _loadRound(_roundNumber);
+    if (mounted) setState(() => _loading = false);
+  }
+
+  /// Load the saved card (if any) for the current player + round.
+  Future<void> _loadRound(int roundNumber) async {
     try {
-      final card = await _api.getScorecard(widget.teeTime.id);
+      final card = await _api.getScorecard(widget.teeTime.id,
+          roundNumber: roundNumber);
+      if (!mounted) return;
       if (card != null && card.scores.length == _holeCount) {
         setState(() {
           _scores = card.scores.map<int?>((s) => s).toList();
           _existingStatus = card.status;
+          _hole = 0;
           final match = widget.teeTime.players
               .where((p) => p.discordId == card.playerDiscordId);
           if (match.isNotEmpty) _player = match.first;
         });
+      } else {
+        setState(() {
+          _scores = List<int?>.filled(_holeCount, null);
+          _existingStatus = null;
+          _hole = 0;
+        });
       }
     } on ApiException {
       // No existing card or unreadable; start blank.
-    } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _scores = List<int?>.filled(_holeCount, null);
+          _existingStatus = null;
+          _hole = 0;
+        });
+      }
     }
+  }
+
+  void _pickRound(int rn) {
+    if (rn == _roundNumber) return;
+    setState(() {
+      _roundNumber = rn;
+      _loading = true;
+    });
+    _loadRound(rn).then((_) {
+      if (mounted) setState(() => _loading = false);
+    });
+  }
+
+  String _roundLabel(int rn) {
+    final rounds = widget.tournament.rounds;
+    if (rounds.length >= rn) {
+      final r = rounds[rn - 1];
+      final summary = r.settingsSummary;
+      return summary.isEmpty ? 'Round $rn' : 'Round $rn — $summary';
+    }
+    return 'Round $rn';
   }
 
   int? get _total {
@@ -157,9 +199,11 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         widget.teeTime.id,
         _player!.discordId,
         _scores.map((s) => s!).toList(),
+        roundNumber: _roundNumber,
       );
       if (mounted) {
-        showSnack(context, 'Scorecard submitted.');
+        showSnack(context,
+            'Round $_roundNumber scorecard submitted.');
         Navigator.of(context).pop();
       }
     } on ApiException catch (e) {
@@ -211,9 +255,36 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     final pars = _pars;
     final par = pars != null ? pars[_hole] : null;
     final complete = !_scores.any((s) => s == null);
+    final multi = widget.tournament.isMultiRound;
 
     return Column(
       children: [
+        // Round picker for multi-round tournaments.
+        if (multi)
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            child: DropdownButtonFormField<int>(
+              initialValue: _roundNumber,
+              decoration: const InputDecoration(
+                labelText: 'Round',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: List.generate(
+                widget.tournament.numRounds,
+                (i) => DropdownMenuItem(
+                  value: i + 1,
+                  child: Text(_roundLabel(i + 1),
+                      overflow: TextOverflow.ellipsis),
+                ),
+              ),
+              onChanged: (rn) {
+                if (rn != null) _pickRound(rn);
+              },
+            ),
+          ),
         // Header: player picker + running total / to-par.
         Container(
           padding: const EdgeInsets.all(12),
@@ -331,7 +402,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                 ),
                 if (_existingStatus != null) ...[
                   const SizedBox(height: 8),
-                  Text('Previously saved: $_existingStatus',
+                  Text(
+                      'Previously saved${widget.tournament.isMultiRound ? ' (round $_roundNumber)' : ''}: $_existingStatus',
                       style:
                           const TextStyle(color: Colors.grey, fontSize: 12)),
                 ],
