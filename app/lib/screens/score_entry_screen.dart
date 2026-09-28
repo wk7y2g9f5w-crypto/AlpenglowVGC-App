@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/models.dart';
@@ -44,6 +46,14 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   bool _isCrew = false;
   final _witnessCtrl = TextEditingController();
   int _loadSeq = 0;
+  Timer? _saveTimer;
+  bool _saving = false;
+  bool _saveFailed = false;
+
+  /// A completed (pending/verified) card exists — as opposed to a live
+  /// in-progress one or no card at all.
+  bool get _isSubmitted =>
+      _existingStatus != null && _existingStatus != 'in_progress';
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -78,6 +88,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
 
   @override
   void dispose() {
+    _saveTimer?.cancel();
     _witnessCtrl.dispose();
     super.dispose();
   }
@@ -144,6 +155,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
 
   void _pickRound(int rn) {
     if (rn == _roundNumber) return;
+    _saveTimer?.cancel();
     setState(() {
       _roundNumber = rn;
       _loading = true;
@@ -219,6 +231,47 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       _scores[_hole] = score;
       if (_hole < _holeCount - 1) _hole++;
     });
+    _scheduleLiveSave();
+  }
+
+  /// Debounced live save: each entered hole is persisted to the server
+  /// (in_progress card) shortly after entry, so the leaderboard moves
+  /// hole by hole. Best-effort — the next save retries whatever failed.
+  void _scheduleLiveSave() {
+    if (_locked || _submitting) return;
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(milliseconds: 800), _liveSave);
+  }
+
+  Future<void> _liveSave() async {
+    final player = _player;
+    if (player == null || _locked || _submitting) return;
+    if (!_scores.any((s) => s != null)) return;
+    setState(() {
+      _saving = true;
+      _saveFailed = false;
+    });
+    try {
+      final card = await _api.submitScorecard(
+        widget.teeTime.id,
+        player.discordId,
+        List<int?>.from(_scores),
+        roundNumber: _roundNumber,
+      );
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        // First live save flips a blank card to in_progress.
+        _existingStatus ??= card.status;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _saveFailed = true;
+        });
+      }
+    }
   }
 
   Future<void> _customScore() async {
@@ -263,11 +316,11 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(_existingStatus != null
+        title: Text(_isSubmitted
             ? 'Update submitted scorecard?'
             : 'Submit scorecard?'),
         content: Text(
-          _existingStatus != null
+          _isSubmitted
               ? 'This will update ${_player!.displayName}\'s submitted '
                   'scorecard for round $_roundNumber.'
               : 'All scores entered are final. After submitting, only crew '
@@ -284,7 +337,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           ),
           ElevatedButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(_existingStatus != null ? 'Update' : 'Submit'),
+            child: Text(_isSubmitted ? 'Update' : 'Submit'),
           ),
         ],
       ),
@@ -292,14 +345,16 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     if (confirmed != true) return;
     setState(() => _submitting = true);
     try {
-      await _api.submitScorecard(
+      final card = await _api.submitScorecard(
         widget.teeTime.id,
         _player!.discordId,
         _scores.map((s) => s!).toList(),
         roundNumber: _roundNumber,
         witnessName: _witnessCtrl.text,
+        complete: true,
       );
       if (mounted) {
+        setState(() => _existingStatus = card.status);
         showSnack(context,
             'Round $_roundNumber scorecard submitted.');
         Navigator.of(context).pop();
@@ -321,7 +376,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           ? const Center(child: CircularProgressIndicator())
           : _locked
               ? _lockedBody()
-              : (_existingStatus != null && !_isCrew)
+              : (_isSubmitted && !_isCrew)
                   ? _submittedBody()
                   : _entryBody(),
     );
@@ -466,6 +521,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                       .toList(),
                   onChanged: (p) {
                     if (p == null || p.discordId == _player?.discordId) return;
+                    _saveTimer?.cancel();
                     setState(() {
                       _player = p;
                       _loading = true;
@@ -562,6 +618,18 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                 Text('Hole ${_hole + 1}${par != null ? ' · Par $par' : ''}',
                     style: const TextStyle(
                         fontSize: 22, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                // Live-save status: scores hit the leaderboard as entered.
+                if (_saving)
+                  const Text('Saving…',
+                      style: TextStyle(fontSize: 12, color: Colors.grey))
+                else if (_saveFailed)
+                  const Text('Save failed — will retry on next hole',
+                      style: TextStyle(fontSize: 12, color: Colors.red))
+                else if (_existingStatus == 'in_progress' ||
+                    _scores.any((s) => s != null))
+                  const Text('⛳ Live — scores are on the leaderboard',
+                      style: TextStyle(fontSize: 12, color: Colors.green)),
                 const SizedBox(height: 16),
                 if (par != null) _parRelativeButtons(par) else _numericButtons(),
                 const SizedBox(height: 12),
@@ -585,7 +653,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                 if (_existingStatus != null) ...[
                   const SizedBox(height: 8),
                   Text(
-                      'Previously saved${widget.tournament.isMultiRound ? ' (round $_roundNumber)' : ''}: $_existingStatus',
+                      'Previously saved${widget.tournament.isMultiRound ? ' (round $_roundNumber)' : ''}: ${_existingStatus == 'in_progress' ? 'in progress' : _existingStatus}',
                       style:
                           const TextStyle(color: Colors.grey, fontSize: 12)),
                 ],

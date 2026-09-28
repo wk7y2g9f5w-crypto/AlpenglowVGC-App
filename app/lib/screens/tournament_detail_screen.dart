@@ -1030,7 +1030,18 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
               ),
               title: Text(e.name,
                   style: const TextStyle(fontWeight: FontWeight.w600)),
-              subtitle: progress != null ? Text(progress) : null,
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (progress != null) Text(progress),
+                  if (e.onCourse)
+                    Text('⛳ thru ${e.thru ?? '–'}',
+                        style: const TextStyle(
+                            color: Colors.green,
+                            fontWeight: FontWeight.w600)),
+                ],
+              ),
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1055,11 +1066,15 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
                                 (d['total'] as num?)?.toInt();
                             final tp =
                                 (d['to_par'] as num?)?.toInt();
+                            final live = d['status'] == 'in_progress';
+                            final thru =
+                                (d['thru'] as num?)?.toInt();
                             return Row(
                               mainAxisAlignment:
                                   MainAxisAlignment.spaceBetween,
                               children: [
-                                Text('Round $rn',
+                                Text(
+                                    'Round $rn${live ? ' ⛳ thru ${thru ?? '–'}' : ''}',
                                     style: const TextStyle(
                                         color: Colors.grey)),
                                 Text(

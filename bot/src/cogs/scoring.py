@@ -6,6 +6,7 @@ Verification rule: a scorecard auto-verifies when the player's tee time has
 admin verifies them with /verify_score.
 """
 import json
+import time
 from typing import Literal, Optional
 
 import discord
@@ -130,7 +131,8 @@ class ScoreEntryView(discord.ui.View):
 
     def __init__(self, bot: commands.Bot, t: dict, tt: dict,
                  players: list[dict], teams: list[dict], submitter_id: str,
-                 rounds: list[dict] | None = None):
+                 rounds: list[dict] | None = None,
+                 is_crew: bool = False):
         super().__init__(timeout=1800)  # 30 minutes to finish the card
         self.bot = bot
         self.db_path = bot.db_path
@@ -151,12 +153,103 @@ class ScoreEntryView(discord.ui.View):
         self.card_owner_id = submitter_id  # player picker defaults to submitter
         self.teams = teams  # selected player's teams in this tournament
         self.team_id: str | None = None
+        self.is_crew = is_crew
+        self.read_only = False  # complete card viewed by non-crew
+        self._last_board_refresh = 0.0
         self.scores: list[int | None] = [None] * self.holes
         self.idx = 0
         self.witness_name: str | None = None
         self.player_select: discord.ui.Select | None = None
         self.team_select: discord.ui.Select | None = None
         self._build_items()
+
+    # ------------------------------ live entry ------------------------------
+    def _card_ids(self) -> tuple[str | None, str | None]:
+        """(player_id, team_id) identifying the card being entered.
+
+        Mirrors _save_scorecard: shared formats (alt_shot/scramble) file the
+        card under the team; best_ball files one card per member (player +
+        team); stroke files under the player.
+        """
+        pid = (None if self.t["format"] in SHARED_CARD_FORMATS
+               else self.card_owner_id)
+        return pid, self.team_id
+
+    async def load_existing(self):
+        """Load the persisted card (if any) for the current player/round.
+
+        Resumes in-progress cards; a complete card loads read-only for
+        non-crew (crew can still correct it). Auto-picks the team when the
+        player has exactly one, so best_ball cards resolve without an
+        extra tap.
+        """
+        if self.team_required and self.team_id is None and len(self.teams) == 1:
+            self.team_id = str(self.teams[0]["id"])
+        self.read_only = False
+        pid, team_id = self._card_ids()
+        try:
+            card = await db.find_scorecard(
+                self.db_path, self.t["id"], player_discord_id=pid,
+                team_id=team_id, tee_time_id=self.tt["id"],
+                round_number=self.round_number,
+            )
+        except Exception:
+            card = None
+        if card is None:
+            self.scores = [None] * self.holes
+            self.witness_name = None
+        else:
+            try:
+                scores = json.loads(card["holes_json"])
+            except (ValueError, TypeError):
+                scores = []
+            if len(scores) == self.holes:
+                self.scores = scores
+            else:
+                self.scores = [None] * self.holes
+            self.witness_name = card.get("witness_name")
+            if card["status"] != "in_progress" and not self.is_crew:
+                self.read_only = True
+        self.idx = next((i for i, s in enumerate(self.scores)
+                         if s is None), 0)
+
+    async def _live_save(self):
+        """Persist the current entry state and nudge the leaderboard.
+
+        Merge-on-write: non-null holes overlay the stored card, so partners
+        entering the same shared card can't clobber each other's holes.
+        The Discord board refresh is debounced (15s) to stay clear of rate
+        limits; Submit always refreshes immediately.
+        """
+        if self.team_required and self.team_id is None:
+            return  # can't identify the card until the team is picked
+        pid, team_id = self._card_ids()
+        try:
+            existing = await db.find_scorecard(
+                self.db_path, self.t["id"], player_discord_id=pid,
+                team_id=team_id, tee_time_id=self.tt["id"],
+                round_number=self.round_number,
+            )
+            if (existing is not None
+                    and existing["status"] != "in_progress"
+                    and not self.is_crew):
+                return
+            await db.save_partial_scorecard(
+                self.db_path, self.t["id"], pid, team_id, self.tt["id"],
+                list(self.scores), submitted_by=self.submit_id,
+                round_number=self.round_number,
+            )
+        except Exception:
+            return
+        now = time.monotonic()
+        if now - self._last_board_refresh < 15:
+            return
+        self._last_board_refresh = now
+        try:
+            await leaderboard_render.refresh_leaderboard(
+                self.bot, self.db_path, self.t["id"])
+        except Exception:
+            pass
 
     # ------------------------------ rendering ------------------------------
     def _name(self, discord_id: str) -> str:
@@ -206,6 +299,20 @@ class ScoreEntryView(discord.ui.View):
             for i, s in enumerate(self.scores)
         )
         embed.add_field(name="Progress", value=prog, inline=False)
+        if self.read_only:
+            embed.add_field(
+                name="🔒 Submitted",
+                value="This scorecard is already submitted — only crew "
+                      "(admins, mods, tournament directors) can change it.",
+                inline=False,
+            )
+        elif any(s is not None for s in self.scores):
+            embed.add_field(
+                name="⛳ Live",
+                value="Scores save to the leaderboard as you enter them — "
+                      "no need to finish the card first.",
+                inline=False,
+            )
         if self.team_required:
             team_name = next(
                 (tm["name"] for tm in self.teams
@@ -302,6 +409,25 @@ class ScoreEntryView(discord.ui.View):
             self.team_select = tsel
             btn_row = row + 2
 
+        if self.read_only:
+            # Complete card viewed by non-crew: browse, don't touch.
+            nav_row = btn_row + 1
+            prev = discord.ui.Button(label="◀ Prev",
+                                     style=discord.ButtonStyle.secondary,
+                                     row=nav_row)
+            prev.callback = self._on_prev
+            nxt = discord.ui.Button(label="Next ▶",
+                                    style=discord.ButtonStyle.secondary,
+                                    row=nav_row)
+            nxt.callback = self._on_next
+            locked = discord.ui.Button(
+                label="🔒 Submitted — only crew can change scores",
+                style=discord.ButtonStyle.secondary,
+                disabled=True, row=nav_row)
+            for b in (prev, nxt, locked):
+                self.add_item(b)
+            return
+
         par = self._par()
         cur = self.scores[self.idx]
         for n, s in enumerate(sl.score_button_scores(par)):
@@ -356,10 +482,11 @@ class ScoreEntryView(discord.ui.View):
         return _cb
 
     async def record_score(self, score: int):
-        """Record a score for the current hole, then auto-advance."""
+        """Record a score for the current hole, persist it live, auto-advance."""
         self.scores[self.idx] = score
         nxt = next((i for i in range(self.holes) if self.scores[i] is None), None)
         self.idx = nxt if nxt is not None else (self.idx + 1) % self.holes
+        await self._live_save()
 
     async def _on_prev(self, interaction: discord.Interaction):
         try:
@@ -395,10 +522,9 @@ class ScoreEntryView(discord.ui.View):
             if new_round == self.round_number:
                 await interaction.response.defer()
                 return
-            # A different round is a different card: reset entry state.
+            # A different round is a different card: load its persisted state.
             self.round_number = new_round
-            self.scores = [None] * self.holes
-            self.idx = 0
+            await self.load_existing()
             self._build_items()
             await interaction.response.edit_message(embed=self.render(), view=self)
         except Exception:
@@ -420,12 +546,11 @@ class ScoreEntryView(discord.ui.View):
                     ephemeral=True,
                 )
                 return
-            # New card: reset the entry state for the newly selected player.
+            # New card: load its persisted state for the newly selected player.
             self.card_owner_id = new_owner
             self.teams = teams
             self.team_id = None
-            self.scores = [None] * self.holes
-            self.idx = 0
+            await self.load_existing()
             self._build_items()
             await interaction.response.edit_message(embed=self.render(), view=self)
         except Exception:
@@ -434,6 +559,8 @@ class ScoreEntryView(discord.ui.View):
     async def _on_pick_team(self, interaction: discord.Interaction):
         try:
             self.team_id = self.team_select.values[0]
+            # The team identifies the card: reload its persisted state.
+            await self.load_existing()
             self._build_items()
             await interaction.response.edit_message(embed=self.render(), view=self)
         except Exception:
@@ -453,7 +580,9 @@ class ScoreEntryView(discord.ui.View):
                 tee_time_id=self.tt["id"],
                 round_number=self.round_number,
             )
-            if existing is not None and not await is_admin(interaction):
+            if (existing is not None
+                    and existing["status"] != "in_progress"
+                    and not await is_admin(interaction)):
                 await interaction.response.send_message(
                     "❌ That scorecard is already submitted — only crew "
                     "(admins, mods, tournament directors) can change it. "
@@ -654,15 +783,16 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
             ephemeral=True,
         )
         return
-    # Crew-only edit rule: a submitted card can only be changed by crew
-    # (admins, mods, tournament directors). First submissions stay open to
-    # tee-time members.
+    # Crew-only edit rule: a COMPLETED card can only be changed by crew
+    # (admins, mods, tournament directors). Finalizing your own in-progress
+    # card, or a first submission, stays open to tee-time members.
     existing = await db.find_scorecard(
         db_path, t["id"],
         player_discord_id=card_player_id, team_id=team_id,
         tee_time_id=tt["id"], round_number=round_number,
     )
-    if existing is not None and not await is_admin(interaction):
+    if (existing is not None and existing["status"] != "in_progress"
+            and not await is_admin(interaction)):
         await interaction.followup.send(
             "❌ That scorecard is already submitted — only crew (admins, mods,"
             " tournament directors) can change it. Ask a crew member to fix it.",
@@ -713,22 +843,30 @@ def _card_embed(t: dict, card: dict, title_name: str, pars,
     scores = json.loads(card["holes_json"])
     n = len(scores)
     half = n // 2
-    front = scores[:half]
-    back = scores[half:]
+    front = [s for s in scores[:half] if s is not None]
+    back = [s for s in scores[half:] if s is not None]
+    thru = len(front) + len(back)
     title = f"🃏 {title_name} — {t['name']}"
     if show_round:
         title += f" (Round {card.get('round_number', 1)})"
     embed = discord.Embed(title=title, color=0x1B6CA8)
     embed.description = " ".join(
-        f"**{i + 1}**:{s}" for i, s in enumerate(scores)
+        f"**{i + 1}**:{s if s is not None else '–'}"
+        for i, s in enumerate(scores)
     )
     embed.add_field(name="Front", value=str(sum(front)), inline=True)
     embed.add_field(name="Back", value=str(sum(back)), inline=True)
     embed.add_field(name="Total", value=f"**{card['total']}**", inline=True)
     if pars and len(pars) == n:
-        tp = sl.format_to_par(sl.to_par(card["total"], pars))
+        played_pars = [p for p, s in zip(pars, scores) if s is not None]
+        tp = sl.format_to_par(sl.to_par(card["total"], played_pars))
         embed.add_field(name="To par", value=tp or "—", inline=True)
-    status = "✅ Verified" if card["status"] == "verified" else "⏳ Pending verification"
+    if card["status"] == "verified":
+        status = "✅ Verified"
+    elif card["status"] == "in_progress":
+        status = f"⛳ In progress (thru {thru})"
+    else:
+        status = "⏳ Pending verification"
     embed.add_field(name="Status", value=status, inline=True)
     if card.get("witness_name"):
         embed.add_field(name="🧾 Witness", value=card["witness_name"], inline=True)
@@ -821,7 +959,10 @@ class Scoring(commands.Cog):
                 return
         rounds = await db.list_rounds(db_path, t["id"])
         view = ScoreEntryView(self.bot, t, tt, players, teams, player_id,
-                              rounds=rounds)
+                              rounds=rounds,
+                              is_crew=await is_admin(interaction))
+        await view.load_existing()
+        view._build_items()
         await interaction.response.send_message(
             embed=view.render(), view=view, ephemeral=True
         )
@@ -920,6 +1061,13 @@ class Scoring(commands.Cog):
         if card["status"] == "verified":
             await interaction.response.send_message(
                 f"Card #{card_id} is already verified.", ephemeral=True
+            )
+            return
+        if card["status"] == "in_progress":
+            await interaction.response.send_message(
+                f"❌ Card #{card_id} is still being entered (live) — it can't "
+                "be verified until the player submits the full card.",
+                ephemeral=True,
             )
             return
         await db.verify_scorecard(self.bot.db_path, card_id, str(interaction.user.id))

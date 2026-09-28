@@ -238,9 +238,10 @@ class TeeTimeRequest {
 
 class Scorecard {
   final String playerDiscordId;
-  final List<int> scores;
+  final List<int?> scores;
   final int? total;
   final int? toPar;
+  final int? thru;
   final String? status;
   final String? submittedBy;
   final int roundNumber;
@@ -251,19 +252,24 @@ class Scorecard {
     required this.scores,
     this.total,
     this.toPar,
+    this.thru,
     this.status,
     this.submittedBy,
     this.roundNumber = 1,
     this.witnessName,
   });
 
+  /// True while the card is still being entered hole by hole.
+  bool get isLive => status == 'in_progress';
+
   factory Scorecard.fromJson(Map<String, dynamic> j) => Scorecard(
         playerDiscordId: j['player_discord_id'].toString(),
         scores: ((j['scores'] as List?) ?? [])
-            .map((e) => (e as num).toInt())
+            .map((e) => e == null ? null : (e as num).toInt())
             .toList(),
         total: (j['total'] as num?)?.toInt(),
         toPar: (j['to_par'] as num?)?.toInt(),
+        thru: (j['thru'] as num?)?.toInt(),
         status: j['status']?.toString(),
         submittedBy: j['submitted_by']?.toString(),
         roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
@@ -292,6 +298,10 @@ class LeaderboardEntry {
       ((raw['rounds'] as List?) ?? [])
           .whereType<Map<String, dynamic>>()
           .toList(growable: false);
+
+  /// Live scoring: the player/team is mid-round, with this many holes entered.
+  bool get onCourse => raw['on_course'] == true;
+  int? get thru => (raw['thru'] as num?)?.toInt();
 }
 
 class PlayerMe {

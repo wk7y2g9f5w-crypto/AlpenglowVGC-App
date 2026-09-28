@@ -617,7 +617,7 @@ class ApiTestCase(unittest.TestCase):
         tt_id = self._past_tee_time(self.t_open, creator="123")
         run(db.join_tee_time(self.db_path, tt_id, "456"))
         scores = [4] * 18
-        body = {"player_discord_id": "123", "scores": scores}
+        body = {"player_discord_id": "123", "scores": scores, "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
@@ -642,7 +642,8 @@ class ApiTestCase(unittest.TestCase):
         run(db.join_tee_time(self.db_path, tt_id, "456"))
         run(db.ack_outbox(self.db_path,
                           [r["id"] for r in run(db.poll_outbox(self.db_path))]))
-        body = {"player_discord_id": "123", "scores": [4] * 18}
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
@@ -654,7 +655,8 @@ class ApiTestCase(unittest.TestCase):
     def test_scorecard_solo_pending(self):
         self.with_tz("123")
         tt_id = self._past_tee_time(self.t_open, creator="123")
-        body = {"player_discord_id": "123", "scores": [4] * 18}
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"), json=body)
         self.assertEqual(r.json()["card"]["status"], "pending")
@@ -665,7 +667,8 @@ class ApiTestCase(unittest.TestCase):
         self.with_tz("456")
         tt_id = self._past_tee_time(self.t_open, creator="123")
         run(db.join_tee_time(self.db_path, tt_id, "456"))
-        body = {"player_discord_id": "456", "scores": [5] * 18}
+        body = {"player_discord_id": "456", "scores": [5] * 18,
+                "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
@@ -681,7 +684,8 @@ class ApiTestCase(unittest.TestCase):
         self.with_tz("456")
         tt_id = self._past_tee_time(self.t_open, creator="123")
         run(db.join_tee_time(self.db_path, tt_id, "456"))
-        body = {"player_discord_id": "123", "scores": [4] * 18}
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
@@ -700,7 +704,8 @@ class ApiTestCase(unittest.TestCase):
     def test_scorecard_resubmit_crew_can_edit(self):
         self.with_tz("123")
         tt_id = self._past_tee_time(self.t_open, creator="123")
-        body = {"player_discord_id": "123", "scores": [4] * 18}
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
@@ -716,6 +721,89 @@ class ApiTestCase(unittest.TestCase):
             self.assertEqual(r.json()["card"]["total"], 54)
         finally:
             main.fetch_crew_status = fake_fetch_crew_status
+
+
+    def test_scorecard_live_partial_save_and_finalize(self):
+        # Live scoring: partial PUTs save an in_progress card hole by hole;
+        # complete=True finalizes it; the old 403 lock only applies after.
+        self.with_tz("123")
+        self.with_tz("456")
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        url = f"/api/tee-times/{tt_id}/scorecard"
+        # First holes go in: nulls allowed, card is in_progress.
+        scores = [4, 5, 3] + [None] * 15
+        r = self.client.put(url, headers=self.h("123"),
+                            json={"player_discord_id": "123",
+                                  "scores": scores})
+        self.assertEqual(r.status_code, 200, r.text)
+        card = r.json()["card"]
+        self.assertEqual(card["status"], "in_progress")
+        self.assertEqual(card["thru"], 3)
+        self.assertEqual(card["total"], 12)
+        # More holes merge into the same row; earlier holes are kept.
+        scores2 = [None, None, None, 4, 4] + [None] * 13
+        r = self.client.put(url, headers=self.h("123"),
+                            json={"player_discord_id": "123",
+                                  "scores": scores2})
+        self.assertEqual(r.status_code, 200, r.text)
+        card = r.json()["card"]
+        self.assertEqual(card["thru"], 5)
+        self.assertEqual(card["scores"][:5], [4, 5, 3, 4, 4])
+        # A second player can still PUT while the card is in progress.
+        r = self.client.put(url, headers=self.h("123"),
+                            json={"player_discord_id": "123",
+                                  "scores": scores2})
+        self.assertEqual(r.status_code, 200, r.text)
+        # Finalize with the full card.
+        full = [4, 5, 3, 4, 4] + [4] * 13
+        r = self.client.put(url, headers=self.h("123"),
+                            json={"player_discord_id": "123",
+                                  "scores": full, "complete": True})
+        self.assertEqual(r.status_code, 200, r.text)
+        card = r.json()["card"]
+        self.assertEqual(card["status"], "verified")  # 2 players -> partners
+        self.assertEqual(card["total"], sum(full))
+        # Now the lock applies: non-crew can't touch it.
+        r = self.client.put(url, headers=self.h("123"),
+                            json={"player_discord_id": "123",
+                                  "scores": [3] * 18, "complete": True})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["code"], "scorecard_locked")
+
+    def test_scorecard_complete_requires_all_holes(self):
+        # complete=True with holes still empty is rejected.
+        self.with_tz("123")
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        url = f"/api/tee-times/{tt_id}/scorecard"
+        scores = [4] * 6 + [None] * 12
+        r = self.client.put(url, headers=self.h("123"),
+                            json={"player_discord_id": "123",
+                                  "scores": scores, "complete": True})
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["code"], "scorecard_incomplete")
+
+    def test_scorecard_live_shows_on_leaderboard(self):
+        # An in-progress card appears on the live leaderboard with thru.
+        self.with_tz("123")
+        self.with_tz("456")
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        scores = [4, 5] + [None] * 16
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"),
+                            json={"player_discord_id": "123",
+                                  "scores": scores})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.get(f"/api/tournaments/{self.t_open}/leaderboard",
+                            headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        standings = r.json()["standings"]
+        self.assertEqual(len(standings), 1)
+        row = standings[0]
+        self.assertTrue(row["on_course"])
+        self.assertEqual(row["thru"], 2)
+        self.assertEqual(row["total"], 9)
 
     def test_scorecard_get_other_player_card(self):
         # The player picker loads another tee-time member's card for the
@@ -1325,7 +1413,7 @@ class ApiTestCase(unittest.TestCase):
         tt_id = self._past_tee_time(self.t_open, creator="123")
         run(db.join_tee_time(self.db_path, tt_id, "456"))
         body = {"player_discord_id": "123", "scores": [4] * 18,
-                "witness_name": "  Tank "}
+                "witness_name": "  Tank ", "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)

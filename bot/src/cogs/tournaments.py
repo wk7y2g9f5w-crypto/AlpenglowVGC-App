@@ -252,7 +252,9 @@ class Tournaments(commands.Cog):
         - tournament_completed -> final standings post in #event-signups.
         - tournament_ended -> Tee Sheet refresh (silent close, no post).
         - scorecard_submitted -> leaderboard board re-render (app/API
-          submissions; bot submissions refresh directly at submit time).
+          submissions AND live hole-by-hole saves; bot submissions refresh
+          directly at submit time). Rows are coalesced: one refresh per
+          tournament per drain.
         Idempotent: re-adding an existing view and re-refreshing the board
         are harmless; announcement/standings posts skip tournaments that no
         longer exist or are in the wrong state.
@@ -263,6 +265,7 @@ class Tournaments(commands.Cog):
             print(f"outbox drain failed: {e}")
             return
         done = []
+        board_refreshes: set[int] = set()
         for row in rows:
             try:
                 if row["kind"] == "tournament_created":
@@ -289,14 +292,21 @@ class Tournaments(commands.Cog):
                     if guild_id:
                         await ts.maybe_refresh(self.bot, guild_id)
                 elif row["kind"] == "scorecard_submitted":
+                    # Live hole-by-hole saves enqueue one row per PUT;
+                    # coalesce to one board refresh per tournament per drain.
                     tid = int(row["payload"].get("tournament_id", 0))
                     if tid:
-                        await leaderboard_render.refresh_leaderboard(
-                            self.bot, self.bot.db_path, tid
-                        )
+                        board_refreshes.add(tid)
                 done.append(row["id"])
             except Exception as e:  # noqa: BLE001 - one bad row skips, rest drain
                 print(f"outbox row {row['id']} failed: {e}")
+        for tid in board_refreshes:
+            try:
+                await leaderboard_render.refresh_leaderboard(
+                    self.bot, self.bot.db_path, tid
+                )
+            except Exception as e:  # noqa: BLE001 - board refresh is best-effort
+                print(f"board refresh for tournament {tid} failed: {e}")
         if done:
             try:
                 await db.ack_outbox(self.bot.db_path, done)

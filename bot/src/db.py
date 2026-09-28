@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS scorecards(
   tee_time_id INTEGER REFERENCES tee_times(id) ON DELETE SET NULL,
   holes_json TEXT NOT NULL,
   total INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified','in_progress')),
   submitted_at TEXT NOT NULL,
   verified_by TEXT,
   submitted_by TEXT,
@@ -216,6 +216,8 @@ async def _migrate(db_path: str) -> None:
     - Rebuilds the tournaments table when its format CHECK predates
       'scramble' (SQLite can't ALTER a CHECK constraint, so the table is
       copied into the new shape — all rows are preserved).
+    - Rebuilds the scorecards table when its status CHECK predates
+      'in_progress' (live hole-by-hole entry), same copy-preserve pattern.
     - Adds players.golfplus_handle / timezone when missing.
     - Adds scorecards.submitted_by when missing.
     New tables (join_requests, side_quests) are handled by the idempotent
@@ -368,6 +370,45 @@ async def _migrate(db_path: str) -> None:
             )
             await con.execute("DROP TABLE tournaments")
             await con.execute("ALTER TABLE tournaments_new RENAME TO tournaments")
+            await con.commit()
+
+        # scorecards.status gains 'in_progress' (live hole-by-hole entry).
+        # Rebuild with the new CHECK, preserving every row.
+        cur = await con.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scorecards'"
+        )
+        row = await cur.fetchone()
+        card_sql = row[0] if row else ""
+        if "'in_progress'" not in card_sql:
+            await con.execute(
+                """CREATE TABLE scorecards_new(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+                  round_number INTEGER NOT NULL DEFAULT 1 CHECK(round_number BETWEEN 1 AND 5),
+                  player_discord_id TEXT,
+                  team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+                  tee_time_id INTEGER REFERENCES tee_times(id) ON DELETE SET NULL,
+                  holes_json TEXT NOT NULL,
+                  total INTEGER NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified','in_progress')),
+                  submitted_at TEXT NOT NULL,
+                  verified_by TEXT,
+                  submitted_by TEXT,
+                  witness_name TEXT
+                )"""
+            )
+            await con.execute(
+                """INSERT INTO scorecards_new
+                  (id, tournament_id, round_number, player_discord_id, team_id,
+                   tee_time_id, holes_json, total, status, submitted_at,
+                   verified_by, submitted_by, witness_name)
+                SELECT id, tournament_id, round_number, player_discord_id, team_id,
+                   tee_time_id, holes_json, total, status, submitted_at,
+                   verified_by, submitted_by, witness_name
+                FROM scorecards"""
+            )
+            await con.execute("DROP TABLE scorecards")
+            await con.execute("ALTER TABLE scorecards_new RENAME TO scorecards")
             await con.commit()
 
 
@@ -1408,16 +1449,33 @@ async def set_leader(db_path, tournament_id, leader_key, leader_sort) -> None:
 
 # ---------------------------------------------------------------- scorecards
 async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_id,
-                           scores: list[int], status: str,
+                           scores: list[int | None], status: str,
                            submitted_by: str | None = None,
                            round_number: int = 1,
                            witness_name: str | None = None) -> int:
+    """Insert or update a scorecard. scores may contain None for holes not
+    yet played (live entry); total covers entered holes only.
+
+    Card identity: best_ball matches per member (player + team); shared team
+    formats (alt_shot/scramble) match per team; stroke matches per player.
+    """
     holes_json = json.dumps(scores)
-    total = sum(scores)
+    total = sum(s for s in scores if s is not None)
     now = utcnow_iso()
     round_number = max(1, min(5, int(round_number or 1)))
     witness_name = (witness_name or "").strip()[:80] or None
-    if team_id is not None:
+    if team_id is not None and player_id is not None:
+        # best_ball: each member has their own card.
+        existing = await _fetchone(
+            db_path,
+            "SELECT id FROM scorecards WHERE tournament_id = ?"
+            " AND player_discord_id = ? AND team_id = ?"
+            " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+            " AND round_number = ?"
+            " ORDER BY submitted_at DESC LIMIT 1",
+            (tournament_id, player_id, team_id, tee_time_id, round_number),
+        )
+    elif team_id is not None:
         existing = await _fetchone(
             db_path,
             "SELECT id FROM scorecards WHERE tournament_id = ? AND team_id = ?"
@@ -1457,6 +1515,100 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
     return lastrowid
 
 
+async def save_partial_scorecard(db_path, tournament_id, player_id, team_id,
+                                 tee_time_id, scores: list[int | None],
+                                 submitted_by: str | None = None,
+                                 round_number: int = 1) -> int:
+    """Live hole-by-hole save. scores is full-length with None for holes not
+    yet played; non-null holes merge over the existing card so partners can
+    enter on the same team card (or a player on their own) concurrently.
+
+    The card is (re)created with status 'in_progress' — unless the existing
+    card is already complete (pending/verified), in which case its status
+    is preserved (crew correcting a submitted card). A no-op merge when
+    nothing changed keeps the same row and returns its id.
+    """
+    round_number = max(1, min(5, int(round_number or 1)))
+    holes_count = len(scores)
+    now = utcnow_iso()
+    # Single-connection transaction: two partners tapping the same shared
+    # team card can't interleave a read-modify-write and lose a hole.
+    con = await aiosqlite.connect(db_path)
+    try:
+        con.row_factory = aiosqlite.Row
+        await con.execute("BEGIN IMMEDIATE")
+        if team_id is not None and player_id is not None:
+            # best_ball: one card per member.
+            q = ("SELECT * FROM scorecards WHERE tournament_id = ?"
+                 " AND player_discord_id = ? AND team_id = ?"
+                 " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+                 " AND round_number = ? ORDER BY submitted_at DESC LIMIT 1")
+            params = (tournament_id, player_id, team_id, tee_time_id,
+                      round_number)
+        elif team_id is not None:
+            q = ("SELECT * FROM scorecards WHERE tournament_id = ?"
+                 " AND team_id = ?"
+                 " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+                 " AND round_number = ? ORDER BY submitted_at DESC LIMIT 1")
+            params = (tournament_id, team_id, tee_time_id, round_number)
+        else:
+            q = ("SELECT * FROM scorecards WHERE tournament_id = ?"
+                 " AND player_discord_id = ?"
+                 " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+                 " AND team_id IS NULL AND round_number = ?"
+                 " ORDER BY submitted_at DESC LIMIT 1")
+            params = (tournament_id, player_id, tee_time_id, round_number)
+        cur = await con.execute(q, params)
+        existing = await cur.fetchone()
+        if existing:
+            existing = dict(existing)
+            cur_scores = json.loads(existing["holes_json"])
+            if len(cur_scores) != holes_count:
+                raise ValueError(
+                    f"Partial card has {len(cur_scores)} holes,"
+                    f" expected {holes_count}."
+                )
+            merged = [
+                new if new is not None else old
+                for old, new in zip(cur_scores, scores)
+            ]
+            keep_status = (existing["status"]
+                           if existing["status"] != "in_progress"
+                           else "in_progress")
+            if merged == cur_scores and existing["status"] == keep_status:
+                await con.execute("ROLLBACK")
+                return existing["id"]
+            total = sum(s for s in merged if s is not None)
+            await con.execute(
+                "UPDATE scorecards SET holes_json = ?, total = ?, status = ?,"
+                " submitted_at = ?, submitted_by = ? WHERE id = ?",
+                (json.dumps(merged), total, keep_status, now,
+                 submitted_by or existing.get("submitted_by"),
+                 existing["id"]),
+            )
+            await con.commit()
+            return existing["id"]
+        total = sum(s for s in scores if s is not None)
+        cur = await con.execute(
+            "INSERT INTO scorecards (tournament_id, round_number,"
+            " player_discord_id, team_id, tee_time_id, holes_json, total,"
+            " status, submitted_at, submitted_by)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (tournament_id, round_number, player_id, team_id, tee_time_id,
+             json.dumps(scores), total, "in_progress", now, submitted_by),
+        )
+        await con.commit()
+        return cur.lastrowid
+    except Exception:
+        try:
+            await con.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        await con.close()
+
+
 async def find_scorecard(db_path, tournament_id, *, player_discord_id=None,
                          team_id=None, tee_time_id=None,
                          round_number=1) -> dict | None:
@@ -1467,6 +1619,17 @@ async def find_scorecard(db_path, tournament_id, *, player_discord_id=None,
     means an edit, which only crew may perform.
     """
     round_number = max(1, min(5, int(round_number or 1)))
+    if team_id is not None and player_discord_id is not None:
+        # best_ball: one card per member.
+        return await _fetchone(
+            db_path,
+            "SELECT * FROM scorecards WHERE tournament_id = ?"
+            " AND player_discord_id = ? AND team_id = ?"
+            " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
+            " AND round_number = ? ORDER BY submitted_at DESC LIMIT 1",
+            (tournament_id, player_discord_id, team_id, tee_time_id,
+             round_number),
+        )
     if team_id is not None:
         return await _fetchone(
             db_path,
@@ -1503,8 +1666,13 @@ async def get_scorecards(db_path, tournament_id, status=None) -> list[dict]:
 
 async def get_latest_player_card(db_path, tournament_id, discord_id,
                                  round_number: int | None = None) -> dict | None:
+    """Latest card for a player in a tournament (optionally one round).
+
+    Matches the player's own cards in any format — including best_ball,
+    whose cards carry both player_discord_id and team_id.
+    """
     sql = ("SELECT * FROM scorecards WHERE tournament_id = ?"
-           " AND player_discord_id = ? AND team_id IS NULL")
+           " AND player_discord_id = ?")
     params: list = [tournament_id, discord_id]
     if round_number is not None:
         sql += " AND round_number = ?"
@@ -1545,7 +1713,7 @@ async def correct_scorecard_hole(db_path, card_id, hole_index: int, score: int) 
     await _execute(
         db_path,
         "UPDATE scorecards SET holes_json = ?, total = ? WHERE id = ?",
-        (json.dumps(scores), sum(scores), card_id),
+        (json.dumps(scores), sum(s for s in scores if s is not None), card_id),
     )
     return await get_scorecard(db_path, card_id)
 

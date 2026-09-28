@@ -327,12 +327,14 @@ def _tee_time_json(tt: dict, players: list[dict]) -> dict:
 def _card_json(card: dict, pars_csv: str | None) -> dict:
     scores = json.loads(card["holes_json"])
     pars = _parse_pars(pars_csv)
+    thru = sum(1 for s in scores if s is not None)
     return {
         "player_discord_id": card["player_discord_id"],
         "round_number": card.get("round_number") or 1,
         "scores": scores,
         "total": card["total"],
         "to_par": sl.to_par(card["total"], pars),
+        "thru": thru,
         "status": card["status"],
         "submitted_by": card.get("submitted_by"),
         "witness_name": card.get("witness_name"),
@@ -488,9 +490,13 @@ class TournamentUpdate(BaseModel):
 
 class ScorecardSubmit(BaseModel):
     player_discord_id: str
-    scores: list[int]
+    # Full-length list; None marks a hole not yet played (live entry).
+    scores: list[int | None]
     round_number: int = Field(default=1, ge=1, le=5)
     witness_name: str | None = Field(default=None, max_length=80)
+    # complete=False: live partial save (in_progress). complete=True: final
+    # submission — every hole must have a score.
+    complete: bool = False
 
     @field_validator("witness_name")
     @classmethod
@@ -500,8 +506,10 @@ class ScorecardSubmit(BaseModel):
 
     @field_validator("scores")
     @classmethod
-    def _scores_in_range(cls, v: list[int]) -> list[int]:
+    def _scores_in_range(cls, v: list[int | None]) -> list[int | None]:
         for s in v:
+            if s is None:
+                continue
             if not isinstance(s, int) or isinstance(s, bool) or not 1 <= s <= 15:
                 raise ValueError(f"Score {s} is out of range — holes are scored 1-15.")
         return v
@@ -1365,11 +1373,20 @@ async def put_scorecard(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "player_not_in_tee_time"},
         )
-    # Gate 3: complete card — one score per hole of the tournament.
+    # Gate 3: the card is one score per hole of the tournament (nulls
+    # allowed for live partial saves); a final submission needs every hole.
     if len(body.scores) != t["holes"]:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Expected {t['holes']} hole scores but got {len(body.scores)}.",
+        )
+    if body.complete and any(s is None for s in body.scores):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "scorecard_incomplete",
+                "message": "Every hole needs a score before the card can be submitted.",
+            },
         )
     # Gate 3b: the round must exist on this tournament.
     rnd = await db.get_round(DB_PATH, t["id"], body.round_number)
@@ -1437,8 +1454,9 @@ async def put_scorecard(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "tee_time_not_passed"},
         )
-    # Gate 5: a submitted card can only be changed by crew (admins, mods,
-    # tournament directors). First submissions stay open to tee-time members.
+    # Gate 5: a COMPLETED card can only be changed by crew (admins, mods,
+    # tournament directors). Finalizing your own in-progress card, or a
+    # first submission, stays open to tee-time members.
     existing = await db.find_scorecard(
         DB_PATH,
         t["id"],
@@ -1446,7 +1464,7 @@ async def put_scorecard(
         tee_time_id=tt["id"],
         round_number=body.round_number,
     )
-    if existing is not None:
+    if existing is not None and existing["status"] != "in_progress":
         if is_crew is None:
             is_crew = await fetch_crew_status(user["discord_id"])
         if is_crew is None:
@@ -1463,21 +1481,35 @@ async def put_scorecard(
     # present -> auto-verified; solo rounds stay pending.
     player_count = await db.tee_time_player_count(DB_PATH, tt["id"])
     status_value = "verified" if player_count >= 2 else "pending"
-    card_id = await db.upsert_scorecard(
-        DB_PATH,
-        t["id"],
-        body.player_discord_id,
-        None,  # team_id: the mobile scorecard flow is player-level
-        tt["id"],
-        body.scores,
-        status_value,
-        submitted_by=user["discord_id"],
-        round_number=body.round_number,
-        witness_name=body.witness_name,
-    )
+    if body.complete:
+        card_id = await db.upsert_scorecard(
+            DB_PATH,
+            t["id"],
+            body.player_discord_id,
+            None,  # team_id: the mobile scorecard flow is player-level
+            tt["id"],
+            body.scores,
+            status_value,
+            submitted_by=user["discord_id"],
+            round_number=body.round_number,
+            witness_name=body.witness_name,
+        )
+    else:
+        # Live partial save: merge entered holes into the in-progress card.
+        card_id = await db.save_partial_scorecard(
+            DB_PATH,
+            t["id"],
+            body.player_discord_id,
+            None,
+            tt["id"],
+            body.scores,
+            submitted_by=user["discord_id"],
+            round_number=body.round_number,
+        )
     card = await db.get_scorecard(DB_PATH, card_id)
     # The Discord leaderboard board refreshes off this: the bot can't see
     # API writes, so the outbox drain picks it up (~1 min) and re-renders.
+    # Partial saves enqueue too — the drain coalesces them per tournament.
     await db.enqueue_outbox(
         DB_PATH, "scorecard_submitted", {"tournament_id": t["id"]}
     )
@@ -1517,12 +1549,16 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
     if fmt == "stroke":
         # Same ranking helpers the bot uses (lr._stroke_ranked aggregates
         # verified cards across rounds; to_par is the cumulative value).
-        ranked, pending = await lr._stroke_ranked(DB_PATH, t)
+        # Live in-progress cards are included so the board moves hole by hole.
+        ranked, pending = await lr._stroke_ranked(
+            DB_PATH, t, include_in_progress=True)
 
         def _row(i: int, c: dict, verified: bool) -> dict:
             tp = c.get("to_par")
             if tp is None:
                 tp = sl.to_par(c["total"], pars)
+            live_rounds = [d for d in c.get("rounds", [])
+                           if d.get("status") == "in_progress"]
             return {
                 "position": i,
                 "discord_id": c["player_discord_id"],
@@ -1532,6 +1568,9 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
                 "to_par": tp,
                 "to_par_display": sl.format_to_par(tp),
                 "status": "verified" if verified else c["status"],
+                "on_course": bool(c.get("on_course")),
+                "thru": (max(d.get("thru", 0) for d in live_rounds)
+                         if live_rounds else None),
                 "rounds_played": c.get("rounds_played", 1),
                 "rounds": c.get("rounds", []),
             }
@@ -1553,8 +1592,10 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
         }
     if fmt in ("best_ball", "alt_shot", "scramble"):
         # Same ranking the bot uses (lr._team_rows aggregates per round,
-        # then sums; to_par is the cumulative value).
-        rows, scoreless = await lr._team_rows(DB_PATH, t)
+        # then sums; to_par is the cumulative value). Live in-progress
+        # cards are included so the board moves hole by hole.
+        rows, scoreless = await lr._team_rows(
+            DB_PATH, t, include_in_progress=True)
         standings = [
             {
                 "position": i,
@@ -1571,6 +1612,11 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
                 ),
                 "players": r["members"],
                 "pending": r["pending"],
+                "on_course": bool(r.get("on_course")),
+                "thru": (max((d.get("thru", 0)
+                              for d in r["rounds"]
+                              if d.get("status") == "in_progress"),
+                             default=None)),
                 "rounds_played": r["rounds_played"],
                 "rounds": r["rounds"],
             }

@@ -79,9 +79,11 @@ async def build_leaderboard_embed(db_path: str, tournament_id: int,
         color=0x2E7D32 if final else 0x1B6CA8,
     )
     if fmt == "stroke":
-        await _render_stroke(embed, t, pars, db_path)
+        await _render_stroke(embed, t, pars, db_path,
+                             include_in_progress=not final)
     elif fmt in ("best_ball", "alt_shot", "scramble"):
-        await _render_teams(embed, t, pars, db_path)
+        await _render_teams(embed, t, pars, db_path,
+                            include_in_progress=not final)
     elif fmt == "match":
         await _render_match(embed, t, db_path)
 
@@ -91,8 +93,29 @@ async def build_leaderboard_embed(db_path: str, tournament_id: int,
     return embed
 
 
-async def _stroke_ranked(db_path: str, t: dict
-                      ) -> tuple[list[dict], list[dict]]:
+def _holes_played(card: dict) -> int:
+    """How many holes have an entered score on this card."""
+    try:
+        return sum(1 for s in json.loads(card["holes_json"]) if s is not None)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _partial_round_score(scores: list, pars: list[int] | None
+                         ) -> tuple[int, int | None, int]:
+    """(total of entered holes, to-par vs pars of entered holes, thru)."""
+    thru = sum(1 for s in scores if s is not None)
+    total = sum(s for s in scores if s is not None)
+    to_par = None
+    if pars and len(pars) == len(scores):
+        to_par = total - sum(par for par, s in zip(pars, scores)
+                             if s is not None)
+    return total, to_par, thru
+
+
+async def _stroke_ranked(db_path: str, t: dict,
+                         include_in_progress: bool = False
+                         ) -> tuple[list[dict], list[dict]]:
     """Multi-round stroke leaderboard: (ranked, pending).
 
     Ranked rows carry player_discord_id, name, total (verified aggregate),
@@ -100,6 +123,12 @@ async def _stroke_ranked(db_path: str, t: dict
     per-round "rounds" breakdown. Players rank by cumulative to-par (total
     when pars are unknown). Players with no verified round appear in
     pending with their latest pending card (historic shape).
+
+    With include_in_progress=True, in-progress (live hole-by-hole) cards
+    join the board with partial totals, to-par against the pars of holes
+    actually played, and a per-round "thru" count; rows carry on_course=True
+    while any counted round is live. With the flag off, behavior is
+    exactly as before: live cards stay out of the standings.
     """
     rounds = await db.list_rounds(db_path, t["id"])
     cards = await db.get_scorecards(db_path, t["id"])
@@ -122,13 +151,19 @@ async def _stroke_ranked(db_path: str, t: dict
         name = db.display_name_of(player, pid)
         verified = {r: c for r, c in by_round.items()
                     if c["status"] == "verified"}
-        if not verified:
+        live: dict[int, dict] = {}
+        if include_in_progress:
+            live = {r: c for r, c in by_round.items()
+                    if (c["status"] == "in_progress" and r not in verified
+                        and _holes_played(c) > 0)}
+        counted = {**verified, **live}
+        if not counted:
             pending.append(max(by_round.values(),
                                key=lambda c: c["submitted_at"]))
             continue
-        total = sum(c["total"] for c in verified.values())
-        to_par = (total - par_round * len(verified)
-                  if par_round is not None else None)
+        total = 0
+        pars_entered = 0
+        on_course = bool(live)
         detail, pend_rounds = [], 0
         for r in rounds:
             rn = r["round_number"]
@@ -139,6 +174,19 @@ async def _stroke_ranked(db_path: str, t: dict
                     "to_par": (c["total"] - par_round
                                if par_round is not None else None),
                     "status": "verified",
+                    "thru": t["holes"],
+                })
+            elif rn in live:
+                scores = json.loads(c["holes_json"])
+                subtotal, sub_to_par, thru = _partial_round_score(scores,
+                                                                 pars)
+                total += subtotal
+                if sub_to_par is not None:
+                    pars_entered += subtotal - sub_to_par
+                detail.append({
+                    "round_number": rn, "total": subtotal,
+                    "to_par": sub_to_par, "status": "in_progress",
+                    "thru": thru,
                 })
             else:
                 if c is not None:
@@ -146,13 +194,20 @@ async def _stroke_ranked(db_path: str, t: dict
                 detail.append({
                     "round_number": rn, "total": None, "to_par": None,
                     "status": c["status"] if c else "not_started",
+                    "thru": 0,
                 })
+        for rn, c in verified.items():
+            total += c["total"]
+            if par_round is not None:
+                pars_entered += par_round
+        to_par = (total - pars_entered) if par_round is not None else None
         sort_key = to_par if to_par is not None else total
         ranked.append({
             "player_discord_id": pid, "name": name,
             "total": total, "to_par": to_par,
-            "rounds_played": len(verified),
+            "rounds_played": len(counted),
             "pending_rounds": pend_rounds,
+            "on_course": on_course,
             "rounds": detail,
             "_sort": (sort_key, total, name),
         })
@@ -169,12 +224,14 @@ def _agg_suffix(total: int, pars: list[int] | None,
 
 
 async def _render_stroke(embed: discord.Embed, t: dict,
-                         pars: list[int] | None, db_path: str) -> None:
-    ranked, pending = await _stroke_ranked(db_path, t)
+                         pars: list[int] | None, db_path: str,
+                         include_in_progress: bool = False) -> None:
+    ranked, pending = await _stroke_ranked(db_path, t,
+                                           include_in_progress=include_in_progress)
 
     if not ranked and not pending:
         embed.add_field(name="No scores yet",
-                        value="Scores will appear here once players submit them.",
+                        value="Scores will appear here as players enter them.",
                         inline=False)
         return
 
@@ -182,10 +239,20 @@ async def _render_stroke(embed: discord.Embed, t: dict,
     lines = []
     for i, r in enumerate(ranked, start=1):
         mark = " ⏳" if r["pending_rounds"] else ""
+        if r.get("on_course"):
+            mark += " ⛳"
         prog = (f" ({r['rounds_played']}/{len(r['rounds'])} rounds)"
                 if multi and r["rounds_played"] < len(r["rounds"]) else "")
+        tp = sl.format_to_par(r["to_par"])
+        suffix = f" ({tp})" if tp else ""
+        thru = ""
+        if r.get("on_course") and not multi:
+            live_rounds = [d for d in r["rounds"]
+                           if d["status"] == "in_progress"]
+            if live_rounds:
+                thru = f" (thru {live_rounds[0]['thru']})"
         lines.append(f"**{i}.** {r['name']} — **{r['total']}**"
-                     f"{_agg_suffix(r['total'], pars, r['rounds_played'])}"
+                     f"{suffix}{thru}"
                      f"{prog}{mark}")
         if multi:
             bits = []
@@ -193,6 +260,9 @@ async def _render_stroke(embed: discord.Embed, t: dict,
                 if d["status"] == "verified":
                     bits.append(f"R{d['round_number']} {d['total']}"
                                 f"{_total_suffix(d['total'], pars)}")
+                elif d["status"] == "in_progress":
+                    bits.append(f"R{d['round_number']} {d['total']} "
+                                f"(thru {d['thru']}) ⛳")
                 elif d["status"] == "pending":
                     bits.append(f"R{d['round_number']} ⏳")
             if bits:
@@ -212,13 +282,46 @@ async def _render_stroke(embed: discord.Embed, t: dict,
         )
 
 
-async def _team_rows(db_path: str, t: dict) -> tuple[list[dict], list[str]]:
+def _best_ball_live(all_scores: list[list[int | None]], pars: list[int] | None
+                   ) -> tuple[int, int | None, int]:
+    """Per-hole best across member cards using entered holes only.
+
+    Returns (total, to-par vs pars of holes with an entry, thru). Raises
+    ValueError on card-length mismatch (caller treats as a card mismatch).
+    """
+    if not all_scores:
+        raise ValueError("no cards")
+    n = len(all_scores[0])
+    if any(len(s) != n for s in all_scores):
+        raise ValueError("card length mismatch")
+    par_ok = bool(pars) and len(pars) == n
+    bests: list[int] = []
+    pars_entered = 0
+    for i in range(n):
+        entered = [s[i] for s in all_scores if s[i] is not None]
+        if not entered:
+            continue
+        bests.append(min(entered))
+        if par_ok:
+            pars_entered += pars[i]
+    total = sum(bests)
+    return total, (total - pars_entered) if par_ok else None, len(bests)
+
+
+async def _team_rows(db_path: str, t: dict,
+                     include_in_progress: bool = False
+                     ) -> tuple[list[dict], list[str]]:
     """Ranked team rows (each includes team_id) plus scoreless team names.
 
     Round-aware: best_ball takes the per-hole best within each round, then
     sums round totals; alt_shot/scramble sum each round's shared team card.
     Rows carry total (aggregate), to_par, rounds_played, pending, and a
     per-round "rounds" breakdown.
+
+    With include_in_progress=True, in-progress (live hole-by-hole) cards
+    join the board with partial totals and a "thru" count; rows carry
+    on_course=True while any counted round is live. With the flag off,
+    behavior is exactly as before.
     """
     teams = await db.get_teams(db_path, t["id"])
     rounds = await db.list_rounds(db_path, t["id"])
@@ -230,11 +333,12 @@ async def _team_rows(db_path: str, t: dict) -> tuple[list[dict], list[str]]:
         members = await db.get_team_members(db_path, team["id"])
         round_totals: dict[int, int] = {}
         has_pending = False
+        on_course = False
         mismatch = False
         detail: list[dict] = []
+        pars_entered = 0
         for r in rounds:
             rn = r["round_number"]
-            member_cards: list[list[int]] = []
             round_pending = False
             if t["format"] in ("alt_shot", "scramble"):
                 # One shared team card per round (submitted under the team name).
@@ -243,36 +347,56 @@ async def _team_rows(db_path: str, t: dict) -> tuple[list[dict], list[str]]:
             else:
                 cards = [await db.get_latest_player_card(
                     db_path, t["id"], m["discord_id"], rn) for m in members]
+            verified_scores: list[list[int]] = []
+            live_scores: list[list[int | None]] = []
             for card in cards:
                 if card is None:
                     continue
-                if card["status"] != "verified":
+                if card["status"] == "verified":
+                    try:
+                        verified_scores.append(json.loads(card["holes_json"]))
+                    except (ValueError, TypeError):
+                        continue
+                elif (card["status"] == "in_progress"
+                      and include_in_progress):
                     has_pending = True
                     round_pending = True
-                    continue
-                try:
-                    member_cards.append(json.loads(card["holes_json"]))
-                except (ValueError, TypeError):
-                    continue
-            if not member_cards:
+                    try:
+                        scores = json.loads(card["holes_json"])
+                    except (ValueError, TypeError):
+                        continue
+                    if any(s is not None for s in scores):
+                        live_scores.append(scores)
+                else:
+                    has_pending = True
+                    round_pending = True
+            counted_live = bool(live_scores)
+            if not verified_scores and not live_scores:
                 detail.append({"round_number": rn, "total": None,
-                               "to_par": None,
+                               "to_par": None, "thru": 0,
                                "status": "pending" if round_pending
                                else "not_started"})
                 continue
             try:
                 if t["format"] == "best_ball":
-                    rt = sl.best_ball_total(member_cards)
+                    rt, rt_par, thru = _best_ball_live(
+                        verified_scores + live_scores, pars)
                 else:  # alt_shot / scramble: one shared team card
-                    rt = sum(member_cards[0])
+                    scores = (verified_scores[0] if verified_scores
+                              else live_scores[0])
+                    rt, rt_par, thru = _partial_round_score(scores, pars)
             except ValueError:
                 mismatch = True
                 break
+            if counted_live:
+                on_course = True
             round_totals[rn] = rt
+            if rt_par is not None:
+                pars_entered += rt - rt_par
             detail.append({
-                "round_number": rn, "total": rt,
-                "to_par": (rt - par_round if par_round is not None else None),
-                "status": "verified",
+                "round_number": rn, "total": rt, "to_par": rt_par,
+                "thru": thru,
+                "status": "in_progress" if counted_live else "verified",
             })
         if mismatch:
             scoreless.append(f"{team['name']} (card mismatch)")
@@ -281,12 +405,13 @@ async def _team_rows(db_path: str, t: dict) -> tuple[list[dict], list[str]]:
             scoreless.append(team["name"])
             continue
         total = sum(round_totals.values())
-        to_par = (total - par_round * len(round_totals)
+        to_par = (total - pars_entered
                   if par_round is not None else None)
         sort_key = to_par if to_par is not None else total
         rows.append({"team_id": team["id"], "name": team["name"],
                      "total": total, "to_par": to_par,
                      "members": len(members), "pending": has_pending,
+                     "on_course": on_course,
                      "rounds_played": len(round_totals),
                      "rounds": detail, "_sort": (sort_key, total,
                                                  team["name"])})
@@ -298,26 +423,38 @@ async def _team_rows(db_path: str, t: dict) -> tuple[list[dict], list[str]]:
 
 
 async def _render_teams(embed: discord.Embed, t: dict,
-                        pars: list[int] | None, db_path: str) -> None:
+                        pars: list[int] | None, db_path: str,
+                        include_in_progress: bool = False) -> None:
     teams = await db.get_teams(db_path, t["id"])
     if not teams:
         embed.add_field(name="No teams yet",
                         value="Create a team with `/team create` first.",
                         inline=False)
         return
-    rows, scoreless = await _team_rows(db_path, t)
+    rows, scoreless = await _team_rows(db_path, t,
+                                       include_in_progress=include_in_progress)
 
     multi = any(len(r["rounds"]) > 1 for r in rows)
     if rows:
         lines = []
         for i, r in enumerate(rows, start=1):
             mark = " ⏳" if r["pending"] else ""
+            if r.get("on_course"):
+                mark += " ⛳"
             prog = (f" ({r['rounds_played']}/{len(r['rounds'])} rounds)"
                     if multi and r["rounds_played"] < len(r["rounds"]) else "")
+            thru = ""
+            if r.get("on_course") and not multi:
+                live_rounds = [d for d in r["rounds"]
+                               if d["status"] == "in_progress"]
+                if live_rounds:
+                    thru = f" (thru {live_rounds[0]['thru']})"
+            tp = sl.format_to_par(r["to_par"])
+            suffix = f" ({tp})" if tp else ""
             lines.append(
                 f"**{i}.** {r['name']} — **{r['total']}**"
-                f"{_agg_suffix(r['total'], pars, r['rounds_played'])}"
-                f" ({r['members']} players){prog}{mark}"
+                f"{suffix}"
+                f" ({r['members']} players){thru}{prog}{mark}"
             )
             if multi:
                 bits = []
@@ -325,6 +462,9 @@ async def _render_teams(embed: discord.Embed, t: dict,
                     if d["status"] == "verified":
                         bits.append(f"R{d['round_number']} {d['total']}"
                                     f"{_total_suffix(d['total'], pars)}")
+                    elif d["status"] == "in_progress":
+                        bits.append(f"R{d['round_number']} {d['total']} "
+                                    f"(thru {d['thru']}) ⛳")
                     elif d["status"] == "pending":
                         bits.append(f"R{d['round_number']} ⏳")
                 if bits:

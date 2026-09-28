@@ -292,16 +292,19 @@ class ApiClient {
     return Scorecard.fromJson(card as Map<String, dynamic>);
   }
 
-  Future<void> submitScorecard(
-      String teeTimeId, String playerDiscordId, List<int> scores,
-      {int roundNumber = 1, String? witnessName}) async {
-    await _put('/api/tee-times/$teeTimeId/scorecard', {
+  Future<Scorecard> submitScorecard(
+      String teeTimeId, String playerDiscordId, List<int?> scores,
+      {int roundNumber = 1, String? witnessName, bool complete = false}) async {
+    final body = await _put('/api/tee-times/$teeTimeId/scorecard', {
       'player_discord_id': playerDiscordId,
       'scores': scores,
       'round_number': roundNumber,
+      'complete': complete,
       if (witnessName != null && witnessName.trim().isNotEmpty)
         'witness_name': witnessName.trim(),
     });
+    return Scorecard.fromJson(
+        (body as Map<String, dynamic>)['card'] as Map<String, dynamic>);
   }
 
   /// Patch one round's Golf+ settings and/or date window (crew).
