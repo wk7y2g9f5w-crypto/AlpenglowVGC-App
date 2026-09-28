@@ -19,7 +19,7 @@ import UserNotifications
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
     let registrar =
-      engineBridge.pluginRegistry.registrar(forPlugin: "com.alpenglow.vgc.app.push")
+      engineBridge.pluginRegistry.registrar(forPlugin: "com.alpenglow.vgc.app.push")!
     let channel = FlutterMethodChannel(
       name: "com.alpenglow.vgc.app/push",
       binaryMessenger: registrar.messenger())
