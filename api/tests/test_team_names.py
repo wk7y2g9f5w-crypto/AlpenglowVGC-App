@@ -231,32 +231,34 @@ class TeamNameLockApiTestCase(ApiTestCase):
         self.assertEqual(r.status_code, 409, r.text)
         self.assertIn("belongs to another crew", r.json()["detail"])
 
-    def test_altshot_flexible_join_name_lock(self):
-        tt = self._as_create("1", max_teams=2).json()
-        r = self._as_join(tt["id"], "2", team_name="Eagles",
-                          extra_names=["Gus"])
+    def test_altshot_two_team_create_name_lock(self):
+        # Team names come from creation on fixed 2-team tee times; a
+        # second crew may not claim the same name, and a failed create
+        # leaves nothing behind.
+        r = self._as_create("1", team2_name="Eagles")
         self.assertEqual(r.status_code, 200, r.text)
-        # A different crew on another tee time may not take the name.
-        tt2 = self._as_create("4", max_teams=2).json()
-        r = self._as_join(tt2["id"], "3", team_name="Eagles")
+        r = self._as_create("3", team2_name="eagles")
         self.assertEqual(r.status_code, 409, r.text)
         self.assertIn("taken by another crew", r.json()["detail"])
+        r = self.client.get("/api/altshot-tee-times", headers=self.h("3"))
+        self.assertEqual(len(r.json()["tee_times"]), 1)
 
-    def test_altshot_finalize_on_first_score(self):
-        tt = self._as_create("1", max_teams=2).json()
-        r = self._as_join(tt["id"], "2", team_name="Eagles",
-                          extra_names=["Gus"])
-        self.assertEqual(r.status_code, 200, r.text)
-        team = [t for t in r.json()["teams"]
-                if t["player1_discord_id"] == "2"][0]
-        r = self._as_submit(tt["id"], team["id"], "2")
-        self.assertEqual(r.status_code, 200, r.text)
-        # "Eagles" is now locked to {2}: user 3 may not take it, user 2 may.
-        tt2 = self._as_create("4", max_teams=2).json()
-        r = self._as_join(tt2["id"], "3", team_name="Eagles")
+    def test_altshot_two_team_finalize_when_full(self):
+        tt = self._as_create("1", team1_name="Eagles").json()
+        teams = {t["team_number"]: t for t in tt["teams"]}
+        # Fill team 1 -> the name finalizes to {1, 2}.
+        for uid in ("2",):
+            r = self._as_join(tt["id"], uid, team_id=teams[1]["id"])
+            self.assertEqual(r.status_code, 200, r.text)
+        # "Eagles" now belongs to {1, 2}: user 3 may not take it...
+        tt2 = self._as_create("3").json()
+        team2 = tt2["teams"][0]
+        r = self._as_rename(tt2["id"], team2["id"], "3", "Eagles")
         self.assertEqual(r.status_code, 409, r.text)
-        tt3 = self._as_create("4", max_teams=2).json()
-        r = self._as_join(tt3["id"], "2", team_name="Eagles")
+        self.assertIn("belongs to another crew", r.json()["detail"])
+        # ...but an original crew member may reuse it as a subset.
+        tt3 = self._as_create("2").json()
+        r = self._as_rename(tt3["id"], tt3["teams"][0]["id"], "2", "Eagles")
         self.assertEqual(r.status_code, 200, r.text)
 
     # -- cross-category: one global registry ---------------------------

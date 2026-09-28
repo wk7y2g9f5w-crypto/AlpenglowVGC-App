@@ -36,8 +36,12 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
 
   late final TextEditingController _label;
   late final TextEditingController _notes;
+  late final TextEditingController _team1Name;
+  late final TextEditingController _team2Name;
   List<GolfCourse> _courses = [];
   GolfCourse? _course;
+  Map<String, AltShotCourseRecord> _records = {};
+  int _recordsToken = 0;
   String _tee = 'back';
   String _pin = 'black';
   String _wind = 'moderate';
@@ -57,6 +61,8 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
     final e = widget.existing;
     _label = TextEditingController(text: e?.label ?? '');
     _notes = TextEditingController(text: e?.notes ?? '');
+    _team1Name = TextEditingController();
+    _team2Name = TextEditingController();
     _tee = e?.teePosition ?? 'back';
     _pin = e?.pinPosition ?? 'black';
     _wind = e?.windStrength ?? 'moderate';
@@ -89,6 +95,25 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
       if (mounted) {
         showSnack(context, 'Could not load courses: $err', error: true);
       }
+      return;
+    }
+    _loadRecords();
+  }
+
+  /// Refresh the per-course record lines for the picker, keyed by the
+  /// current team size and setup. Stale responses are discarded.
+  Future<void> _loadRecords() async {
+    final token = ++_recordsToken;
+    try {
+      final recs = await _api.getAltShotRecordsSummary(_teamSize,
+          teePosition: _tee,
+          pinPosition: _pin,
+          windStrength: _wind,
+          greenSpeed: _greenSpeed);
+      if (!mounted || token != _recordsToken) return;
+      setState(() => _records = recs);
+    } catch (_) {
+      // Records are a nice-to-have; the picker works without them.
     }
   }
 
@@ -96,6 +121,8 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
   void dispose() {
     _label.dispose();
     _notes.dispose();
+    _team1Name.dispose();
+    _team2Name.dispose();
     super.dispose();
   }
 
@@ -143,15 +170,18 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
         'green_speed': _greenSpeed,
         'starts_at': _when?.toUtc().toIso8601String() ?? '',
         'max_teams': _maxTeams,
-        'team_size': _maxTeams == 1 ? _teamSize : null,
+        'team_size': _teamSize,
         'notes': _notes.text.trim(),
       };
       if (widget.existing == null) {
+        if (_maxTeams == 2) {
+          payload['team1_name'] = _team1Name.text.trim();
+          payload['team2_name'] = _team2Name.text.trim();
+        }
         await _api.createAltShotTeeTime(payload);
       } else {
         await _api.updateAltShotTeeTime(widget.existing!.id, payload);
-      }
-      if (mounted) Navigator.of(context).pop(true);
+      }      if (mounted) Navigator.of(context).pop(true);
     } on ApiException catch (e) {
       if (mounted) showSnack(context, e.message, error: true);
     } finally {
@@ -172,7 +202,10 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
           .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
           .toList(),
       onChanged: (v) {
-        if (v != null) setState(() => onChanged(v));
+        if (v != null) {
+          setState(() => onChanged(v));
+          _loadRecords();
+        }
       },
     );
   }
@@ -207,7 +240,28 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
                   ),
                   items: _courses
                       .map((c) => DropdownMenuItem(
-                          value: c, child: Text(c.name)))
+                          value: c,
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(c.name),
+                              Text(
+                                _records[c.name]?.recordLine ??
+                                    'No record yet',
+                                style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey),
+                              ),
+                            ],
+                          )))
+                      .toList(),
+                  selectedItemBuilder: (context) => _courses
+                      .map((c) => Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(c.name,
+                              overflow: TextOverflow.ellipsis)))
                       .toList(),
                   onChanged: (v) => setState(() => _course = v),
                 ),
@@ -266,30 +320,63 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
                     ),
                   ],
                 ),
-                if (_maxTeams == 1) ...[
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      const Text('Players per team'),
-                      const Spacer(),
-                      IconButton(
-                        icon: const Icon(Icons.remove),
-                        onPressed: _teamSize > 2
-                            ? () => setState(() => _teamSize--)
-                            : null,
-                      ),
-                      Text('$_teamSize',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      IconButton(
-                        icon: const Icon(Icons.add),
-                        onPressed: _teamSize < 4
-                            ? () => setState(() => _teamSize++)
-                            : null,
-                      ),
-                    ],
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Text('Players per team'),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.remove),
+                      onPressed: _teamSize > 2
+                          ? () {
+                              setState(() => _teamSize--);
+                              _loadRecords();
+                            }
+                          : null,
+                    ),
+                    Text('$_teamSize',
+                        style: Theme.of(context).textTheme.titleMedium),
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: _teamSize < 4
+                          ? () {
+                              setState(() => _teamSize++);
+                              _loadRecords();
+                            }
+                          : null,
+                    ),
+                  ],
+                ),
+                Text(
+                  _maxTeams == 1
+                      ? 'Only this many players can join the team.'
+                      : 'Applies to both teams — both must fill up before a record can be submitted.',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+                if (_maxTeams == 2 && widget.existing == null) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _team1Name,
+                    decoration: const InputDecoration(
+                      labelText: 'Team 1 name (optional)',
+                      helperText: 'Leave blank and Golf+ usernames will show'
+                          ' on the leaderboard.',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _team2Name,
+                    decoration: const InputDecoration(
+                      labelText: 'Team 2 name (optional)',
+                      helperText: 'Leave blank and Golf+ usernames will show'
+                          ' on the leaderboard.',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
                   const Text(
-                    'Only this many players can join the team.',
+                    'You start on Team 1. Team names lock to your crew once used.',
                     style: TextStyle(fontSize: 12, color: Colors.grey),
                   ),
                 ],

@@ -458,11 +458,21 @@ class ApiClient {
   }
 
   Future<AltShotTeeTime> joinAltShotTeeTime(String id,
-      {String teamName = '', List<String> extraNames = const []}) async {
+      {String teamName = '',
+      List<String> extraNames = const [],
+      String? teamId}) async {
     final body = await _post('/api/altshot-tee-times/$id/join', {
       'team_name': teamName,
       'extra_names': extraNames,
+      if (teamId case final tid) 'team_id': tid,
     });
+    return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
+  /// Move to another team of a fixed 2-team tee time (before scoring).
+  Future<AltShotTeeTime> switchAltShotTeam(String id, String teamId) async {
+    final body = await _post(
+        '/api/altshot-tee-times/$id/switch-team', {'team_id': teamId});
     return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
   }
 
@@ -476,6 +486,16 @@ class ApiClient {
     final body = await _patch(
         '/api/altshot-tee-times/$ttId/teams/$teamId', payload);
     return AltShotTeam.fromJson(body as Map<String, dynamic>);
+  }
+
+  /// Organizer/crew management of a fixed 2-team tee time's team: rename,
+  /// move a player, or remove a player. Returns the full tee time since
+  /// moves affect both teams.
+  Future<AltShotTeeTime> manageAltShotTeam(
+      String ttId, String teamId, Map<String, dynamic> payload) async {
+    final body = await _patch(
+        '/api/altshot-tee-times/$ttId/teams/$teamId', payload);
+    return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
   }
 
   Future<Map<String, dynamic>> submitAltShotScore(
@@ -506,6 +526,29 @@ class ApiClient {
     return items
         .map((e) => AltShotRecord.fromJson(e as Map<String, dynamic>))
         .toList();
+  }
+
+  /// Batched best-record-per-course lookup for the tee-time course picker:
+  /// {course name: record}. One call, keyed by roster size and setup.
+  Future<Map<String, AltShotCourseRecord>> getAltShotRecordsSummary(
+      int teamSize,
+      {String teePosition = 'back',
+      String pinPosition = 'black',
+      String windStrength = 'moderate',
+      String greenSpeed = 'pro'}) async {
+    final body = await _get('/api/altshot-records/summary', {
+      'team_size': teamSize.toString(),
+      'tee_position': teePosition,
+      'pin_position': pinPosition,
+      'wind_strength': windStrength,
+      'green_speed': greenSpeed,
+    });
+    final recs = (body as Map<String, dynamic>)['records'] as Map;
+    return {
+      for (final e in recs.entries)
+        e.key.toString(): AltShotCourseRecord.fromJson(
+            e.value as Map<String, dynamic>)
+    };
   }
 
   // ------------------------------------------------------------ match-play

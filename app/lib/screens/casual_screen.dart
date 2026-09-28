@@ -4,6 +4,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import '../widgets/course_art.dart';
 import 'casual_detail_screen.dart';
 import 'casual_form_screen.dart';
 
@@ -77,36 +78,22 @@ class _CasualScreenState extends State<CasualScreen> {
             itemCount: teeTimes.length,
             itemBuilder: (context, i) {
               final tt = teeTimes[i];
-              return Card(
-                margin:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: ListTile(
-                  title: Text(tt.label,
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const SizedBox(height: 4),
-                      Text('${tt.course} · ${formatTeeTimeWhen(tt.startsAt)}'),
-                      const SizedBox(height: 2),
-                      Text(
-                        '${tt.players.length}/${tt.maxPlayers} players · ${tt.settingsSummary}',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ],
-                  ),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () async {
-                    await Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => CasualDetailScreen(
-                        auth: widget.auth,
-                        settings: widget.settings,
-                        teeTimeId: tt.id,
-                      ),
-                    ));
-                    _refresh();
-                  },
-                ),
+              return CourseTeeTimeCard(
+                course: tt.course,
+                title: tt.label,
+                line1: '${tt.course} · ${formatTeeTimeWhen(tt.startsAt)}',
+                line2:
+                    '${tt.players.length}/${tt.maxPlayers} players · ${tt.settingsSummary}',
+                onTap: () async {
+                  await Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => CasualDetailScreen(
+                      auth: widget.auth,
+                      settings: widget.settings,
+                      teeTimeId: tt.id,
+                    ),
+                  ));
+                  _refresh();
+                },
               );
             },
           );

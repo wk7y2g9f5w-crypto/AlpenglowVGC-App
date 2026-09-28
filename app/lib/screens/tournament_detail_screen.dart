@@ -932,32 +932,29 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
               final inIt =
                   tt.players.any((p) => p.discordId == data.me.discordId);
               final isCreator = tt.createdBy == data.me.discordId;
-              return Card(
-                margin:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: ListTile(
-                  title: Text(tt.label),
-                  subtitle: Text(
-                      '${formatLocal(tt.startsAtUtc)} · ${tt.spotsFilled}/${tt.maxPlayers} players${tt.roundNumber > 1 ? ' · Round ${tt.roundNumber}' : ''}${isCreator ? ' · yours' : ''}'),
-                  trailing: inIt
-                      ? const Icon(Icons.check, color: Colors.green)
-                      : tt.isFull
-                          ? const Text('Full',
-                              style: TextStyle(color: Colors.grey))
-                          : const Icon(Icons.chevron_right),
-                  onTap: () async {
-                    await Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => TeeTimeDetailScreen(
-                        auth: widget.auth,
-                        settings: widget.settings,
-                        tournament: widget.tournament,
-                        teeTimeId: tt.id,
-                        myDiscordId: data.me.discordId,
-                      ),
-                    ));
-                    _refresh();
-                  },
-                ),
+              return CourseTeeTimeCard(
+                course: widget.tournament.course,
+                title: tt.label,
+                line1:
+                    '${formatLocal(tt.startsAtUtc)} · ${tt.spotsFilled}/${tt.maxPlayers} players${tt.roundNumber > 1 ? ' · Round ${tt.roundNumber}' : ''}${isCreator ? ' · yours' : ''}',
+                trailing: inIt
+                    ? const Icon(Icons.check, color: Colors.green)
+                    : tt.isFull
+                        ? const Text('Full',
+                            style: TextStyle(color: Colors.white70))
+                        : const Icon(Icons.chevron_right),
+                onTap: () async {
+                  await Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => TeeTimeDetailScreen(
+                      auth: widget.auth,
+                      settings: widget.settings,
+                      tournament: widget.tournament,
+                      teeTimeId: tt.id,
+                      myDiscordId: data.me.discordId,
+                    ),
+                  ));
+                  _refresh();
+                },
               );
             },
           );

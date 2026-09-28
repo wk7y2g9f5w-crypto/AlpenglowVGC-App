@@ -1928,7 +1928,9 @@ class AltShotTeeTimeCreate(BaseModel):
     green_speed: str = "pro"
     starts_at: str = Field(default="", validate_default=True)
     max_teams: int = 2
-    team_size: int | None = None
+    team_size: int = 2
+    team1_name: str = ""
+    team2_name: str = ""
     notes: str = ""
 
     @field_validator("label", "course")
@@ -1978,15 +1980,12 @@ class AltShotTeeTimeCreate(BaseModel):
             raise ValueError("max_teams must be 1 or 2")
         return v
 
-    @model_validator(mode="after")
-    def _fixed_size(self):
-        if self.max_teams == 1:
-            if self.team_size not in (2, 3, 4):
-                raise ValueError(
-                    "team_size (2-4) is required for 1-team tee times")
-        elif self.team_size is not None:
-            raise ValueError("team_size only applies to 1-team tee times")
-        return self
+    @field_validator("team_size")
+    @classmethod
+    def _size(cls, v: int) -> int:
+        if v not in (2, 3, 4):
+            raise ValueError("team_size must be 2, 3, or 4")
+        return v
 
     @field_validator("starts_at")
     @classmethod
@@ -2075,11 +2074,18 @@ class AltShotTeeTimeUpdate(BaseModel):
 class AltShotJoin(BaseModel):
     team_name: str = ""
     extra_names: list[str] = []
+    team_id: str | None = None
+
+
+class AltShotSwitch(BaseModel):
+    team_id: str
 
 
 class AltShotTeamUpdate(BaseModel):
     team_name: str | None = None
     extra_names: list[str] | None = None
+    move_discord_id: str | None = None
+    remove_discord_id: str | None = None
 
 
 class AltShotScoreSubmit(BaseModel):
@@ -2136,12 +2142,17 @@ async def create_altshot_tee_time(body: AltShotTeeTimeCreate,
             pin_position=body.pin_position, wind_strength=body.wind_strength,
             green_speed=body.green_speed, starts_at=body.starts_at.strip(),
             max_teams=body.max_teams, team_size=body.team_size,
+            team1_name=body.team1_name.strip(),
+            team2_name=body.team2_name.strip(),
             notes=body.notes.strip(),
         )
-    except db.AltShotError as e:
+    except db.TeamNameError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except db.AltShotError:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="team_size (2-4) is required for 1-team tee times.")
+            detail="team_size must be 2, 3, or 4.")
     return await _altshot_or_404(tt_id)
 
 
@@ -2172,8 +2183,7 @@ async def update_altshot_tee_time(tt_id: str, body: AltShotTeeTimeUpdate,
     except db.AltShotError as e:
         msg = str(e)
         if msg == "bad_team_size":
-            detail = ("team_size (2-4) is required for 1-team tee times"
-                      " and not allowed for 2-team tee times.")
+            detail = "team_size must be 2, 3, or 4."
         elif msg == "too_many":
             detail = ("A team already has more players than that roster"
                       " size.")
@@ -2201,18 +2211,53 @@ async def join_altshot_tee_time(tt_id: str, body: AltShotJoin,
     try:
         return await db.join_altshot_tee_time(
             DB_PATH, tt_id, user["discord_id"],
-            team_name=body.team_name, extra_names=body.extra_names)
+            team_name=body.team_name, extra_names=body.extra_names,
+            team_id=body.team_id)
     except db.TeamNameError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail=str(e))
     except db.AltShotError as e:
-        if str(e) == "not_found":
+        msg = str(e)
+        if msg == "not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Alt-shot tee time not found.")
+        if msg == "no_guests":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Only registered players can play 2-team alt-shot"
+                       " rounds — no typed-in names.")
+        if msg == "need_team":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Pick which team to play for.")
         detail = ("This team is full." if tt.get("team_size")
                   else "This tee time already has 2 teams.")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail=detail)
+
+
+@app.post("/api/altshot-tee-times/{tt_id}/switch-team")
+async def switch_altshot_team(tt_id: str, body: AltShotSwitch,
+                              user: CurrentUser) -> dict:
+    """Move to the other team of a 2-team tee time (before scoring)."""
+    await _altshot_or_404(tt_id)
+    try:
+        return await db.switch_altshot_team(
+            DB_PATH, tt_id, user["discord_id"], body.team_id)
+    except db.TeamNameError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=str(e))
+    except db.AltShotError as e:
+        msg = str(e)
+        if msg == "not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Alt-shot tee time or team not found.")
+        if msg == "teams_locked":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Teams are locked once scoring has started.")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="That team is full.")
 
 
 @app.post("/api/altshot-tee-times/{tt_id}/leave")
@@ -2227,6 +2272,48 @@ async def update_altshot_team(tt_id: str, team_id: str,
                               body: AltShotTeamUpdate,
                               user: CurrentUser) -> dict:
     team = await _altshot_team_or_404(tt_id, team_id)
+    tt = await _altshot_or_404(tt_id)
+    if tt.get("max_teams") == 2 and tt.get("team_size"):
+        # Fixed two teams: only the organizer or crew may edit teams
+        # (rename, move a player, remove a player). Returns the full tee
+        # time since moves affect both teams.
+        crew = await fetch_crew_status(user["discord_id"])
+        if tt["creator_discord_id"] != user["discord_id"] and not crew:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the organizer or crew can edit teams.")
+        extras = [(n or "").strip() for n in (body.extra_names or [])]
+        if any(extras):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Only registered players can play 2-team alt-shot"
+                       " rounds — no typed-in names.")
+        try:
+            return await db.manage_altshot_team(
+                DB_PATH, tt_id, team_id,
+                team_name=body.team_name,
+                move_discord_id=body.move_discord_id,
+                remove_discord_id=body.remove_discord_id)
+        except db.TeamNameError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail=str(e))
+        except db.AltShotError as e:
+            msg = str(e)
+            if msg == "not_found":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Team not found.")
+            if msg == "teams_locked":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Teams are locked once scoring has started.")
+            if msg == "not_on_team":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="That player isn't on a team in this tee time.")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That team is full.")
     await _altshot_team_guard(team, user)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
@@ -2240,6 +2327,11 @@ async def update_altshot_team(tt_id: str, team_id: str,
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="That would put more players on the team than the"
                        " roster allows.")
+        if str(e) == "no_guests":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Only registered players can play 2-team alt-shot"
+                       " rounds — no typed-in names.")
         raise
     tt = await _altshot_or_404(tt_id)
     for t in tt["teams"]:
@@ -2290,6 +2382,11 @@ async def submit_altshot_score(tt_id: str, team_id: str,
                 detail=f"This team needs a full roster of"
                        f" {tt.get('team_size')} players before submitting"
                        " a record.")
+        if msg == "teams_not_full":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Both teams need full rosters before either team"
+                       " can submit a record.")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Enter 18 hole scores (1-20 each).")
@@ -2314,37 +2411,64 @@ async def delete_altshot_score(tt_id: str, team_id: str,
     return {"ok": True}
 
 
+def _altshot_setup_or_422(team_size: int, tee_position: str,
+                          pin_position: str, wind_strength: str,
+                          green_speed: str) -> tuple[str, str, str, str]:
+    """Validate/normalize alt-shot record filters shared by the record
+    endpoints."""
+    if team_size not in (2, 3, 4):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="team_size must be 2, 3, or 4.")
+    out = []
+    for name, val, ok in (
+            ("tee_position", tee_position, ("front", "middle", "back")),
+            ("pin_position", pin_position, ("black", "white", "red")),
+            ("wind_strength", wind_strength, ("low", "moderate", "severe")),
+            ("green_speed", green_speed, ("veryfast", "pro"))):
+        norm = (val or "").strip().lower()
+        if norm not in ok:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown {name} '{val}'.")
+        out.append(norm)
+    return tuple(out)  # type: ignore[return-value]
+
+
 @app.get("/api/altshot-records")
 async def altshot_records(user: CurrentUser, course: str, team_size: int,
                           tee_position: str = "back",
                           pin_position: str = "black",
                           wind_strength: str = "moderate",
                           green_speed: str = "pro") -> dict:
-    if team_size not in (2, 3, 4):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="team_size must be 2, 3, or 4.")
-    for name, val, ok in (
-            ("tee_position", tee_position, ("front", "middle", "back")),
-            ("pin_position", pin_position, ("black", "white", "red")),
-            ("wind_strength", wind_strength, ("low", "moderate", "severe")),
-            ("green_speed", green_speed, ("veryfast", "pro"))):
-        if (val or "").strip().lower() not in ok:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Unknown {name} '{val}'.")
+    tee, pin, wind, green = _altshot_setup_or_422(
+        team_size, tee_position, pin_position, wind_strength, green_speed)
     records = await db.get_altshot_records(
-        DB_PATH, course.strip(), team_size,
-        tee_position=tee_position.strip().lower(),
-        pin_position=pin_position.strip().lower(),
-        wind_strength=wind_strength.strip().lower(),
-        green_speed=green_speed.strip().lower())
+        DB_PATH, course.strip(), team_size, tee_position=tee,
+        pin_position=pin, wind_strength=wind, green_speed=green)
     return {"course": course.strip(), "team_size": team_size,
-            "tee_position": tee_position.strip().lower(),
-            "pin_position": pin_position.strip().lower(),
-            "wind_strength": wind_strength.strip().lower(),
-            "green_speed": green_speed.strip().lower(),
+            "tee_position": tee, "pin_position": pin,
+            "wind_strength": wind, "green_speed": green,
             "records": records}
+
+
+@app.get("/api/altshot-records/summary")
+async def altshot_records_summary(user: CurrentUser, team_size: int,
+                                  tee_position: str = "back",
+                                  pin_position: str = "black",
+                                  wind_strength: str = "moderate",
+                                  green_speed: str = "pro") -> dict:
+    """One batched lookup: the best submitted alt-shot record per course
+    for the given roster size and setup, keyed by course name. Used by
+    the tee-time course picker."""
+    tee, pin, wind, green = _altshot_setup_or_422(
+        team_size, tee_position, pin_position, wind_strength, green_speed)
+    records = await db.get_altshot_records_summary(
+        DB_PATH, team_size, tee_position=tee, pin_position=pin,
+        wind_strength=wind, green_speed=green)
+    return {"team_size": team_size, "tee_position": tee,
+            "pin_position": pin, "wind_strength": wind,
+            "green_speed": green, "records": records}
 
 
 # --------------------------------------------------------------------------

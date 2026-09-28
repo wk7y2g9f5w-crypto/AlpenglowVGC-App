@@ -4,6 +4,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import '../widgets/course_art.dart';
 import 'matchplay_form_screen.dart';
 import 'matchplay_score_screen.dart';
 
@@ -274,23 +275,37 @@ class _MatchPlayDetailScreenState extends State<MatchPlayDetailScreen> {
           final score = tt.score;
           final completed = score?.isCompleted == true;
           return ListView(
-            padding: const EdgeInsets.all(16),
             children: [
-              Text(tt.label,
-                  style: Theme.of(context).textTheme.headlineSmall),
-              const SizedBox(height: 4),
-              Text(tt.course,
-                  style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 4),
-              Text(formatTeeTimeWhen(tt.startsAt)),
-              const SizedBox(height: 4),
-              Text('${tt.formatSummary} · ${tt.settingsSummary}',
-                  style: const TextStyle(color: Colors.grey)),
-              if (tt.notes.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Text(tt.notes),
-              ],
-              const SizedBox(height: 16),
+              CourseArtHeader(
+                course: tt.course,
+                children: [
+                  Text(tt.label,
+                      style: const TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white)),
+                  const SizedBox(height: 4),
+                  Text(tt.course,
+                      style: const TextStyle(
+                          fontSize: 16, color: Colors.white70)),
+                  const SizedBox(height: 4),
+                  Text(formatTeeTimeWhen(tt.startsAt),
+                      style: const TextStyle(color: Colors.white70)),
+                  const SizedBox(height: 4),
+                  Text('${tt.formatSummary} · ${tt.settingsSummary}',
+                      style: const TextStyle(color: Colors.white70)),
+                  if (tt.notes.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(tt.notes,
+                        style: const TextStyle(color: Colors.white70)),
+                  ],
+                ],
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
               _statusBanner(tt),
               const SizedBox(height: 16),
               if (tt.bothFull)
@@ -369,6 +384,9 @@ class _MatchPlayDetailScreenState extends State<MatchPlayDetailScreen> {
                   ],
                 ),
               ],
+                ],
+            ),
+            ),
             ],
           );
         },

@@ -56,15 +56,15 @@ class _AltShotScoreScreenState extends State<AltShotScoreScreen> {
 
   Future<void> _save() async {
     final tt = widget.teeTime;
-    final ready = tt.isFixedRoster
-        ? widget.team.teamSize == tt.teamSize
-        : widget.team.canSubmit;
+    final ready = tt.canSubmitScore(widget.team);
     if (!ready) {
       showSnack(
           context,
-          tt.isFixedRoster
+          tt.isOneTeam
               ? 'The roster must be full (${tt.teamSize} players) before submitting a record.'
-              : 'Add at least 2 players to the team before submitting a record.',
+              : tt.isFixedTwoTeam
+                  ? 'Both teams must be full (${tt.teamSize} players each) before submitting a record.'
+                  : 'Add at least 2 players to the team before submitting a record.',
           error: true);
       return;
     }

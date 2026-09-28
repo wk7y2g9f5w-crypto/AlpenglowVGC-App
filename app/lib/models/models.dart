@@ -696,6 +696,7 @@ class AltShotTeam {
   final List<String> memberDiscordIds;
   final int teamSize;
   final String displayName;
+  final int teamNumber;
   final AltShotScore? score;
 
   AltShotTeam({
@@ -707,6 +708,7 @@ class AltShotTeam {
     required this.memberDiscordIds,
     required this.teamSize,
     required this.displayName,
+    this.teamNumber = 1,
     this.score,
   });
 
@@ -723,6 +725,7 @@ class AltShotTeam {
             .toList(),
         teamSize: (j['team_size'] as num?)?.toInt() ?? 1,
         displayName: (j['display_name'] ?? '').toString(),
+        teamNumber: (j['team_number'] as num?)?.toInt() ?? 1,
         score: j['score'] == null
             ? null
             : AltShotScore.fromJson(j['score'] as Map<String, dynamic>),
@@ -791,12 +794,52 @@ class AltShotTeeTime {
             .toList(),
       );
 
-  bool get isFull => isFixedRoster
-      ? teams.isNotEmpty && teams.first.teamSize >= (teamSize ?? 99)
-      : teams.length >= maxTeams;
+  bool get isFull {
+    if (isOneTeam) {
+      return teams.isNotEmpty && teams.first.teamSize >= (teamSize ?? 99);
+    }
+    if (isFixedTwoTeam) {
+      return teams.length == 2 &&
+          teams.every((t) => t.teamSize >= (teamSize ?? 99));
+    }
+    return teams.length >= maxTeams;
+  }
 
-  /// Fixed-roster 1-team tee times: the single team has a set roster size.
-  bool get isFixedRoster => teamSize != null;
+  /// 1-team fixed-roster mode: the single team has a set roster size.
+  bool get isOneTeam => maxTeams == 1 && teamSize != null;
+
+  /// Fixed 2-team mode: two pre-created teams with the same roster size;
+  /// registered players only, creator starts on Team 1.
+  bool get isFixedTwoTeam => maxTeams == 2 && teamSize != null;
+
+  /// Legacy 2-team tee times created before team_size became mandatory:
+  /// joining creates your own team.
+  bool get isLegacyFlexible => maxTeams == 2 && teamSize == null;
+
+  /// Old name for 1-team mode, kept for existing call sites.
+  bool get isFixedRoster => isOneTeam;
+
+  /// Whether [team]'s score may be submitted: 1-team mode needs the single
+  /// roster full; fixed 2-team mode needs BOTH teams full; legacy flexible
+  /// teams need at least 2 players.
+  bool canSubmitScore(AltShotTeam team) {
+    if (isOneTeam) return team.teamSize == teamSize;
+    if (isFixedTwoTeam) {
+      return teams.length == 2 &&
+          teams.every((t) => t.teamSize == teamSize);
+    }
+    return team.canSubmit;
+  }
+
+  /// Any submitted score in this tee time (locks team membership).
+  bool get anyScoreSubmitted => teams.any((t) => t.score != null);
+
+  AltShotTeam? teamByNumber(int n) {
+    for (final t in teams) {
+      if (t.teamNumber == n) return t;
+    }
+    return null;
+  }
 
   AltShotTeam? myTeam(String discordId) {
     for (final t in teams) {
@@ -885,5 +928,39 @@ class AltShotRecord {
     if (toPar == null) return '$total';
     if (toPar == 0) return '$total (E)';
     return '$total (${toPar! > 0 ? '+' : ''}$toPar)';
+  }
+}
+
+/// Best submitted alt-shot record for one course, from the batched
+/// /api/altshot-records/summary lookup used by the tee-time course picker.
+class AltShotCourseRecord {
+  final String course;
+  final int total;
+  final int? toPar;
+  final String teamDisplay;
+
+  AltShotCourseRecord({
+    required this.course,
+    required this.total,
+    this.toPar,
+    required this.teamDisplay,
+  });
+
+  factory AltShotCourseRecord.fromJson(Map<String, dynamic> j) =>
+      AltShotCourseRecord(
+        course: (j['course'] ?? '').toString(),
+        total: (j['total'] as num).toInt(),
+        toPar: (j['to_par'] as num?)?.toInt(),
+        teamDisplay: (j['team_display'] ?? '').toString(),
+      );
+
+  /// "68 (-4) · Aces" — same score formatting as [AltShotRecord.scoreLine].
+  String get recordLine {
+    final score = toPar == null
+        ? '$total'
+        : (toPar == 0
+            ? '$total (E)'
+            : '$total (${toPar! > 0 ? '+' : ''}$toPar)');
+    return '$score · $teamDisplay';
   }
 }

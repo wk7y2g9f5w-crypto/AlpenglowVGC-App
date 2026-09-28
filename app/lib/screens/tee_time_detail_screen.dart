@@ -4,6 +4,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import '../widgets/course_art.dart';
 import 'score_entry_screen.dart';
 
 /// Tee time detail: player list, join/leave/request, pending requests for
@@ -255,16 +256,27 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
               .toList();
 
           return ListView(
-            padding: const EdgeInsets.all(16),
             children: [
-              Text(tt.label,
-                  style: const TextStyle(
-                      fontSize: 22, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 4),
-              Text(formatLocal(tt.startsAtUtc),
-                  style: const TextStyle(color: Colors.grey)),
-              Text('${tt.spotsFilled}/${tt.maxPlayers} players'),
-              const SizedBox(height: 16),
+              CourseArtHeader(
+                course: widget.tournament.course,
+                children: [
+                  Text(tt.label,
+                      style: const TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white)),
+                  const SizedBox(height: 4),
+                  Text(formatLocal(tt.startsAtUtc),
+                      style: const TextStyle(color: Colors.white70)),
+                  Text('${tt.spotsFilled}/${tt.maxPlayers} players',
+                      style: const TextStyle(color: Colors.white70)),
+                ],
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
               const Text('Players',
                   style:
                       TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
@@ -395,6 +407,9 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       ),
                     )),
               ],
+                ],
+            ),
+            ),
             ],
           );
         },
