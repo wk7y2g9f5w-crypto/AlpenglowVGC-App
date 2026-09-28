@@ -38,8 +38,8 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
   late final TextEditingController _notes;
   List<GolfCourse> _courses = [];
   GolfCourse? _course;
-  String _tee = 'middle';
-  String _pin = 'white';
+  String _tee = 'back';
+  String _pin = 'black';
   String _wind = 'moderate';
   String _greenSpeed = 'pro';
   DateTime? _when;
@@ -56,8 +56,8 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
     final e = widget.existing;
     _label = TextEditingController(text: e?.label ?? '');
     _notes = TextEditingController(text: e?.notes ?? '');
-    _tee = e?.teePosition ?? 'middle';
-    _pin = e?.pinPosition ?? 'white';
+    _tee = e?.teePosition ?? 'back';
+    _pin = e?.pinPosition ?? 'black';
     _wind = e?.windStrength ?? 'moderate';
     _greenSpeed = e?.greenSpeed ?? 'pro';
     _maxPlayers = e?.maxPlayers ?? 4;
