@@ -15,3 +15,9 @@ api/__pycache__/
 
 # CI secrets (distribution private key, p12 password) - never commit
 .ci/
+
+# Bot runtime artifacts
+bot/*.db
+bot/*.log
+bot/*.pid
+bot/seed/*.db
