@@ -5,6 +5,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import '../widgets/course_art.dart';
 import 'profile_screen.dart';
 import 'tee_time_detail_screen.dart';
 
@@ -611,10 +612,36 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
       '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   Widget _header(Tournament t) {
-    return Card(
-      margin: const EdgeInsets.all(12),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
+    final art = courseArtAsset(t.course);
+    const overlay = LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [
+        Color.fromRGBO(0, 0, 0, 0.25),
+        Color.fromRGBO(0, 0, 0, 0.72),
+      ],
+    );
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        image: art != null
+            ? DecorationImage(
+                image: AssetImage(art),
+                fit: BoxFit.cover,
+                alignment: Alignment.center,
+              )
+            : null,
+        gradient: art == null
+            ? const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF1B5E20), Color(0xFF0D3311)],
+              )
+            : null,
+      ),
+      child: Container(
+        decoration: const BoxDecoration(gradient: overlay),
+        padding: const EdgeInsets.fromLTRB(16, 20, 16, 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -623,20 +650,29 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
                 Expanded(
                   child: Text(t.name,
                       style: const TextStyle(
-                          fontSize: 20, fontWeight: FontWeight.bold)),
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white)),
                 ),
                 StatusChip(status: t.status),
               ],
             ),
             const SizedBox(height: 8),
-            Text(t.course ?? 'Course TBD'),
+            Text(t.course ?? 'Course TBD',
+                style:
+                    const TextStyle(color: Colors.white, fontSize: 15)),
             Text(
-                '${t.format ?? 'Format TBD'}${t.holes != null ? ' · ${t.holes} holes' : ''}${t.isMultiRound ? ' · 🔁 ${t.numRounds} rounds' : ''}'),
-            Text(formatDateRange(t.startDate, t.endDate)),
+                '${t.format ?? 'Format TBD'}${t.holes != null ? ' · ${t.holes} holes' : ''}${t.isMultiRound ? ' · 🔁 ${t.numRounds} rounds' : ''}',
+                style: const TextStyle(
+                    color: Colors.white70, fontSize: 14)),
+            Text(formatDateRange(t.startDate, t.endDate),
+                style: const TextStyle(
+                    color: Colors.white70, fontSize: 14)),
             if (t.settingsSummary.isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(t.settingsSummary,
-                  style: const TextStyle(color: Colors.grey, fontSize: 13)),
+                  style: const TextStyle(
+                      color: Colors.white70, fontSize: 13)),
             ],
             if (t.isMultiRound) ...[
               const SizedBox(height: 8),
@@ -646,7 +682,7 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
                       'Round ${r.roundNumber}: ${r.settingsSummary}'
                       '${r.datesSummary.isNotEmpty ? ' · ${r.datesSummary}' : ''}',
                       style: const TextStyle(
-                          color: Colors.grey, fontSize: 13),
+                          color: Colors.white70, fontSize: 13),
                     ),
                   )),
             ],
@@ -655,13 +691,17 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
               width: double.infinity,
               child: t.registered
                   ? OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white70),
+                      ),
                       onPressed: _busy ? null : _unregister,
                       child: _busy
                           ? const SizedBox(
                               width: 18,
                               height: 18,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2))
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white))
                           : const Text('Unregister'),
                     )
                   : ElevatedButton(
