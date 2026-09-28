@@ -5,7 +5,7 @@ Each function opens its own short-lived connection, which is fine at the
 scale of a Discord community bot.
 """
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS rounds(
     CHECK(pin_position IN ('black','white','red')),
   wind_strength TEXT NOT NULL DEFAULT 'moderate'
     CHECK(wind_strength IN ('low','moderate','severe')),
+  start_date TEXT,
+  end_date TEXT,
   UNIQUE(tournament_id, round_number)
 );
 CREATE TABLE IF NOT EXISTS players(
@@ -81,6 +83,7 @@ CREATE TABLE IF NOT EXISTS tee_times(
   max_players INTEGER NOT NULL DEFAULT 4,
   created_by TEXT NOT NULL,
   channel_id TEXT,
+  round_number INTEGER NOT NULL DEFAULT 1,
   reminded_30 INTEGER NOT NULL DEFAULT 0,
   reminded_5 INTEGER NOT NULL DEFAULT 0
 );
@@ -108,7 +111,8 @@ CREATE TABLE IF NOT EXISTS scorecards(
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified')),
   submitted_at TEXT NOT NULL,
   verified_by TEXT,
-  submitted_by TEXT
+  submitted_by TEXT,
+  witness_name TEXT
 );
 CREATE TABLE IF NOT EXISTS matches(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,21 +259,61 @@ async def _migrate(db_path: str) -> None:
                 " NOT NULL DEFAULT 1"
             )
             await con.commit()
+        if "witness_name" not in card_cols:
+            await con.execute(
+                "ALTER TABLE scorecards ADD COLUMN witness_name TEXT")
+            await con.commit()
+
+        # tee_times.round_number (defaults to 1 for existing tee times).
+        cur = await con.execute("PRAGMA table_info(tee_times)")
+        tt_cols = [r[1] for r in await cur.fetchall()]
+        if "round_number" not in tt_cols:
+            await con.execute(
+                "ALTER TABLE tee_times ADD COLUMN round_number INTEGER"
+                " NOT NULL DEFAULT 1"
+            )
+            await con.commit()
+
+        # rounds.start_date / end_date. Existing rounds inherit their
+        # tournament's overall window until crew tunes them.
+        cur = await con.execute("PRAGMA table_info(rounds)")
+        round_cols = [r[1] for r in await cur.fetchall()]
+        for col in ("start_date", "end_date"):
+            if col not in round_cols:
+                await con.execute(
+                    f"ALTER TABLE rounds ADD COLUMN {col} TEXT")
+                await con.commit()
+        await con.execute(
+            "UPDATE rounds SET start_date = "
+            " (SELECT start_date FROM tournaments t"
+            "  WHERE t.id = rounds.tournament_id)"
+            " WHERE start_date IS NULL"
+        )
+        await con.execute(
+            "UPDATE rounds SET end_date = "
+            " (SELECT end_date FROM tournaments t"
+            "  WHERE t.id = rounds.tournament_id)"
+            " WHERE end_date IS NULL"
+        )
+        await con.commit()
 
         # Every tournament gets at least round 1 (copies the tournament's
-        # own tee/pin/wind). The rounds table itself is created by SCHEMA.
+        # own tee/pin/wind and overall dates). The rounds table itself is
+        # created by SCHEMA.
         cur = await con.execute(
-            "SELECT id, tee_position, pin_position, wind_strength"
+            "SELECT id, tee_position, pin_position, wind_strength,"
+            " start_date, end_date"
             " FROM tournaments t WHERE NOT EXISTS"
             " (SELECT 1 FROM rounds r WHERE r.tournament_id = t.id)"
         )
-        for tid, tee, pin, wind in await cur.fetchall():
+        for tid, tee, pin, wind, sdate, edate in await cur.fetchall():
             await con.execute(
                 "INSERT INTO rounds (tournament_id, round_number,"
-                " tee_position, pin_position, wind_strength)"
-                " VALUES (?,?,?,?,?)",
+                " tee_position, pin_position, wind_strength,"
+                " start_date, end_date)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (tid, 1, tee or "middle", pin or "white",
-                 wind or "moderate"),
+                 wind or "moderate", sdate, edate),
             )
         await con.commit()
 
@@ -364,8 +408,10 @@ async def create_tournament(db_path, guild_id, name, format, holes, course,
     """Create a tournament plus its rounds.
 
     ``rounds`` is an optional list of dicts with tee_position/pin_position/
-    wind_strength keys (round numbers implied by order, 1-based). When
-    omitted, a single round copies the tournament-level settings.
+    wind_strength/start_date/end_date keys (round numbers implied by order,
+    1-based). When omitted, a single round copies the tournament-level
+    settings. Round dates left blank default to an even split of the
+    tournament's overall date range.
     """
     lastrowid, _ = await _execute(
         db_path,
@@ -381,31 +427,65 @@ async def create_tournament(db_path, guild_id, name, format, holes, course,
         rounds = [{"tee_position": tee_position,
                    "pin_position": pin_position,
                    "wind_strength": wind_strength}]
+    default_dates = _split_date_range(start_date, end_date, len(rounds))
     for i, r in enumerate(rounds, start=1):
+        dflt_start, dflt_end = default_dates[i - 1]
         await create_round(
             db_path, lastrowid, i,
             r.get("tee_position") or "middle",
             r.get("pin_position") or "white",
             r.get("wind_strength") or "moderate",
+            start_date=r.get("start_date") or dflt_start,
+            end_date=r.get("end_date") or dflt_end,
         )
     return lastrowid
+
+
+def _split_date_range(start_s: str | None, end_s: str | None,
+                      n: int) -> list[tuple[str | None, str | None]]:
+    """Evenly split a YYYY-MM-DD range into n (start, end) date slices.
+
+    Used as the default per-round window: round 1 gets the first slice,
+    round n the last. With unparseable/missing dates every slice is None.
+    """
+    try:
+        from datetime import date
+        start = date.fromisoformat(start_s) if start_s else None
+        end = date.fromisoformat(end_s) if end_s else None
+        if start is None or end is None or n < 1:
+            raise ValueError
+    except (ValueError, TypeError):
+        return [(None, None)] * max(n, 1)
+    total_days = (end - start).days + 1
+    out = []
+    for i in range(n):
+        s = start + timedelta(days=(total_days * i) // n)
+        e = start + timedelta(days=(total_days * (i + 1)) // n) - timedelta(days=1)
+        if e < s:
+            e = s
+        out.append((s.isoformat(), e.isoformat()))
+    return out
 
 
 async def create_round(db_path, tournament_id: int, round_number: int,
                        tee_position: str = "middle",
                        pin_position: str = "white",
-                       wind_strength: str = "moderate") -> int:
+                       wind_strength: str = "moderate",
+                       start_date: str | None = None,
+                       end_date: str | None = None) -> int:
     lastrowid, _ = await _execute(
         db_path,
         "INSERT INTO rounds (tournament_id, round_number,"
-        " tee_position, pin_position, wind_strength)"
-        " VALUES (?,?,?,?,?)"
+        " tee_position, pin_position, wind_strength, start_date, end_date)"
+        " VALUES (?,?,?,?,?,?,?)"
         " ON CONFLICT(tournament_id, round_number) DO UPDATE SET"
         " tee_position = excluded.tee_position,"
         " pin_position = excluded.pin_position,"
-        " wind_strength = excluded.wind_strength",
+        " wind_strength = excluded.wind_strength,"
+        " start_date = excluded.start_date,"
+        " end_date = excluded.end_date",
         (tournament_id, round_number, tee_position, pin_position,
-         wind_strength),
+         wind_strength, start_date, end_date),
     )
     return lastrowid
 
@@ -426,7 +506,9 @@ async def list_rounds(db_path, tournament_id: int) -> list[dict]:
     await create_round(db_path, tournament_id, 1,
                        t.get("tee_position") or "middle",
                        t.get("pin_position") or "white",
-                       t.get("wind_strength") or "moderate")
+                       t.get("wind_strength") or "moderate",
+                       start_date=t.get("start_date"),
+                       end_date=t.get("end_date"))
     return await _fetchall(
         db_path,
         "SELECT * FROM rounds WHERE tournament_id = ? ORDER BY round_number",
@@ -446,18 +528,23 @@ async def get_round(db_path, tournament_id: int,
 async def update_round(db_path, tournament_id: int, round_number: int,
                        tee_position: str | None = None,
                        pin_position: str | None = None,
-                       wind_strength: str | None = None) -> dict | None:
-    """Patch a round's settings; returns the updated round (or None)."""
+                       wind_strength: str | None = None,
+                       start_date: str | None = None,
+                       end_date: str | None = None) -> dict | None:
+    """Patch a round's settings/dates; returns the updated round (or None)."""
     rnd = await get_round(db_path, tournament_id, round_number)
     if rnd is None:
         return None
     await _execute(
         db_path,
         "UPDATE rounds SET tee_position = ?, pin_position = ?,"
-        " wind_strength = ? WHERE tournament_id = ? AND round_number = ?",
+        " wind_strength = ?, start_date = ?, end_date = ?"
+        " WHERE tournament_id = ? AND round_number = ?",
         (tee_position or rnd["tee_position"],
          pin_position or rnd["pin_position"],
          wind_strength or rnd["wind_strength"],
+         start_date or rnd["start_date"],
+         end_date or rnd["end_date"],
          tournament_id, round_number),
     )
     return await get_round(db_path, tournament_id, round_number)
@@ -693,12 +780,14 @@ async def get_player_teams(db_path, tournament_id, discord_id) -> list[dict]:
 
 # ----------------------------------------------------------------- tee times
 async def create_tee_time(db_path, tournament_id, label, starts_at, max_players,
-                          created_by, channel_id) -> int:
+                          created_by, channel_id, round_number: int = 1) -> int:
+    round_number = max(1, min(5, int(round_number or 1)))
     lastrowid, _ = await _execute(
         db_path,
         "INSERT INTO tee_times (tournament_id, label, starts_at, max_players,"
-        " created_by, channel_id) VALUES (?,?,?,?,?,?)",
-        (tournament_id, label, starts_at, max_players, created_by, channel_id),
+        " created_by, channel_id, round_number) VALUES (?,?,?,?,?,?,?)",
+        (tournament_id, label, starts_at, max_players, created_by, channel_id,
+         round_number),
     )
     return lastrowid
 
@@ -720,8 +809,8 @@ async def list_tee_times(db_path, tournament_id) -> list[dict]:
 
 
 async def update_tee_time(db_path, tee_time_id, *, label=None,
-                          starts_at=None) -> bool:
-    """Update a tee time's label and/or start time (ISO string).
+                          starts_at=None, round_number=None) -> bool:
+    """Update a tee time's label, start time (ISO string) and/or round.
 
     Returns True when a row was actually changed.
     """
@@ -732,6 +821,9 @@ async def update_tee_time(db_path, tee_time_id, *, label=None,
     if starts_at is not None:
         sets.append("starts_at = ?")
         params.append(starts_at)
+    if round_number is not None:
+        sets.append("round_number = ?")
+        params.append(max(1, min(5, int(round_number))))
     if not sets:
         return False
     params.append(tee_time_id)
@@ -1229,11 +1321,13 @@ async def set_leader(db_path, tournament_id, leader_key, leader_sort) -> None:
 async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_id,
                            scores: list[int], status: str,
                            submitted_by: str | None = None,
-                           round_number: int = 1) -> int:
+                           round_number: int = 1,
+                           witness_name: str | None = None) -> int:
     holes_json = json.dumps(scores)
     total = sum(scores)
     now = utcnow_iso()
     round_number = max(1, min(5, int(round_number or 1)))
+    witness_name = (witness_name or "").strip()[:80] or None
     if team_id is not None:
         existing = await _fetchone(
             db_path,
@@ -1256,18 +1350,20 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
         await _execute(
             db_path,
             "UPDATE scorecards SET holes_json = ?, total = ?, status = ?,"
-            " submitted_at = ?, verified_by = NULL, submitted_by = ? WHERE id = ?",
-            (holes_json, total, status, now, submitted_by, existing["id"]),
+            " submitted_at = ?, verified_by = NULL, submitted_by = ?,"
+            " witness_name = ? WHERE id = ?",
+            (holes_json, total, status, now, submitted_by, witness_name,
+             existing["id"]),
         )
         return existing["id"]
     lastrowid, _ = await _execute(
         db_path,
         "INSERT INTO scorecards (tournament_id, round_number, player_discord_id,"
         " team_id, tee_time_id, holes_json, total, status, submitted_at,"
-        " submitted_by)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        " submitted_by, witness_name)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (tournament_id, round_number, player_id, team_id, tee_time_id,
-         holes_json, total, status, now, submitted_by),
+         holes_json, total, status, now, submitted_by, witness_name),
     )
     return lastrowid
 

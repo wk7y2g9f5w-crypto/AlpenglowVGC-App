@@ -998,6 +998,143 @@ class ApiTestCase(unittest.TestCase):
         r = self.client.post("/api/tournaments", headers=self.h("123"),
                              json=self._create_body(rounds=bad))
         self.assertEqual(r.status_code, 422, r.text)
+
+    def test_create_tournament_round_dates_default_split(self):
+        self._crew(True)
+        rounds = [{"tee_position": "middle"}, {"tee_position": "middle"}]
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=rounds))
+        self.assertEqual(r.status_code, 201, r.text)
+        t = r.json()
+        self.assertEqual(t["rounds"][0]["start_date"], "2026-10-03")
+        self.assertEqual(t["rounds"][0]["end_date"], "2026-10-06")
+        self.assertEqual(t["rounds"][1]["start_date"], "2026-10-07")
+        self.assertEqual(t["rounds"][1]["end_date"], "2026-10-10")
+
+    def test_create_tournament_round_dates_explicit_and_bad(self):
+        self._crew(True)
+        rounds = [
+            {"tee_position": "middle",
+             "start_date": "2026-10-03", "end_date": "2026-10-04"},
+            {"tee_position": "middle",
+             "start_date": "2026-10-09", "end_date": "2026-10-10"},
+        ]
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=rounds))
+        self.assertEqual(r.status_code, 201, r.text)
+        t = r.json()
+        self.assertEqual(t["rounds"][0]["end_date"], "2026-10-04")
+        self.assertEqual(t["rounds"][1]["start_date"], "2026-10-09")
+        # Round window outside the tournament window is rejected.
+        bad = [{"tee_position": "middle",
+                "start_date": "2026-10-01", "end_date": "2026-10-05"}]
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=bad))
+        self.assertEqual(r.status_code, 400, r.text)
+        # Inverted round window is rejected.
+        bad = [{"tee_position": "middle",
+                "start_date": "2026-10-05", "end_date": "2026-10-04"}]
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=bad))
+        self.assertEqual(r.status_code, 400, r.text)
+
+    def test_update_round_dates(self):
+        self._crew(True)
+        rounds = [{"tee_position": "middle"}, {"tee_position": "middle"}]
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(rounds=rounds))
+        tid = r.json()["id"]
+        r = self.client.patch(
+            f"/api/tournaments/{tid}/rounds/2", headers=self.h("123"),
+            json={"start_date": "2026-10-08", "end_date": "2026-10-09"})
+        self.assertEqual(r.status_code, 200, r.text)
+        rnds = r.json()["rounds"]
+        self.assertEqual(rnds[1]["start_date"], "2026-10-08")
+        self.assertEqual(rnds[1]["end_date"], "2026-10-09")
+        # Untouched round keeps its split.
+        self.assertEqual(rnds[0]["start_date"], "2026-10-03")
+        # Outside the tournament window -> 400.
+        r = self.client.patch(
+            f"/api/tournaments/{tid}/rounds/2", headers=self.h("123"),
+            json={"start_date": "2026-10-11", "end_date": "2026-10-12"})
+        self.assertEqual(r.status_code, 400, r.text)
+        # Not crew -> 403.
+        self._crew(False)
+        r = self.client.patch(
+            f"/api/tournaments/{tid}/rounds/2", headers=self.h("123"),
+            json={"wind_strength": "low"})
+        self.assertEqual(r.status_code, 403, r.text)
+        # Missing round -> 404.
+        self._crew(True)
+        r = self.client.patch(
+            f"/api/tournaments/{tid}/rounds/9", headers=self.h("123"),
+            json={"wind_strength": "low"})
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_tee_time_round_number(self):
+        self.with_tz("123")
+        # Default is round 1.
+        r = self._create("123")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["round_number"], 1)
+        # Explicit round 2 on a single-round tournament is rejected.
+        r = self._create("123", round_number=2)
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_scorecard_round_not_started_409(self):
+        self.with_tz("123")
+        self.with_tz("456")
+        # Round 2 opens far in the future.
+        rounds = [
+            {"tee_position": "middle",
+             "start_date": "2026-09-20", "end_date": "2026-09-30"},
+            {"tee_position": "middle",
+             "start_date": "2999-01-01", "end_date": "2999-01-02"},
+        ]
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body(
+                                 rounds=rounds,
+                                 start_date="2026-09-20",
+                                 end_date="2999-01-02"))
+        self.assertEqual(r.status_code, 201, r.text)
+        tid = r.json()["id"]
+        run(db.set_tournament_status(self.db_path, tid, "in_progress"))
+        tt_id = run(db.create_tee_time(
+            self.db_path, tid, "past flight",
+            "2026-01-02T15:30:00+00:00", 4, "123", None))
+        run(db.join_tee_time(self.db_path, tt_id, "123"))
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "round_number": 2}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "round_not_started")
+        # Round 1 is open — submits fine.
+        body["round_number"] = 1
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_scorecard_witness_round_trip(self):
+        self.with_tz("123")
+        self.with_tz("456")
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "witness_name": "  Tank "}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["card"]["witness_name"], "Tank")
+        r = self.client.get(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"))
+        self.assertEqual(r.json()["card"]["witness_name"], "Tank")
+
+    def test_create_tournament_match_and_holes_validation(self):
+        self._crew(True)
+        good = [{"tee_position": "middle", "pin_position": "white",
+                 "wind_strength": "moderate"}]
         # Match play is single-round.
         r = self.client.post(
             "/api/tournaments", headers=self.h("123"),

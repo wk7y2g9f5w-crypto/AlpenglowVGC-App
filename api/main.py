@@ -319,6 +319,7 @@ def _tee_time_json(tt: dict, players: list[dict]) -> dict:
         "starts_at": utc_iso(tt.get("starts_at")),
         "max_players": tt["max_players"],
         "created_by": tt["created_by"],
+        "round_number": tt.get("round_number") or 1,
         "players": [_player_json(p) for p in players],
     }
 
@@ -334,6 +335,7 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
         "to_par": sl.to_par(card["total"], pars),
         "status": card["status"],
         "submitted_by": card.get("submitted_by"),
+        "witness_name": card.get("witness_name"),
     }
 
 
@@ -369,6 +371,8 @@ def _tournament_json(t: dict, registered: bool,
                 "tee_position": r["tee_position"],
                 "pin_position": r["pin_position"],
                 "wind_strength": r["wind_strength"],
+                "start_date": r.get("start_date"),
+                "end_date": r.get("end_date"),
             }
             for r in rounds
         ],
@@ -383,6 +387,7 @@ class TeeTimeCreate(BaseModel):
     date: str  # YYYY-MM-DD
     time: str  # HH:MM 24h
     max_players: int = Field(default=4, ge=1, le=4)
+    round_number: int = Field(default=1, ge=1, le=5)
 
     @field_validator("label")
     @classmethod
@@ -394,10 +399,11 @@ class TeeTimeCreate(BaseModel):
 
 
 class TeeTimeUpdate(BaseModel):
-    """Edit a tee time: any subset of label/date/time. At least one required."""
+    """Edit a tee time: any subset of label/date/time/round. At least one required."""
     label: str | None = None
     date: str | None = None  # YYYY-MM-DD
     time: str | None = None  # HH:MM 24h
+    round_number: int | None = Field(default=None, ge=1, le=5)
 
     @field_validator("label")
     @classmethod
@@ -484,6 +490,13 @@ class ScorecardSubmit(BaseModel):
     player_discord_id: str
     scores: list[int]
     round_number: int = Field(default=1, ge=1, le=5)
+    witness_name: str | None = Field(default=None, max_length=80)
+
+    @field_validator("witness_name")
+    @classmethod
+    def _witness_clean(cls, v: str | None) -> str | None:
+        v = (v or "").strip()
+        return v[:80] or None
 
     @field_validator("scores")
     @classmethod
@@ -500,11 +513,15 @@ class PlayerUpdate(BaseModel):
 
 
 class RoundCreate(BaseModel):
-    """Per-round Golf+ settings. Round numbers are implied by list order."""
+    """Per-round Golf+ settings and dates. Round numbers are implied by list order."""
 
     tee_position: str = "middle"
     pin_position: str = "white"
     wind_strength: str = "moderate"
+    # Optional per-round window; when omitted the server splits the
+    # tournament's overall date range evenly across rounds.
+    start_date: str | None = None
+    end_date: str | None = None
 
     @field_validator("tee_position")
     @classmethod
@@ -726,6 +743,29 @@ async def list_tournaments(user: CurrentUser) -> list[dict]:
     return out
 
 
+def _validated_round(r: "RoundCreate", body: "TournamentCreate") -> dict:
+    """Validate one RoundCreate's date window and return its db dict.
+
+    Raises HTTPException(400) on a bad range or a window outside the
+    tournament's overall dates. Nones fall back to the even-split default
+    in db.create_tournament.
+    """
+    try:
+        start_iso, end_iso = sl.validate_round_dates(
+            r.start_date, r.end_date, body.start_date, body.end_date)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
+    return {
+        "tee_position": r.tee_position,
+        "pin_position": r.pin_position,
+        "wind_strength": r.wind_strength,
+        "start_date": start_iso,
+        "end_date": end_iso,
+    }
+
+
 @app.post("/api/tournaments", status_code=status.HTTP_201_CREATED)
 async def create_tournament(body: TournamentCreate, user: CrewUser) -> dict:
     """Create a tournament (crew only). Mirrors /tournament create.
@@ -774,14 +814,7 @@ async def create_tournament(body: TournamentCreate, user: CrewUser) -> dict:
         wind_strength=body.wind_strength,
         green_speed=body.green_speed,
         rounds=(
-            [
-                {
-                    "tee_position": r.tee_position,
-                    "pin_position": r.pin_position,
-                    "wind_strength": r.wind_strength,
-                }
-                for r in body.rounds
-            ]
+            [_validated_round(r, body) for r in body.rounds]
             if body.rounds
             else None
         ),
@@ -853,6 +886,11 @@ async def create_tee_time(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
         )
+    if not await db.get_round(DB_PATH, t["id"], body.round_number):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Round {body.round_number} doesn't exist in this tournament.",
+        )
     tt_id = await db.create_tee_time(
         DB_PATH,
         t["id"],
@@ -861,6 +899,7 @@ async def create_tee_time(
         body.max_players,
         user["discord_id"],
         None,  # channel_id: bot-only field
+        round_number=body.round_number,
     )
     # Creator auto-joins their own tee time, like the bot.
     await db.join_tee_time(DB_PATH, tt_id, user["discord_id"])
@@ -903,11 +942,18 @@ async def _can_manage_tee_time(tt: dict, user: CurrentUser) -> bool:
 async def update_tee_time(
     tee_time_id: int, body: TeeTimeUpdate, user: CurrentUser
 ) -> dict:
-    tt, _ = await _tee_time_or_404(tee_time_id)
+    tt, t = await _tee_time_or_404(tee_time_id)
     if not await _can_manage_tee_time(tt, user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the tee time creator or crew can edit it.",
+        )
+    if body.round_number is not None and not await db.get_round(
+        DB_PATH, t["id"], body.round_number
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Round {body.round_number} doesn't exist in this tournament.",
         )
     starts_at = None
     if body.date is not None or body.time is not None:
@@ -934,7 +980,8 @@ async def update_tee_time(
             )
         starts_at = starts.isoformat()
     changed = await db.update_tee_time(
-        DB_PATH, tt["id"], label=body.label, starts_at=starts_at
+        DB_PATH, tt["id"], label=body.label, starts_at=starts_at,
+        round_number=body.round_number,
     )
     if not changed:
         raise HTTPException(
@@ -988,6 +1035,57 @@ async def edit_tournament(
         course=patch.course,
     )
     t = await db.get_tournament(DB_PATH, t["id"])
+    rounds = await db.list_rounds(DB_PATH, t["id"])
+    return _tournament_json(t, registered=False, rounds=rounds)
+
+
+class RoundUpdate(BaseModel):
+    """Patch a round's Golf+ settings and/or date window (crew only)."""
+
+    tee_position: str | None = None
+    pin_position: str | None = None
+    wind_strength: str | None = None
+    start_date: str | None = None  # YYYY-MM-DD
+    end_date: str | None = None  # YYYY-MM-DD
+
+
+@app.patch("/api/tournaments/{tournament_id}/rounds/{round_number}")
+async def update_round(
+    tournament_id: int, round_number: int, patch: RoundUpdate, user: CrewUser
+) -> dict:
+    t = await _tournament_or_404(tournament_id)
+    rnd = await db.get_round(DB_PATH, t["id"], round_number)
+    if rnd is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Round {round_number} doesn't exist in this tournament.",
+        )
+    new_start = patch.start_date if patch.start_date is not None else rnd.get("start_date")
+    new_end = patch.end_date if patch.end_date is not None else rnd.get("end_date")
+    try:
+        start_iso, end_iso = sl.validate_round_dates(
+            new_start, new_end, t.get("start_date"), t.get("end_date"))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    for field, allowed in (
+        ("tee_position", ("front", "middle", "back")),
+        ("pin_position", ("black", "white", "red")),
+        ("wind_strength", ("low", "moderate", "severe")),
+    ):
+        v = getattr(patch, field)
+        if v is not None and v not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown {field} '{v}'.",
+            )
+    rnd = await db.update_round(
+        DB_PATH, t["id"], round_number,
+        tee_position=patch.tee_position,
+        pin_position=patch.pin_position,
+        wind_strength=patch.wind_strength,
+        start_date=start_iso, end_date=end_iso,
+    )
     rounds = await db.list_rounds(DB_PATH, t["id"])
     return _tournament_json(t, registered=False, rounds=rounds)
 
@@ -1240,6 +1338,19 @@ async def put_scorecard(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Round {body.round_number} does not exist for this tournament.",
         )
+    # Gate 3c: the round's window must have opened — nobody plays a round
+    # that hasn't started yet.
+    if not sl.round_has_started(rnd.get("start_date")):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "round_not_started",
+                "message": (
+                    f"Round {body.round_number} hasn't started yet — it opens "
+                    f"{sl.format_date(rnd.get('start_date'))}."
+                ),
+            },
+        )
     # Gate 4: the tee time must have started (bot's tee-time gate).
     if not sl.tee_time_passed(tt.get("starts_at") or ""):
         raise HTTPException(
@@ -1281,6 +1392,7 @@ async def put_scorecard(
         status_value,
         submitted_by=user["discord_id"],
         round_number=body.round_number,
+        witness_name=body.witness_name,
     )
     card = await db.get_scorecard(DB_PATH, card_id)
     return {"card": _card_json(card, t.get("pars"))}
@@ -1309,6 +1421,8 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
                 "tee_position": r["tee_position"],
                 "pin_position": r["pin_position"],
                 "wind_strength": r["wind_strength"],
+                "start_date": r.get("start_date"),
+                "end_date": r.get("end_date"),
             }
             for r in rounds
         ],

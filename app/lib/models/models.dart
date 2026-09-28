@@ -11,12 +11,16 @@ class TournamentRound {
   final String? teePosition;
   final String? pinPosition;
   final String? windStrength;
+  final String? startDate;
+  final String? endDate;
 
   TournamentRound({
     required this.roundNumber,
     this.teePosition,
     this.pinPosition,
     this.windStrength,
+    this.startDate,
+    this.endDate,
   });
 
   factory TournamentRound.fromJson(Map<String, dynamic> j) => TournamentRound(
@@ -24,7 +28,18 @@ class TournamentRound {
         teePosition: j['tee_position']?.toString(),
         pinPosition: j['pin_position']?.toString(),
         windStrength: j['wind_strength']?.toString(),
+        startDate: j['start_date']?.toString(),
+        endDate: j['end_date']?.toString(),
       );
+
+  /// True when the round's window has opened (or no window is set).
+  bool get hasStarted {
+    if (startDate == null || startDate!.isEmpty) return true;
+    final today = DateTime.now();
+    final todayKey =
+        '${today.year.toString().padLeft(4, '0')}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    return todayKey.compareTo(startDate!) >= 0;
+  }
 
   String get settingsSummary {
     final parts = <String>[];
@@ -32,6 +47,23 @@ class TournamentRound {
     if (pinPosition != null) parts.add('${_cap(pinPosition!)} pins');
     if (windStrength != null) parts.add('${_cap(windStrength!)} wind');
     return parts.join(' · ');
+  }
+
+  String get datesSummary {
+    if (startDate == null && endDate == null) return '';
+    if (startDate != null && startDate == endDate) return _fmtDate(startDate!);
+    return '${startDate != null ? _fmtDate(startDate!) : '…'}'
+        ' – ${endDate != null ? _fmtDate(endDate!) : '…'}';
+  }
+
+  static String _fmtDate(String iso) {
+    final d = DateTime.tryParse(iso);
+    if (d == null) return iso;
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    return '${months[d.month - 1]} ${d.day}';
   }
 
   static String _cap(String s) =>
@@ -135,6 +167,7 @@ class TeeTime {
   final DateTime startsAtUtc;
   final int maxPlayers;
   final String createdBy;
+  final int roundNumber;
   final List<TeeTimePlayer> players;
 
   TeeTime({
@@ -143,6 +176,7 @@ class TeeTime {
     required this.startsAtUtc,
     required this.maxPlayers,
     required this.createdBy,
+    this.roundNumber = 1,
     required this.players,
   });
 
@@ -159,6 +193,7 @@ class TeeTime {
       startsAtUtc: parsed,
       maxPlayers: (j['max_players'] as num?)?.toInt() ?? 4,
       createdBy: j['created_by'].toString(),
+      roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
       players: ((j['players'] as List?) ?? [])
           .map((e) => TeeTimePlayer.fromJson(e as Map<String, dynamic>))
           .toList(),
@@ -200,6 +235,7 @@ class Scorecard {
   final String? status;
   final String? submittedBy;
   final int roundNumber;
+  final String? witnessName;
 
   Scorecard({
     required this.playerDiscordId,
@@ -209,6 +245,7 @@ class Scorecard {
     this.status,
     this.submittedBy,
     this.roundNumber = 1,
+    this.witnessName,
   });
 
   factory Scorecard.fromJson(Map<String, dynamic> j) => Scorecard(
@@ -221,6 +258,7 @@ class Scorecard {
         status: j['status']?.toString(),
         submittedBy: j['submitted_by']?.toString(),
         roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
+        witnessName: j['witness_name']?.toString(),
       );
 }
 

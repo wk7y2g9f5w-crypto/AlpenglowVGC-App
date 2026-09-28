@@ -194,7 +194,8 @@ async def _rounds_line(db_path: str, tournament_id: int) -> str:
         tee = sl.TEE_LABELS.get(r["tee_position"], r["tee_position"])
         pin = sl.PIN_LABELS.get(r["pin_position"], r["pin_position"])
         wind = sl.WIND_LABELS.get(r["wind_strength"], r["wind_strength"])
-        bits.append(f"R{r['round_number']} {tee}/{pin}/{wind}")
+        dates = sl.format_date_range(r.get("start_date"), r.get("end_date"))
+        bits.append(f"R{r['round_number']} ({dates}) {tee}/{pin}/{wind}")
     return f"🔁 {len(rounds)} rounds: " + " · ".join(bits)
 
 
@@ -271,8 +272,9 @@ async def build_teesheet_board(bot, guild_id):
             )
             sections.append((t, []))
         sections[-1][1].append(tt)
+        round_tag = f" [R{tt.get('round_number') or 1}]"
         embed.add_field(
-            name=f"🕐 {tt['label']} (ID {tt['id']})",
+            name=f"🕐 {tt['label']}{round_tag} (ID {tt['id']})",
             value=_tee_time_value(tt, players, pending),
             inline=False,
         )

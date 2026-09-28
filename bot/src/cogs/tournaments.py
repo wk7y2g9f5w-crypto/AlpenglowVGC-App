@@ -75,7 +75,8 @@ def build_tournament_announce_embed(
     """Shared announcement embed for bot- and app-created tournaments.
 
     `rounds` is a list of dicts with tee_position/pin_position/wind_strength
-    (one per round); single-round tournaments pass one entry.
+    plus start_date/end_date (one per round); single-round tournaments pass
+    one entry.
     """
     fmt_label = FORMAT_LABELS[format]
     embed = discord.Embed(
@@ -98,7 +99,8 @@ def build_tournament_announce_embed(
     )
     if num_rounds > 1:
         round_lines = "\n".join(
-            f"R{i}: {sl.TEE_LABELS[r['tee_position']]} tees • "
+            f"R{i}: {sl.format_date_range(r.get('start_date'), r.get('end_date'))} • "
+            f"{sl.TEE_LABELS[r['tee_position']]} tees • "
             f"{sl.PIN_LABELS[r['pin_position']]} pins • "
             f"{sl.WIND_LABELS[r['wind_strength']]} wind"
             for i, r in enumerate(rounds, start=1)
@@ -399,6 +401,8 @@ class Tournaments(commands.Cog):
         )
         self.bot.add_view(RegisterView(tid))
 
+        # Real rounds carry the default-split dates from create_tournament.
+        created_rounds = await db.list_rounds(self.bot.db_path, tid)
         embed = build_tournament_announce_embed(
             tournament_id=tid,
             name=name,
@@ -408,12 +412,7 @@ class Tournaments(commands.Cog):
             start_date=start_d.isoformat(),
             end_date=end_d.isoformat(),
             description=description,
-            rounds=[
-                {"tee_position": tee_position,
-                 "pin_position": pin_position,
-                 "wind_strength": wind_strength}
-                for _ in range(rounds)
-            ],
+            rounds=created_rounds,
             green_speed=green_speed,
             pars=pars_clean,
             pars_auto=pars_auto,
@@ -433,7 +432,7 @@ class Tournaments(commands.Cog):
         )
 
     @tournament.command(name="set_round",
-                        description="Change a round's tee/pin/wind (admin)")
+                        description="Change a round's settings or dates (admin)")
     @app_commands.autocomplete(tournament=active_tournament_autocomplete)
     @app_commands.describe(
         tournament="Defaults to the single active tournament",
@@ -441,6 +440,8 @@ class Tournaments(commands.Cog):
         tee_position="Which tees to play from",
         pin_position="Pin color for the round",
         wind_strength="Wind strength for the round",
+        start_date="Round start as YYYY-MM-DD (must be inside the tournament's dates)",
+        end_date="Round end as YYYY-MM-DD (must be inside the tournament's dates)",
     )
     async def tournament_set_round(
         self,
@@ -450,6 +451,8 @@ class Tournaments(commands.Cog):
         tee_position: Optional[Literal["front", "middle", "back"]] = None,
         pin_position: Optional[Literal["black", "white", "red"]] = None,
         wind_strength: Optional[Literal["low", "moderate", "severe"]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
     ):
         if not await require_admin(interaction):
             return
@@ -459,10 +462,17 @@ class Tournaments(commands.Cog):
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
+        try:
+            r_start, r_end = sl.validate_round_dates(
+                start_date, end_date, t.get("start_date"), t.get("end_date"))
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
         rnd = await db.update_round(
             self.bot.db_path, t["id"], round_number,
             tee_position=tee_position, pin_position=pin_position,
             wind_strength=wind_strength,
+            start_date=r_start, end_date=r_end,
         )
         if rnd is None:
             await interaction.response.send_message(
@@ -472,6 +482,7 @@ class Tournaments(commands.Cog):
             return
         await interaction.response.send_message(
             f"✅ **{t['name']}** — Round {round_number}: "
+            f"🗓️ {sl.format_date_range(rnd.get('start_date'), rnd.get('end_date'))} • "
             f"{sl.TEE_LABELS[rnd['tee_position']]} tees • "
             f"{sl.PIN_LABELS[rnd['pin_position']]} pins • "
             f"{sl.WIND_LABELS[rnd['wind_strength']]} wind.",
@@ -500,7 +511,12 @@ class Tournaments(commands.Cog):
             dates = sl.format_date_range(t.get("start_date"), t.get("end_date"))
             rounds = await db.list_rounds(self.bot.db_path, t["id"])
             if len(rounds) > 1:
-                settings_line = f"🔁 {len(rounds)} rounds • ⛳ {sl.format_settings(t)}"
+                round_bits = " • ".join(
+                    f"R{i}: {sl.format_date_range(r.get('start_date'), r.get('end_date'))}"
+                    for i, r in enumerate(rounds, start=1)
+                )
+                settings_line = (f"🔁 {len(rounds)} rounds • ⛳ {sl.format_settings(t)}\n"
+                                 f"{round_bits}")
             else:
                 settings_line = f"⛳ {sl.format_settings(t)}"
             embed.add_field(

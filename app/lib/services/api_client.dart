@@ -208,12 +208,14 @@ class ApiClient {
       {required String label,
       required String date,
       required String time,
-      required int maxPlayers}) async {
+      required int maxPlayers,
+      int roundNumber = 1}) async {
     final body = await _post('/api/tournaments/$tournamentId/tee-times', {
       'label': label,
       'date': date,
       'time': time,
       'max_players': maxPlayers,
+      'round_number': roundNumber,
     });
     final m = (body is Map && body['tee_time'] is Map)
         ? body['tee_time'] as Map<String, dynamic>
@@ -222,7 +224,7 @@ class ApiClient {
   }
 
   /// Edit a tee time (creator or crew). Only include keys that changed:
-  /// label, date (YYYY-MM-DD), time (HH:MM 24h).
+  /// label, date (YYYY-MM-DD), time (HH:MM 24h), round_number.
   Future<TeeTime> editTeeTime(
       String teeTimeId, Map<String, dynamic> fields) async {
     final body =
@@ -284,12 +286,23 @@ class ApiClient {
 
   Future<void> submitScorecard(
       String teeTimeId, String playerDiscordId, List<int> scores,
-      {int roundNumber = 1}) async {
+      {int roundNumber = 1, String? witnessName}) async {
     await _put('/api/tee-times/$teeTimeId/scorecard', {
       'player_discord_id': playerDiscordId,
       'scores': scores,
       'round_number': roundNumber,
+      if (witnessName != null && witnessName.trim().isNotEmpty)
+        'witness_name': witnessName.trim(),
     });
+  }
+
+  /// Patch one round's Golf+ settings and/or date window (crew).
+  Future<Tournament> editRound(String tournamentId, int roundNumber,
+      Map<String, dynamic> fields) async {
+    final body = await _patch(
+            '/api/tournaments/$tournamentId/rounds/$roundNumber', fields)
+        as Map<String, dynamic>;
+    return Tournament.fromJson(body);
   }
 
   Future<List<LeaderboardEntry>> getLeaderboard(String tournamentId) async {

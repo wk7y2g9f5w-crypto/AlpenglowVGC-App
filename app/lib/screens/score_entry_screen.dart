@@ -36,11 +36,13 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   TeeTimePlayer? _player;
   late List<int?> _scores;
   int _hole = 0; // 0-based current hole
-  int _roundNumber = 1;
+  late int _roundNumber;
   bool _loading = true;
   bool _submitting = false;
   String? _existingStatus;
+  String? _witnessName;
   bool _isCrew = false;
+  final _witnessCtrl = TextEditingController();
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -64,11 +66,19 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   @override
   void initState() {
     super.initState();
+    // Default to the tee time's assigned round.
+    _roundNumber = widget.teeTime.roundNumber;
     _scores = List<int?>.filled(_holeCount, null);
     _player =
         widget.teeTime.players.isNotEmpty ? widget.teeTime.players.first : null;
     _loadExisting();
     _loadCrew();
+  }
+
+  @override
+  void dispose() {
+    _witnessCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _loadCrew() async {
@@ -96,6 +106,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         setState(() {
           _scores = card.scores.map<int?>((s) => s).toList();
           _existingStatus = card.status;
+          _witnessName = card.witnessName;
+          _witnessCtrl.text = card.witnessName ?? '';
           _hole = 0;
           final match = widget.teeTime.players
               .where((p) => p.discordId == card.playerDiscordId);
@@ -105,6 +117,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         setState(() {
           _scores = List<int?>.filled(_holeCount, null);
           _existingStatus = null;
+          _witnessName = null;
+          _witnessCtrl.clear();
           _hole = 0;
         });
       }
@@ -114,6 +128,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         setState(() {
           _scores = List<int?>.filled(_holeCount, null);
           _existingStatus = null;
+          _witnessName = null;
+          _witnessCtrl.clear();
           _hole = 0;
         });
       }
@@ -135,10 +151,20 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     final rounds = widget.tournament.rounds;
     if (rounds.length >= rn) {
       final r = rounds[rn - 1];
+      final parts = <String>['Round $rn'];
       final summary = r.settingsSummary;
-      return summary.isEmpty ? 'Round $rn' : 'Round $rn — $summary';
+      if (summary.isNotEmpty) parts.add(summary);
+      if (r.datesSummary.isNotEmpty) parts.add(r.datesSummary);
+      if (!r.hasStarted) parts.add('not started yet');
+      return parts.join(' — ');
     }
     return 'Round $rn';
+  }
+
+  bool _roundStarted(int rn) {
+    final rounds = widget.tournament.rounds;
+    if (rounds.length >= rn) return rounds[rn - 1].hasStarted;
+    return true;
   }
 
   int? get _total {
@@ -221,7 +247,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                   '(admins, mods, tournament directors) can change them.\n\n'
                   '${_player!.displayName} — round $_roundNumber: '
                   'total ${_total ?? '–'}'
-                  '${toPar.isNotEmpty ? ' ($toPar)' : ''}',
+                  '${toPar.isNotEmpty ? ' ($toPar)' : ''}'
+                  '${_witnessCtrl.text.trim().isNotEmpty ? '\nWitness: ${_witnessCtrl.text.trim()}' : ''}',
         ),
         actions: [
           TextButton(
@@ -243,6 +270,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         _player!.discordId,
         _scores.map((s) => s!).toList(),
         roundNumber: _roundNumber,
+        witnessName: _witnessCtrl.text,
       );
       if (mounted) {
         showSnack(context,
@@ -344,6 +372,14 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           textAlign: TextAlign.center,
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
         ),
+        if (_witnessName != null && _witnessName!.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+            'Witness: $_witnessName',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.grey, fontSize: 13),
+          ),
+        ],
       ],
     );
   }
@@ -373,6 +409,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                 widget.tournament.numRounds,
                 (i) => DropdownMenuItem(
                   value: i + 1,
+                  enabled: _roundStarted(i + 1),
                   child: Text(_roundLabel(i + 1),
                       overflow: TextOverflow.ellipsis),
                 ),
@@ -505,6 +542,18 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                   onPressed: _customScore,
                   icon: const Icon(Icons.edit),
                   label: const Text('Custom score (1–15)'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _witnessCtrl,
+                  maxLength: 80,
+                  decoration: const InputDecoration(
+                    labelText: 'Witness (optional)',
+                    hintText: 'Who saw you play this round?',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                    counterText: '',
+                  ),
                 ),
                 if (_existingStatus != null) ...[
                   const SizedBox(height: 8),

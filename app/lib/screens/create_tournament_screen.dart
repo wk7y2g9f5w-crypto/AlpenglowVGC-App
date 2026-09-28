@@ -25,7 +25,11 @@ class _RoundSettings {
   String tee;
   String pin;
   String wind;
-  _RoundSettings({this.tee = 'middle', this.pin = 'white', this.wind = 'moderate'});
+  DateTime? start;
+  DateTime? end;
+  bool datesCustom = false;
+  _RoundSettings(
+      {this.tee = 'middle', this.pin = 'white', this.wind = 'moderate'});
 }
 
 class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
@@ -114,6 +118,31 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
         } else {
           _endDate = picked;
         }
+        _applyDefaultRoundDates();
+      });
+    }
+  }
+
+  Future<void> _pickRoundDate(int i, bool isStart) async {
+    final now = DateTime.now();
+    final rs = _roundSettings[i];
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: (isStart ? rs.start : rs.end) ??
+          _startDate ??
+          _endDate ??
+          now,
+      firstDate: DateTime(now.year - 1),
+      lastDate: DateTime(now.year + 2),
+    );
+    if (picked != null) {
+      setState(() {
+        if (isStart) {
+          rs.start = picked;
+        } else {
+          rs.end = picked;
+        }
+        rs.datesCustom = true;
       });
     }
   }
@@ -130,6 +159,42 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
   String _iso(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
+  /// Evenly splits the inclusive overall date range across [n] rounds,
+  /// mirroring the server default so the app shows the same windows the
+  /// backend would assign.
+  List<(DateTime, DateTime)> _splitRange(int n) {
+    if (_startDate == null || _endDate == null) return [];
+    var s = _startDate!;
+    var e = _endDate!;
+    if (e.isBefore(s)) return [];
+    final total = e.difference(s).inDays + 1;
+    final base = total ~/ n;
+    final extra = total % n;
+    final out = <(DateTime, DateTime)>[];
+    var cursor = s;
+    for (var i = 0; i < n; i++) {
+      final days = base + (i < extra ? 1 : 0);
+      final rend = cursor.add(Duration(days: days - 1));
+      out.add((cursor, rend.isAfter(e) ? e : rend));
+      cursor = cursor.add(Duration(days: days));
+    }
+    return out;
+  }
+
+  /// Applies the even split to any round whose dates the user hasn't
+  /// customized (after the overall dates or the round count change).
+  void _applyDefaultRoundDates() {
+    final split = _splitRange(_numRounds);
+    if (split.isEmpty) return;
+    for (var i = 0; i < _numRounds; i++) {
+      final rs = _roundSettings[i];
+      if (!rs.datesCustom) {
+        rs.start = split[i].$1;
+        rs.end = split[i].$2;
+      }
+    }
+  }
+
   void _setNumRounds(int n) {
     setState(() {
       if (n > _numRounds) {
@@ -143,6 +208,7 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
       }
       _numRounds = n;
       if (n > 1) _holes = 18; // multi-round is 18 holes per round
+      _applyDefaultRoundDates();
     });
   }
 
@@ -168,23 +234,40 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
           error: true);
       return;
     }
+    // Round windows must sit inside the tournament window, end >= start.
+    for (var i = 0; i < _numRounds; i++) {
+      final rs = _roundSettings[i];
+      if (rs.start != null && rs.end != null && rs.end!.isBefore(rs.start!)) {
+        showSnack(context,
+            'Round ${i + 1}: the end date can\'t be before its start date.',
+            error: true);
+        return;
+      }
+      if (rs.start != null && rs.start!.isBefore(_startDate!)) {
+        showSnack(context,
+            'Round ${i + 1} starts before the tournament starts.',
+            error: true);
+        return;
+      }
+      if (rs.end != null && rs.end!.isAfter(_endDate!)) {
+        showSnack(context, 'Round ${i + 1} ends after the tournament ends.',
+            error: true);
+        return;
+      }
+    }
     setState(() => _submitting = true);
     try {
-      final rounds = _numRounds > 1
-          ? List.generate(
-              _numRounds,
-              (i) => {
+      final rounds = List.generate(
+          _numRounds,
+          (i) => {
                 'tee_position': _roundSettings[i].tee,
                 'pin_position': _roundSettings[i].pin,
                 'wind_strength': _roundSettings[i].wind,
-              })
-          : [
-              {
-                'tee_position': _teePosition,
-                'pin_position': _pinPosition,
-                'wind_strength': _windStrength,
-              }
-            ];
+                if (_roundSettings[i].start != null)
+                  'start_date': _iso(_roundSettings[i].start!),
+                if (_roundSettings[i].end != null)
+                  'end_date': _iso(_roundSettings[i].end!),
+              });
       await _api.createTournament(
         name: _nameCtrl.text.trim(),
         format: _format,
@@ -213,7 +296,7 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
     }
   }
 
-  /// Per-round tee/pin/wind card shown when the tournament has 2-5 rounds.
+  /// Per-round tee/pin/wind/date card shown when the tournament has 2-5 rounds.
   Widget _roundCard(int i) {
     final rs = _roundSettings[i];
     DropdownButtonFormField<String> field(
@@ -260,6 +343,34 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
                 Expanded(
                     child: field('Wind', rs.wind, _winds,
                         (v) => rs.wind = v)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => _pickRoundDate(i, true),
+                    child: Text(
+                      rs.start != null
+                          ? 'Starts ${_dateLabel(rs.start)}'
+                          : 'Round start',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => _pickRoundDate(i, false),
+                    child: Text(
+                      rs.end != null
+                          ? 'Ends ${_dateLabel(rs.end)}'
+                          : 'Round end',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
               ],
             ),
           ],

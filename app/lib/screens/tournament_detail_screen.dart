@@ -166,6 +166,9 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
       onSelected: _onCrewAction,
       itemBuilder: (_) => [
         const PopupMenuItem(value: 'edit', child: Text('Edit details')),
+        if (t.isMultiRound)
+          const PopupMenuItem(
+              value: 'rounds', child: Text('Edit round dates & settings')),
         if (!done)
           const PopupMenuItem(
               value: 'complete', child: Text('Complete tournament')),
@@ -185,6 +188,8 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
     switch (action) {
       case 'edit':
         await _editDetails();
+      case 'rounds':
+        await _editRounds();
       case 'complete':
         await _confirmFinish(
           title: 'Complete tournament?',
@@ -339,6 +344,164 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
     }
   }
 
+  /// Crew editor for each round's Golf+ settings and date window.
+  Future<void> _editRounds() async {
+    final rounds = _tournament.rounds;
+    if (rounds.isEmpty) return;
+    const tees = {'front': 'Front', 'middle': 'Middle', 'back': 'Back'};
+    const pins = {'black': 'Black', 'white': 'White', 'red': 'Red'};
+    const winds = {'low': 'Low', 'moderate': 'Moderate', 'severe': 'Severe'};
+    final starts = rounds.map((r) => _parseDate(r.startDate)).toList();
+    final ends = rounds.map((r) => _parseDate(r.endDate)).toList();
+    final teeVals = rounds.map((r) => r.teePosition ?? 'middle').toList();
+    final pinVals = rounds.map((r) => r.pinPosition ?? 'white').toList();
+    final windVals = rounds.map((r) => r.windStrength ?? 'moderate').toList();
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) {
+          DropdownButtonFormField<String> field(String label, String value,
+              Map<String, String> options, void Function(String) onChanged) {
+            return DropdownButtonFormField<String>(
+              initialValue: value,
+              decoration: InputDecoration(
+                  labelText: label,
+                  border: const OutlineInputBorder(),
+                  isDense: true),
+              items: options.entries
+                  .map((e) => DropdownMenuItem(
+                      value: e.key, child: Text(e.value)))
+                  .toList(),
+              onChanged: (v) {
+                if (v != null) setDlg(() => onChanged(v));
+              },
+            );
+          }
+
+          Future<void> pickDate(int i, bool isStart) async {
+            final picked = await showDatePicker(
+              context: ctx,
+              initialDate: (isStart ? starts[i] : ends[i]) ??
+                  _parseDate(_tournament.startDate) ??
+                  DateTime.now(),
+              firstDate: DateTime(DateTime.now().year - 1),
+              lastDate: DateTime(DateTime.now().year + 2),
+            );
+            if (picked != null) {
+              setDlg(() {
+                if (isStart) {
+                  starts[i] = picked;
+                } else {
+                  ends[i] = picked;
+                }
+              });
+            }
+          }
+
+          return AlertDialog(
+            title: const Text('Round dates & settings'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < rounds.length; i++) ...[
+                    if (i > 0) const SizedBox(height: 12),
+                    Text('Round ${rounds[i].roundNumber}',
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                            child: OutlinedButton(
+                          onPressed: () => pickDate(i, true),
+                          child: Text(
+                              starts[i] == null
+                                  ? 'Start'
+                                  : _iso(starts[i]!),
+                              style: const TextStyle(fontSize: 12)),
+                        )),
+                        const SizedBox(width: 8),
+                        Expanded(
+                            child: OutlinedButton(
+                          onPressed: () => pickDate(i, false),
+                          child: Text(
+                              ends[i] == null ? 'End' : _iso(ends[i]!),
+                              style: const TextStyle(fontSize: 12)),
+                        )),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                            child: field('Tees', teeVals[i], tees,
+                                (v) => teeVals[i] = v)),
+                        const SizedBox(width: 6),
+                        Expanded(
+                            child: field('Pins', pinVals[i], pins,
+                                (v) => pinVals[i] = v)),
+                        const SizedBox(width: 6),
+                        Expanded(
+                            child: field('Wind', windVals[i], winds,
+                                (v) => windVals[i] = v)),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (saved != true || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      Tournament? latest;
+      for (var i = 0; i < rounds.length; i++) {
+        final fields = <String, dynamic>{};
+        if (teeVals[i] != (rounds[i].teePosition ?? 'middle')) {
+          fields['tee_position'] = teeVals[i];
+        }
+        if (pinVals[i] != (rounds[i].pinPosition ?? 'white')) {
+          fields['pin_position'] = pinVals[i];
+        }
+        if (windVals[i] != (rounds[i].windStrength ?? 'moderate')) {
+          fields['wind_strength'] = windVals[i];
+        }
+        final sIso = starts[i] == null ? null : _iso(starts[i]!);
+        final eIso = ends[i] == null ? null : _iso(ends[i]!);
+        if (sIso != rounds[i].startDate) fields['start_date'] = sIso;
+        if (eIso != rounds[i].endDate) fields['end_date'] = eIso;
+        if (fields.isEmpty) continue;
+        latest = await _api.editRound(
+            _tournament.id, rounds[i].roundNumber, fields);
+      }
+      if (mounted) {
+        if (latest != null) _replace(latest);
+        showSnack(context, 'Rounds updated.');
+      }
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+    } catch (e) {
+      if (mounted) showSnack(context, 'Update failed: $e', error: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _confirmFinish({
     required String title,
     required String body,
@@ -435,8 +598,7 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
     }
   }
 
-  DateTime? _parseDate(String? iso) {
-    if (iso == null || iso.isEmpty) return null;
+  DateTime? _parseDate(String? iso) {    if (iso == null || iso.isEmpty) return null;
     try {
       return DateTime.parse(iso);
     } catch (_) {
@@ -480,7 +642,8 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
               ...t.rounds.map((r) => Padding(
                     padding: const EdgeInsets.only(top: 2),
                     child: Text(
-                      'Round ${r.roundNumber}: ${r.settingsSummary}',
+                      'Round ${r.roundNumber}: ${r.settingsSummary}'
+                      '${r.datesSummary.isNotEmpty ? ' · ${r.datesSummary}' : ''}',
                       style: const TextStyle(
                           color: Colors.grey, fontSize: 13),
                     ),
@@ -563,6 +726,8 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
     DateTime date = DateTime.now().add(const Duration(days: 1));
     TimeOfDay time = const TimeOfDay(hour: 18, minute: 0);
     int maxPlayers = 4;
+    int roundNumber = 1;
+    final rounds = widget.tournament.rounds;
 
     final created = await showDialog<bool>(
       context: context,
@@ -580,6 +745,26 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                       hintText: 'e.g. Friday crew round'),
                 ),
                 const SizedBox(height: 12),
+                if (rounds.length > 1)
+                  DropdownButtonFormField<int>(
+                    initialValue: roundNumber,
+                    decoration: const InputDecoration(
+                      labelText: 'Round',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: rounds
+                        .map((r) => DropdownMenuItem(
+                              value: r.roundNumber,
+                              child: Text(
+                                  'Round ${r.roundNumber}${r.datesSummary.isNotEmpty ? ' · ${r.datesSummary}' : ''}'),
+                            ))
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) setDlg(() => roundNumber = v);
+                    },
+                  ),
+                if (rounds.length > 1) const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
@@ -660,6 +845,7 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                     date: dateStr,
                     time: timeStr,
                     maxPlayers: maxPlayers,
+                    roundNumber: roundNumber,
                   );
                   if (ctx.mounted) Navigator.of(ctx).pop(true);
                 } on ApiException catch (e) {
@@ -711,7 +897,7 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                 child: ListTile(
                   title: Text(tt.label),
                   subtitle: Text(
-                      '${formatLocal(tt.startsAtUtc)} · ${tt.spotsFilled}/${tt.maxPlayers} players${isCreator ? ' · yours' : ''}'),
+                      '${formatLocal(tt.startsAtUtc)} · ${tt.spotsFilled}/${tt.maxPlayers} players${tt.roundNumber > 1 ? ' · Round ${tt.roundNumber}' : ''}${isCreator ? ' · yours' : ''}'),
                   trailing: inIt
                       ? const Icon(Icons.check, color: Colors.green)
                       : tt.isFull

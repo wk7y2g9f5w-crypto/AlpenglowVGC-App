@@ -12,7 +12,7 @@ Rules:
 """
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 import discord
 from discord import app_commands
@@ -463,6 +463,7 @@ class TeeTimes(commands.Cog):
         time="Start time as HH:MM (24-hour, your local time — set with /set_timezone)",
         label="Optional label, e.g. 'Friday flight A'",
         max_players="Max players (default 4)",
+        round="Which tournament round this tee time is for (default: 1)",
     )
     async def tee_time_create(
         self,
@@ -472,6 +473,7 @@ class TeeTimes(commands.Cog):
         tournament: Optional[int] = None,
         label: Optional[str] = None,
         max_players: int = 4,
+        round: Literal[1, 2, 3, 4, 5] = 1,
     ):
         t, err = await resolve_tournament(
             interaction, tournament, ["registration_open", "in_progress"]
@@ -501,17 +503,23 @@ class TeeTimes(commands.Cog):
                 "❌ That time is in the past — pick a future tee time.", ephemeral=True
             )
             return
+        if await db.get_round(self.bot.db_path, t["id"], round) is None:
+            await interaction.response.send_message(
+                f"❌ Round {round} doesn't exist in **{t['name']}**.", ephemeral=True
+            )
+            return
 
         tz_abbrev = starts.astimezone(resolve_tz(tz_name)).strftime("%Z")
         label = (label or f"Tee time {date} {time} {tz_abbrev}").strip()[:80]
         tt_id = await db.create_tee_time(
             self.bot.db_path, t["id"], label, starts.isoformat(), max_players,
             str(interaction.user.id), str(interaction.channel_id),
+            round_number=round,
         )
         await db.join_tee_time(self.bot.db_path, tt_id, str(interaction.user.id))
         unix = int(starts.timestamp())
         await interaction.response.send_message(
-            f"✅ Tee time **{label}** created for **{t['name']}** — "
+            f"✅ Tee time **{label}** created for **{t['name']}** (Round {round}) — "
             f"<t:{unix}:F> (<t:{unix}:R>). You're in (1/{max_players}). "
             f"Others can request to join from `/tee_times` — you'll approve "
             f"them right here in this channel.",
@@ -570,13 +578,14 @@ class TeeTimes(commands.Cog):
         return tt, t, None
 
     @tee_time.command(name="edit",
-                      description="Fix a tee time's name, date or time")
+                      description="Fix a tee time's name, date, time or round")
     @app_commands.autocomplete(tee_time=_editable_tee_time_choices)
     @app_commands.describe(
         tee_time="Which tee time to edit",
         label="New name (leave blank to keep the current one)",
         date="New date as YYYY-MM-DD (leave blank to keep)",
         time="New start time as HH:MM, 24-hour, your local time (blank to keep)",
+        round="Move to a different tournament round",
     )
     async def tee_time_edit(
         self,
@@ -585,15 +594,22 @@ class TeeTimes(commands.Cog):
         label: Optional[str] = None,
         date: Optional[str] = None,
         time: Optional[str] = None,
+        round: Optional[Literal[1, 2, 3, 4, 5]] = None,
     ):
         tt, t, err = await self._manageable_tee_time(interaction, tee_time)
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        if label is None and date is None and time is None:
+        if label is None and date is None and time is None and round is None:
             await interaction.response.send_message(
-                "❌ Nothing to change — give me a new `label`, `date` "
-                "or `time`.", ephemeral=True)
+                "❌ Nothing to change — give me a new `label`, `date`, "
+                "`time` or `round`.", ephemeral=True)
+            return
+        if round is not None and await db.get_round(
+                self.bot.db_path, t["id"], round) is None:
+            await interaction.response.send_message(
+                f"❌ Round {round} doesn't exist in **{t['name']}**.",
+                ephemeral=True)
             return
         new_label = label.strip()[:80] if label and label.strip() else None
         starts_at = None
@@ -616,7 +632,8 @@ class TeeTimes(commands.Cog):
                 return
             starts_at = starts.isoformat()
         changed = await db.update_tee_time(
-            self.bot.db_path, tee_time, label=new_label, starts_at=starts_at)
+            self.bot.db_path, tee_time, label=new_label, starts_at=starts_at,
+            round_number=round)
         if not changed:
             await interaction.response.send_message(
                 "Nothing changed.", ephemeral=True)
@@ -628,6 +645,8 @@ class TeeTimes(commands.Cog):
         if starts_at:
             unix = int(datetime.fromisoformat(starts_at).timestamp())
             bits.append(f"start → <t:{unix}:F> (<t:{unix}:R>)")
+        if round is not None:
+            bits.append(f"round → **Round {round}**")
         await interaction.response.send_message(
             f"✅ Tee time updated for **{t['name']}**: {'; '.join(bits)}.",
             ephemeral=False,

@@ -144,5 +144,81 @@ class TestSubmittedBy(unittest.IsolatedAsyncioTestCase):
         self.assertIn("submitted_by", cols)
 
 
+@requires_aiosqlite
+class TestFindScorecard(unittest.IsolatedAsyncioTestCase):
+    """find_scorecard must mirror upsert_scorecard's match exactly — it is
+    what decides first-submission vs crew-only edit."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "test.db")
+        await db.init_db(self.db_path)
+        self.tid = await db.create_tournament(
+            self.db_path, "g1", "Cup", "stroke", 9, "Course", None, None,
+            "admin", start_date="2026-10-03", end_date="2026-10-04",
+        )
+        self.tt = await db.create_tee_time(
+            self.db_path, self.tid, "TT1", "2026-10-03T19:00:00+00:00", 4,
+            "p1", "chan1",
+        )
+        self.tt2 = await db.create_tee_time(
+            self.db_path, self.tid, "TT2", "2026-10-03T20:00:00+00:00", 4,
+            "p1", "chan1",
+        )
+
+    async def tearDown(self):
+        self.tmp.cleanup()
+
+    async def test_none_before_first_submission(self):
+        found = await db.find_scorecard(
+            self.db_path, self.tid, player_discord_id="p9",
+            tee_time_id=self.tt, round_number=1)
+        self.assertIsNone(found)
+
+    async def test_finds_upserted_card(self):
+        card_id = await db.upsert_scorecard(
+            self.db_path, self.tid, "p9", None, self.tt, [4] * 9, "pending")
+        found = await db.find_scorecard(
+            self.db_path, self.tid, player_discord_id="p9",
+            tee_time_id=self.tt, round_number=1)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["id"], card_id)
+
+    async def test_round_specific(self):
+        await db.upsert_scorecard(
+            self.db_path, self.tid, "p9", None, self.tt, [4] * 9, "pending",
+            round_number=1)
+        self.assertIsNone(await db.find_scorecard(
+            self.db_path, self.tid, player_discord_id="p9",
+            tee_time_id=self.tt, round_number=2))
+        await db.upsert_scorecard(
+            self.db_path, self.tid, "p9", None, self.tt, [5] * 9, "pending",
+            round_number=2)
+        found = await db.find_scorecard(
+            self.db_path, self.tid, player_discord_id="p9",
+            tee_time_id=self.tt, round_number=2)
+        self.assertEqual(found["total"], 45)
+
+    async def test_tee_time_specific(self):
+        # Same player in two tee times: each tee time's card is independent.
+        await db.upsert_scorecard(
+            self.db_path, self.tid, "p9", None, self.tt, [4] * 9, "pending")
+        self.assertIsNone(await db.find_scorecard(
+            self.db_path, self.tid, player_discord_id="p9",
+            tee_time_id=self.tt2, round_number=1))
+
+    async def test_team_card(self):
+        team_id = await db.create_team(
+            self.db_path, self.tid, "Aces", "p9")
+        card_id = await db.upsert_scorecard(
+            self.db_path, self.tid, None, team_id, self.tt, [4] * 9,
+            "pending")
+        found = await db.find_scorecard(
+            self.db_path, self.tid, team_id=team_id,
+            tee_time_id=self.tt, round_number=1)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["id"], card_id)
+
+
 if __name__ == "__main__":
     unittest.main()

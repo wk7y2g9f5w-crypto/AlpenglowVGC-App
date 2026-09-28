@@ -94,6 +94,8 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
     TimeOfDay time = current == null
         ? TimeOfDay.now()
         : TimeOfDay(hour: current.hour, minute: current.minute);
+    int roundNumber = tt.roundNumber;
+    final rounds = widget.tournament.rounds;
 
     final saved = await showDialog<bool>(
       context: context,
@@ -108,6 +110,25 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                 decoration: const InputDecoration(labelText: 'Name'),
               ),
               const SizedBox(height: 12),
+              if (rounds.length > 1)
+                DropdownButtonFormField<int>(
+                  initialValue: roundNumber,
+                  decoration: const InputDecoration(
+                    labelText: 'Round',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: rounds
+                      .map((r) => DropdownMenuItem(
+                            value: r.roundNumber,
+                            child: Text('Round ${r.roundNumber}'),
+                          ))
+                      .toList(),
+                  onChanged: (v) {
+                    if (v != null) setDlg(() => roundNumber = v);
+                  },
+                ),
+              if (rounds.length > 1) const SizedBox(height: 12),
               Row(
                 children: [
                   Expanded(
@@ -166,6 +187,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
         ? null
         : _timeStr(TimeOfDay(hour: current.hour, minute: current.minute));
     if (timeIso != curTimeIso) fields['time'] = timeIso;
+    if (roundNumber != tt.roundNumber) fields['round_number'] = roundNumber;
     if (fields.isEmpty) {
       showSnack(context, 'Nothing changed.');
       return;

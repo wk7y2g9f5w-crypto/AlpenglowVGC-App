@@ -85,6 +85,39 @@ class CustomScoreModal(discord.ui.Modal):
             )
 
 
+class WitnessModal(discord.ui.Modal):
+    """Optional witness name for the scorecard."""
+
+    def __init__(self, view: "ScoreEntryView"):
+        super().__init__(title="Scorecard witness")
+        self._view = view
+        self.witness_input = discord.ui.TextInput(
+            label="Witness name (optional)",
+            style=discord.TextStyle.short,
+            placeholder="Who watched you play this round?",
+            required=False,
+            max_length=80,
+            default=(view.witness_name or ""),
+        )
+        self.add_item(self.witness_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self._view.witness_name = self.witness_input.value.strip() or None
+        await interaction.response.defer()
+        try:
+            await self._view.refresh_message()
+            await interaction.followup.send(
+                f"✅ Witness set to **{self._view.witness_name}**."
+                if self._view.witness_name
+                else "Witness cleared.",
+                ephemeral=True,
+            )
+        except Exception:
+            await interaction.followup.send(
+                "❌ Couldn't save the witness — try again.", ephemeral=True
+            )
+
+
 class ScoreEntryView(discord.ui.View):
     """Tap-to-enter scorecard.
 
@@ -119,6 +152,7 @@ class ScoreEntryView(discord.ui.View):
         self.team_id: str | None = None
         self.scores: list[int | None] = [None] * self.holes
         self.idx = 0
+        self.witness_name: str | None = None
         self.player_select: discord.ui.Select | None = None
         self.team_select: discord.ui.Select | None = None
         self._build_items()
@@ -204,7 +238,11 @@ class ScoreEntryView(discord.ui.View):
         tee = sl.TEE_LABELS.get(r["tee_position"], r["tee_position"])
         pin = sl.PIN_LABELS.get(r["pin_position"], r["pin_position"])
         wind = sl.WIND_LABELS.get(r["wind_strength"], r["wind_strength"])
-        return f"Round {r['round_number']} — {tee} tees, {pin} pins, {wind} wind"
+        dates = sl.format_date_range(r.get("start_date"), r.get("end_date"))
+        label = f"Round {r['round_number']} ({dates}) — {tee} tees, {pin} pins, {wind} wind"
+        if not sl.round_has_started(r.get("start_date")):
+            label += " — not started"
+        return label
 
     def _build_items(self):
         self.clear_items()
@@ -283,6 +321,12 @@ class ScoreEntryView(discord.ui.View):
         custom = discord.ui.Button(label="🔢 Custom",
                                    style=discord.ButtonStyle.secondary, row=nav_row)
         custom.callback = self._on_custom
+        witness_label = (f"🧾 Witness: {self.witness_name[:12]}"
+                         if self.witness_name else "🧾 Witness")
+        witness = discord.ui.Button(label=witness_label,
+                                    style=discord.ButtonStyle.secondary,
+                                    row=nav_row)
+        witness.callback = self._on_witness
         complete = all(self.scores) and (not self.team_required or self.team_id)
         submit = discord.ui.Button(
             label="✅ Submit",
@@ -291,7 +335,7 @@ class ScoreEntryView(discord.ui.View):
             row=nav_row,
         )
         submit.callback = self._on_submit
-        for b in (prev, nxt, custom, submit):
+        for b in (prev, nxt, custom, witness, submit):
             self.add_item(b)
 
     # ------------------------------ interactions ------------------------------
@@ -335,6 +379,12 @@ class ScoreEntryView(discord.ui.View):
             await interaction.response.send_modal(CustomScoreModal(self))
         except Exception:
             await self._fail(interaction, "❌ Couldn't open custom entry — try again.")
+
+    async def _on_witness(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.send_modal(WitnessModal(self))
+        except Exception:
+            await self._fail(interaction, "❌ Couldn't open the witness box — try again.")
 
     async def _on_pick_round(self, interaction: discord.Interaction):
         try:
@@ -413,9 +463,11 @@ class ScoreEntryView(discord.ui.View):
             if self.pars:
                 diff = total - sum(self.pars)
                 to_par = f" ({diff:+d} vs par)" if diff else " (even par)"
+            witness_line = (f"\nWitness: **{self.witness_name}**"
+                            if self.witness_name else "")
             await interaction.response.send_message(
                 f"⚠️ **Submit this scorecard?**\n"
-                f"Total: **{total}**{to_par}\n\n"
+                f"Total: **{total}**{to_par}{witness_line}\n\n"
                 "All scores entered are **final** — after submitting, only "
                 "crew (admins, mods, tournament directors) can change them.",
                 view=_ConfirmSubmitView(self),
@@ -445,6 +497,7 @@ class _ConfirmSubmitView(discord.ui.View):
                 e.card_owner_id, e.submit_id, e.team_id,
                 [s for s in e.scores if s is not None],
                 round_number=e.round_number,
+                witness_name=e.witness_name,
             )
         except Exception:
             await interaction.followup.send(
@@ -467,7 +520,8 @@ class _ConfirmSubmitView(discord.ui.View):
 async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
                           t_id: int, tt_id: int, card_owner_id: str,
                           submitter_id: str, team_id: str | None,
-                          scores: list[int], round_number: int = 1):
+                          scores: list[int], round_number: int = 1,
+                          witness_name: str | None = None):
     """Shared save path for score entry.
 
     The SUBMITTER must be in the tee time; the card is saved under the
@@ -486,9 +540,18 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     if not sl.tee_time_passed(tt.get("starts_at") or ""):
         await interaction.followup.send(await _locked_message(tt), ephemeral=True)
         return
-    if not await db.get_round(db_path, t["id"], round_number):
+    rnd = await db.get_round(db_path, t["id"], round_number)
+    if not rnd:
         await interaction.followup.send(
             f"❌ Round {round_number} doesn't exist in **{t['name']}**.",
+            ephemeral=True,
+        )
+        return
+    # Rounds can't be played before their window opens.
+    if not sl.round_has_started(rnd.get("start_date")):
+        await interaction.followup.send(
+            f"❌ Round {round_number} hasn't started yet — it opens "
+            f"{sl.format_date(rnd.get('start_date'))}.",
             ephemeral=True,
         )
         return
@@ -577,6 +640,7 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     card_id = await db.upsert_scorecard(
         db_path, t["id"], card_player_id, team_id, tt["id"], scores, status,
         submitted_by=submitter_id, round_number=round_number,
+        witness_name=witness_name,
     )
     await leaderboard_render.refresh_leaderboard(bot, db_path, t["id"])
 
@@ -639,6 +703,8 @@ def _card_embed(t: dict, card: dict, title_name: str, pars,
         embed.add_field(name="To par", value=tp or "—", inline=True)
     status = "✅ Verified" if card["status"] == "verified" else "⏳ Pending verification"
     embed.add_field(name="Status", value=status, inline=True)
+    if card.get("witness_name"):
+        embed.add_field(name="🧾 Witness", value=card["witness_name"], inline=True)
     embed.set_footer(text=f"Card #{card['id']}")
     return embed
 

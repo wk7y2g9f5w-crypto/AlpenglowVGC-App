@@ -304,6 +304,43 @@ def validate_date_range(start_s: str, end_s: str):
     return start, end
 
 
+def round_has_started(start_date_iso: str | None) -> bool:
+    """Has a round's play window opened? A round with no start date (or an
+    unparseable one) counts as started — it predates per-round dates."""
+    if not start_date_iso:
+        return True
+    try:
+        start = parse_date(start_date_iso)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc).date() >= start
+
+
+def validate_round_dates(start_s: str | None, end_s: str | None,
+                         tour_start_s: str | None,
+                         tour_end_s: str | None):
+    """Validate a round's date window inside its tournament's window.
+
+    Either side may be None (falls back to the tournament default). Returns
+    ``(start_iso, end_iso)`` with Nones preserved. Raises ValueError on a
+    bad range or a window outside the tournament's overall dates.
+    """
+    if start_s is None and end_s is None:
+        return None, None
+    start = parse_date(start_s) if start_s else None
+    end = parse_date(end_s) if end_s else None
+    if start and end and end < start:
+        raise ValueError("The round's end date can't be before its start date.")
+    tour_start = parse_date(tour_start_s) if tour_start_s else None
+    tour_end = parse_date(tour_end_s) if tour_end_s else None
+    if tour_start and start and start < tour_start:
+        raise ValueError("The round can't start before the tournament starts.")
+    if tour_end and end and end > tour_end:
+        raise ValueError("The round can't end after the tournament ends.")
+    return (start.isoformat() if start else None,
+            end.isoformat() if end else None)
+
+
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
