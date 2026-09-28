@@ -251,6 +251,8 @@ class Tournaments(commands.Cog):
           Register button, Tee Sheet refresh.
         - tournament_completed -> final standings post in #event-signups.
         - tournament_ended -> Tee Sheet refresh (silent close, no post).
+        - scorecard_submitted -> leaderboard board re-render (app/API
+          submissions; bot submissions refresh directly at submit time).
         Idempotent: re-adding an existing view and re-refreshing the board
         are harmless; announcement/standings posts skip tournaments that no
         longer exist or are in the wrong state.
@@ -286,6 +288,12 @@ class Tournaments(commands.Cog):
                     guild_id = row["payload"].get("guild_id")
                     if guild_id:
                         await ts.maybe_refresh(self.bot, guild_id)
+                elif row["kind"] == "scorecard_submitted":
+                    tid = int(row["payload"].get("tournament_id", 0))
+                    if tid:
+                        await leaderboard_render.refresh_leaderboard(
+                            self.bot, self.bot.db_path, tid
+                        )
                 done.append(row["id"])
             except Exception as e:  # noqa: BLE001 - one bad row skips, rest drain
                 print(f"outbox row {row['id']} failed: {e}")

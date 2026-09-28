@@ -1476,6 +1476,11 @@ async def put_scorecard(
         witness_name=body.witness_name,
     )
     card = await db.get_scorecard(DB_PATH, card_id)
+    # The Discord leaderboard board refreshes off this: the bot can't see
+    # API writes, so the outbox drain picks it up (~1 min) and re-renders.
+    await db.enqueue_outbox(
+        DB_PATH, "scorecard_submitted", {"tournament_id": t["id"]}
+    )
     return {"card": _card_json(card, t.get("pars"))}
 
 

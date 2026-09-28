@@ -632,6 +632,25 @@ class ApiTestCase(unittest.TestCase):
                             headers=self.h("123"))
         self.assertEqual(r.json()["card"]["total"], 72)
 
+    def test_scorecard_submit_enqueues_leaderboard_refresh(self):
+        # A submitted card enqueues a scorecard_submitted event so the bot's
+        # outbox drain re-renders the Discord leaderboard board.
+        self.with_tz("123")
+        self.with_tz("456")
+        run(db.poll_outbox(self.db_path))  # clear setup noise
+        tt_id = self._past_tee_time(self.t_open, creator="123")
+        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        run(db.ack_outbox(self.db_path,
+                          [r["id"] for r in run(db.poll_outbox(self.db_path))]))
+        body = {"player_discord_id": "123", "scores": [4] * 18}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        rows = run(db.poll_outbox(self.db_path))
+        kinds = [(row["kind"], row["payload"].get("tournament_id"))
+                 for row in rows]
+        self.assertIn(("scorecard_submitted", self.t_open), kinds)
+
     def test_scorecard_solo_pending(self):
         self.with_tz("123")
         tt_id = self._past_tee_time(self.t_open, creator="123")

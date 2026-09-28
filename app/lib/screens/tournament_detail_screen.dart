@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
 
 import '../models/models.dart';
 import '../services/api_client.dart';
@@ -955,6 +956,7 @@ class _LeaderboardTab extends StatefulWidget {
 
 class _LeaderboardTabState extends State<_LeaderboardTab> {
   late Future<List<LeaderboardEntry>> _future;
+  Timer? _poll;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -963,6 +965,17 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
   void initState() {
     super.initState();
     _future = _api.getLeaderboard(widget.tournament.id);
+    // Live leaderboard: silently re-fetch every 30s while this screen is
+    // open, so newly submitted cards appear without a manual pull.
+    _poll = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) _refresh();
+    });
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
   }
 
   Future<void> _refresh() async {
