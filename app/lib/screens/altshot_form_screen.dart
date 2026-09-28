@@ -44,6 +44,7 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
   String _greenSpeed = 'pro';
   DateTime? _when;
   int _maxTeams = 2;
+  int _teamSize = 2;
   bool _saving = false;
   bool _loading = true;
 
@@ -61,6 +62,7 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
     _wind = e?.windStrength ?? 'moderate';
     _greenSpeed = e?.greenSpeed ?? 'pro';
     _maxTeams = e?.maxTeams ?? 2;
+    _teamSize = e?.teamSize ?? 2;
     if (e != null && e.startsAt.isNotEmpty) {
       try {
         _when = DateTime.parse(e.startsAt).toLocal();
@@ -137,6 +139,7 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
         'green_speed': _greenSpeed,
         'starts_at': _when?.toUtc().toIso8601String() ?? '',
         'max_teams': _maxTeams,
+        'team_size': _maxTeams == 1 ? _teamSize : null,
         'notes': _notes.text.trim(),
       };
       if (widget.existing == null) {
@@ -259,6 +262,33 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
                     ),
                   ],
                 ),
+                if (_maxTeams == 1) ...[
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      const Text('Players per team'),
+                      const Spacer(),
+                      IconButton(
+                        icon: const Icon(Icons.remove),
+                        onPressed: _teamSize > 2
+                            ? () => setState(() => _teamSize--)
+                            : null,
+                      ),
+                      Text('$_teamSize',
+                          style: Theme.of(context).textTheme.titleMedium),
+                      IconButton(
+                        icon: const Icon(Icons.add),
+                        onPressed: _teamSize < 4
+                            ? () => setState(() => _teamSize++)
+                            : null,
+                      ),
+                    ],
+                  ),
+                  const Text(
+                    'Only this many players can join the team.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 TextField(
                   controller: _notes,

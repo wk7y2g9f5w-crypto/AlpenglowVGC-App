@@ -264,12 +264,15 @@ CREATE TABLE IF NOT EXISTS casual_tee_time_players(
 );
 CREATE INDEX IF NOT EXISTS idx_casual_players_discord ON casual_tee_time_players(discord_id);
 
--- Alt-shot records: team alternate-shot rounds. A tee time holds 1-2 teams;
--- each team is one registered player plus 1-3 extra players entered by name
--- (text, for partners who aren't in the app), with an optional team name.
--- Scores are submitted once per team — not live — and a team needs at least
--- 2 players attached to submit. Record leaderboards are split by team size
--- (2, 3, or 4 players).
+-- Alt-shot records: team alternate-shot rounds. A tee time holds 1-2 teams.
+-- A 1-team tee time has a fixed roster size (team_size 2-4, chosen at
+-- creation): other players join the single team until it is full. A 2-team
+-- tee time is flexible: each team is 2-4 players.
+-- Team rosters live in altshot_team_members: registered players (discord_id)
+-- and text names for partners who aren't in the app. Scores are submitted
+-- once per team — not live. Fixed-size teams must be full to submit;
+-- flexible teams need at least 2 players. Record leaderboards are split by
+-- team size (2, 3, or 4 players). No record-change notifications, by design.
 CREATE TABLE IF NOT EXISTS altshot_tee_times(
   id TEXT PRIMARY KEY,
   creator_discord_id TEXT NOT NULL,
@@ -282,6 +285,7 @@ CREATE TABLE IF NOT EXISTS altshot_tee_times(
   green_speed TEXT NOT NULL DEFAULT 'medium',
   starts_at TEXT NOT NULL,
   max_teams INTEGER NOT NULL DEFAULT 2,
+  team_size INTEGER,
   notes TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
@@ -297,6 +301,16 @@ CREATE TABLE IF NOT EXISTS altshot_teams(
   UNIQUE (tee_time_id, player1_discord_id)
 );
 CREATE INDEX IF NOT EXISTS idx_altshot_teams_tt ON altshot_teams(tee_time_id);
+CREATE TABLE IF NOT EXISTS altshot_team_members(
+  id TEXT PRIMARY KEY,
+  team_id TEXT NOT NULL,
+  discord_id TEXT,
+  name TEXT NOT NULL DEFAULT '',
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_altshot_members_team
+  ON altshot_team_members(team_id);
 CREATE TABLE IF NOT EXISTS altshot_scores(
   team_id TEXT PRIMARY KEY,
   holes TEXT NOT NULL,
@@ -307,8 +321,16 @@ CREATE TABLE IF NOT EXISTS altshot_scores(
 """
 
 
-def utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _json_list(raw) -> list:
+    """Decode a JSON-encoded int list column; [] on anything unexpected."""
+    try:
+        val = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        return []
+    return [int(x) for x in val] if isinstance(val, list) else []
+
+
+def utcnow_iso() -> str:    return datetime.now(timezone.utc).isoformat()
 
 
 async def init_db(db_path: str) -> None:
@@ -522,6 +544,58 @@ async def _migrate(db_path: str) -> None:
             await con.execute("DROP TABLE scorecards")
             await con.execute("ALTER TABLE scorecards_new RENAME TO scorecards")
             await con.commit()
+
+
+        # Alt-shot fixed rosters: altshot_tee_times.team_size (NULL = flexible
+        # 2-team tee times; 2/3/4 = fixed 1-team roster) and the
+        # altshot_team_members roster table. Backfill roster rows for teams
+        # created before the roster table existed (owner + text names).
+        cur = await con.execute("PRAGMA table_info(altshot_tee_times)")
+        alt_cols = [r[1] for r in await cur.fetchall()]
+        if "team_size" not in alt_cols:
+            await con.execute(
+                "ALTER TABLE altshot_tee_times ADD COLUMN team_size INTEGER")
+            await con.commit()
+        await con.execute(
+            """CREATE TABLE IF NOT EXISTS altshot_team_members(
+              id TEXT PRIMARY KEY,
+              team_id TEXT NOT NULL,
+              discord_id TEXT,
+              name TEXT NOT NULL DEFAULT '',
+              position INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL)""")
+        await con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_altshot_members_team"
+            " ON altshot_team_members(team_id)")
+        await con.commit()
+        cur = await con.execute(
+            "SELECT t.id, t.player1_discord_id, t.player2_name,"
+            " t.player3_name, t.player4_name,"
+            " COALESCE(p.display_name,"
+            " '<@' || t.player1_discord_id || '>') AS pname"
+            " FROM altshot_teams t LEFT JOIN players p"
+            " ON p.discord_id = t.player1_discord_id"
+            " WHERE NOT EXISTS (SELECT 1 FROM altshot_team_members m"
+            " WHERE m.team_id = t.id)")
+        import uuid as _uuid
+        from datetime import datetime as _dt, timezone as _tz
+        _now = _dt.now(_tz.utc).isoformat()
+        for tid, did, p2, p3, p4, pname in await cur.fetchall():
+            await con.execute(
+                "INSERT INTO altshot_team_members (id, team_id, discord_id,"
+                " name, position, created_at) VALUES (?,?,?,?,?,?)",
+                (_uuid.uuid4().hex[:12], tid, did, pname, 1, _now))
+            _pos = 2
+            for _extra in (p2, p3, p4):
+                if (_extra or "").strip():
+                    await con.execute(
+                        "INSERT INTO altshot_team_members (id, team_id,"
+                        " discord_id, name, position, created_at)"
+                        " VALUES (?,?,?,?,?,?)",
+                        (_uuid.uuid4().hex[:12], tid, None,
+                         _extra.strip(), _pos, _now))
+                    _pos += 1
+        await con.commit()
 
 
 def _dicts(rows) -> list[dict]:
@@ -2263,21 +2337,40 @@ async def delete_casual_tee_time(db_path, tt_id: str) -> None:
 # ------------------------------------------------------------------- alt-shot records
 class AltShotError(Exception):
     """Domain errors for alt-shot flows: 'not_found', 'full', 'already_in',
-    'no_team', 'needs_players', 'bad_holes'."""
+    'no_team', 'needs_players', 'team_not_full', 'too_many',
+    'bad_team_size', 'bad_holes'."""
 
 
-def _altshot_team_size(team: dict) -> int:
-    return 1 + sum(
-        1 for k in ("player2_name", "player3_name", "player4_name")
-        if (team.get(k) or "").strip())
+async def _altshot_members(db_path, team_id: str) -> list[dict]:
+    return await _fetchall(
+        db_path,
+        "SELECT * FROM altshot_team_members WHERE team_id = ?"
+        " ORDER BY position, created_at",
+        (team_id,))
 
 
-def _altshot_player_names(db_player_name: str, team: dict) -> list[str]:
-    names = [db_player_name]
-    for k in ("player2_name", "player3_name", "player4_name"):
-        n = (team.get(k) or "").strip()
-        if n:
-            names.append(n)
+async def _add_altshot_member(db_path, team_id: str,
+                              discord_id: str | None, name: str) -> None:
+    import uuid
+    members = await _altshot_members(db_path, team_id)
+    pos = max([m["position"] for m in members], default=0) + 1
+    await _execute(
+        db_path,
+        "INSERT INTO altshot_team_members (id, team_id, discord_id, name,"
+        " position, created_at) VALUES (?,?,?,?,?,?)",
+        (uuid.uuid4().hex[:12], team_id, discord_id, (name or "").strip(),
+         pos, utcnow_iso()),
+    )
+
+
+async def _altshot_member_names(db_path, members: list[dict]) -> list[str]:
+    names = []
+    for m in members:
+        if m["discord_id"]:
+            player = await get_player(db_path, m["discord_id"])
+            names.append(display_name_of(player, m["discord_id"]))
+        else:
+            names.append(m["name"])
     return names
 
 
@@ -2285,48 +2378,57 @@ async def create_altshot_tee_time(
     db_path, creator_discord_id: str, label: str, course: str, pars: str,
     tee_position: str = "middle", pin_position: str = "white",
     wind_strength: str = "moderate", green_speed: str = "medium",
-    starts_at: str = "", max_teams: int = 2, notes: str = "",
+    starts_at: str = "", max_teams: int = 2, team_size: int | None = None,
+    notes: str = "",
 ) -> str:
     import uuid
+    if max_teams == 1:
+        if team_size not in (2, 3, 4):
+            raise AltShotError("bad_team_size")
+    elif team_size is not None:
+        raise AltShotError("bad_team_size")
     tt_id = uuid.uuid4().hex[:12]
     await _execute(
         db_path,
         "INSERT INTO altshot_tee_times (id, creator_discord_id, label, course,"
         " pars, tee_position, pin_position, wind_strength, green_speed,"
-        " starts_at, max_teams, notes, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " starts_at, max_teams, team_size, notes, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tt_id, creator_discord_id, label, course, pars, tee_position,
          pin_position, wind_strength, green_speed, starts_at, max_teams,
-         notes, utcnow_iso()),
+         team_size, notes, utcnow_iso()),
     )
-    # The creator's team is created right away; they name the team and add
-    # players afterwards.
+    # The creator's team is created right away with the creator as the
+    # first roster member.
     await _create_altshot_team(db_path, tt_id, creator_discord_id)
     return tt_id
 
 
 async def _create_altshot_team(db_path, tt_id: str, discord_id: str,
-                               team_name: str = "", player2_name: str = "",
-                               player3_name: str = "",
-                               player4_name: str = "") -> str:
+                               team_name: str = "",
+                               extra_names: list | None = None) -> str:
     import uuid
     team_id = uuid.uuid4().hex[:12]
     await _execute(
         db_path,
         "INSERT INTO altshot_teams (id, tee_time_id, player1_discord_id,"
-        " team_name, player2_name, player3_name, player4_name, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?)",
-        (team_id, tt_id, discord_id, team_name.strip(),
-         player2_name.strip(), player3_name.strip(), player4_name.strip(),
+        " team_name, created_at) VALUES (?,?,?,?,?)",
+        (team_id, tt_id, discord_id, (team_name or "").strip(),
          utcnow_iso()),
     )
+    player = await get_player(db_path, discord_id)
+    await _add_altshot_member(
+        db_path, team_id, discord_id,
+        display_name_of(player, discord_id))
+    for n in extra_names or []:
+        if (n or "").strip():
+            await _add_altshot_member(db_path, team_id, None, n)
     return team_id
 
 
 async def _altshot_team_json(db_path, team: dict) -> dict:
-    player = await get_player(db_path, team["player1_discord_id"])
-    p1 = display_name_of(player, team["player1_discord_id"])
-    names = _altshot_player_names(p1, team)
+    members = await _altshot_members(db_path, team["id"])
+    names = await _altshot_member_names(db_path, members)
     team_name = (team.get("team_name") or "").strip()
     score = await _fetchone(
         db_path, "SELECT * FROM altshot_scores WHERE team_id = ?",
@@ -2340,12 +2442,15 @@ async def _altshot_team_json(db_path, team: dict) -> dict:
             "submitted_by": score["submitted_by"],
             "submitted_at": score["submitted_at"],
         }
+    player = await get_player(db_path, team["player1_discord_id"])
     return {
         "id": team["id"],
         "player1_discord_id": team["player1_discord_id"],
-        "player1_name": p1,
+        "player1_name": display_name_of(player, team["player1_discord_id"]),
         "team_name": team_name,
         "player_names": names,
+        "member_discord_ids": [m["discord_id"] for m in members
+                               if m["discord_id"]],
         "team_size": len(names),
         "display_name": team_name if team_name else " & ".join(names),
         "score": score_json,
@@ -2369,6 +2474,7 @@ async def _altshot_tee_time_json(db_path, row: dict) -> dict:
         "green_speed": row["green_speed"],
         "starts_at": row["starts_at"],
         "max_teams": row["max_teams"],
+        "team_size": row.get("team_size"),
         "notes": row["notes"],
         "created_at": row["created_at"],
         "teams": [await _altshot_team_json(db_path, t) for t in teams],
@@ -2406,15 +2512,47 @@ async def get_altshot_team(db_path, team_id: str) -> dict | None:
         db_path, "SELECT * FROM altshot_teams WHERE id = ?", (team_id,))
 
 
+async def _altshot_member_team(db_path, tt_id: str,
+                               discord_id: str) -> dict | None:
+    """The team (in this tee time) that has discord_id on its roster."""
+    return await _fetchone(
+        db_path,
+        "SELECT t.* FROM altshot_teams t"
+        " JOIN altshot_team_members m ON m.team_id = t.id"
+        " WHERE t.tee_time_id = ? AND m.discord_id = ?",
+        (tt_id, discord_id),
+    )
+
+
 async def join_altshot_tee_time(db_path, tt_id: str, discord_id: str,
-                                team_name: str = "", player2_name: str = "",
-                                player3_name: str = "",
-                                player4_name: str = "") -> dict:
-    """Joining creates the player's team. No cross-tee-time limits."""
+                                team_name: str = "",
+                                extra_names: list | None = None) -> dict:
+    """Fixed-size (1-team) tee times: the caller joins the single team's
+    roster until it is full. Flexible (2-team) tee times: the caller's own
+    team is created. No cross-tee-time limits."""
     tt = await _fetchone(
         db_path, "SELECT * FROM altshot_tee_times WHERE id = ?", (tt_id,))
     if not tt:
         raise AltShotError("not_found")
+    if await _altshot_member_team(db_path, tt_id, discord_id):
+        return await _altshot_tee_time_json(db_path, tt)  # already in
+    if tt["team_size"]:
+        # Fixed roster: join the one team.
+        team = await _fetchone(
+            db_path, "SELECT * FROM altshot_teams WHERE tee_time_id = ?",
+            (tt_id,))
+        if not team:
+            await _create_altshot_team(db_path, tt_id, discord_id)
+        else:
+            members = await _altshot_members(db_path, team["id"])
+            if len(members) >= tt["team_size"]:
+                raise AltShotError("full")
+            player = await get_player(db_path, discord_id)
+            await _add_altshot_member(
+                db_path, team["id"], discord_id,
+                display_name_of(player, discord_id))
+        return await get_altshot_tee_time(db_path, tt_id)
+    # Flexible: the caller starts their own team.
     existing = await _fetchone(
         db_path,
         "SELECT * FROM altshot_teams WHERE tee_time_id = ?"
@@ -2430,12 +2568,36 @@ async def join_altshot_tee_time(db_path, tt_id: str, discord_id: str,
     if count and count["n"] >= tt["max_teams"]:
         raise AltShotError("full")
     await _create_altshot_team(db_path, tt_id, discord_id, team_name,
-                               player2_name, player3_name, player4_name)
+                               extra_names)
     return await get_altshot_tee_time(db_path, tt_id)
 
 
 async def leave_altshot_tee_time(db_path, tt_id: str,
                                  discord_id: str) -> dict | None:
+    tt = await _fetchone(
+        db_path, "SELECT * FROM altshot_tee_times WHERE id = ?", (tt_id,))
+    if not tt:
+        return None
+    if tt["team_size"]:
+        # Fixed roster: just remove the caller's roster spot.
+        team = await _altshot_member_team(db_path, tt_id, discord_id)
+        if not team:
+            return await _altshot_tee_time_json(db_path, tt)
+        await _execute(
+            db_path,
+            "DELETE FROM altshot_team_members WHERE team_id = ?"
+            " AND discord_id = ?",
+            (team["id"], discord_id),
+        )
+        remaining = await _altshot_members(db_path, team["id"])
+        if not remaining:
+            await _execute(db_path,
+                           "DELETE FROM altshot_scores WHERE team_id = ?",
+                           (team["id"],))
+            await _execute(db_path, "DELETE FROM altshot_teams WHERE id = ?",
+                           (team["id"],))
+        return await get_altshot_tee_time(db_path, tt_id)
+    # Flexible: leaving removes the caller's whole team.
     team = await _fetchone(
         db_path,
         "SELECT * FROM altshot_teams WHERE tee_time_id = ?"
@@ -2443,12 +2605,12 @@ async def leave_altshot_tee_time(db_path, tt_id: str,
         (tt_id, discord_id),
     )
     if not team:
-        tt = await _fetchone(
-            db_path, "SELECT * FROM altshot_tee_times WHERE id = ?",
-            (tt_id,))
-        return await _altshot_tee_time_json(db_path, tt) if tt else None
+        return await _altshot_tee_time_json(db_path, tt)
     await _execute(db_path, "DELETE FROM altshot_scores WHERE team_id = ?",
                    (team["id"],))
+    await _execute(
+        db_path, "DELETE FROM altshot_team_members WHERE team_id = ?",
+        (team["id"],))
     await _execute(db_path, "DELETE FROM altshot_teams WHERE id = ?",
                    (team["id"],))
     return await get_altshot_tee_time(db_path, tt_id)
@@ -2456,30 +2618,66 @@ async def leave_altshot_tee_time(db_path, tt_id: str,
 
 async def update_altshot_team(db_path, team_id: str,
                               fields: dict) -> dict | None:
-    allowed = {"team_name", "player2_name", "player3_name", "player4_name"}
-    sets = [f"{k} = ?" for k in fields if k in allowed]
-    vals = [(fields[k] or "").strip() for k in fields if k in allowed]
-    if sets:
+    team = await get_altshot_team(db_path, team_id)
+    if not team:
+        return None
+    if "team_name" in fields:
+        await _execute(db_path,
+                       "UPDATE altshot_teams SET team_name = ? WHERE id = ?",
+                       ((fields["team_name"] or "").strip(), team_id))
+    if "extra_names" in fields:
+        tt = await _fetchone(
+            db_path, "SELECT * FROM altshot_tee_times WHERE id = ?",
+            (team["tee_time_id"],))
+        cap = tt["team_size"] if tt and tt["team_size"] else 4
+        members = await _altshot_members(db_path, team_id)
+        registered = [m for m in members if m["discord_id"]]
+        extras = [(n or "").strip() for n in (fields["extra_names"] or [])]
+        extras = [n for n in extras if n]
+        if len(registered) + len(extras) > cap:
+            raise AltShotError("too_many")
         await _execute(
             db_path,
-            f"UPDATE altshot_teams SET {', '.join(sets)} WHERE id = ?",
-            tuple(vals) + (team_id,),
+            "DELETE FROM altshot_team_members WHERE team_id = ?"
+            " AND discord_id IS NULL",
+            (team_id,),
         )
+        for n in extras:
+            await _add_altshot_member(db_path, team_id, None, n)
     return await get_altshot_team(db_path, team_id)
 
 
 async def update_altshot_tee_time(db_path, tt_id: str,
                                   fields: dict) -> dict | None:
+    tt = await _fetchone(
+        db_path, "SELECT * FROM altshot_tee_times WHERE id = ?", (tt_id,))
+    if not tt:
+        return None
     allowed = {"label", "course", "tee_position", "pin_position",
                "wind_strength", "green_speed", "starts_at", "max_teams",
-               "notes"}
-    sets = [f"{k} = ?" for k in fields if k in allowed]
-    vals = [fields[k] for k in fields if k in allowed]
-    if sets:
+               "team_size", "notes", "pars"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    new_max = updates.get("max_teams", tt["max_teams"])
+    new_size = updates.get("team_size", tt["team_size"])
+    if new_max == 1:
+        if new_size not in (2, 3, 4):
+            raise AltShotError("bad_team_size")
+    elif new_size is not None:
+        raise AltShotError("bad_team_size")
+    if new_size is not None:
+        # No team may already have more players than the new roster size.
+        teams = await _fetchall(
+            db_path, "SELECT id FROM altshot_teams WHERE tee_time_id = ?",
+            (tt_id,))
+        for t in teams:
+            if len(await _altshot_members(db_path, t["id"])) > new_size:
+                raise AltShotError("too_many")
+    if updates:
+        sets = [f"{k} = ?" for k in updates]
         await _execute(
             db_path,
             f"UPDATE altshot_tee_times SET {', '.join(sets)} WHERE id = ?",
-            tuple(vals) + (tt_id,),
+            tuple(updates[k] for k in updates) + (tt_id,),
         )
     return await get_altshot_tee_time(db_path, tt_id)
 
@@ -2491,6 +2689,9 @@ async def delete_altshot_tee_time(db_path, tt_id: str) -> None:
     for t in team_ids:
         await _execute(db_path, "DELETE FROM altshot_scores WHERE team_id = ?",
                        (t["id"],))
+        await _execute(db_path,
+                       "DELETE FROM altshot_team_members WHERE team_id = ?",
+                       (t["id"],))
     await _execute(db_path, "DELETE FROM altshot_teams WHERE tee_time_id = ?",
                    (tt_id,))
     await _execute(db_path, "DELETE FROM altshot_tee_times WHERE id = ?",
@@ -2500,12 +2701,20 @@ async def delete_altshot_tee_time(db_path, tt_id: str) -> None:
 async def submit_altshot_score(db_path, team_id: str, holes: list,
                                submitted_by: str) -> dict:
     """Submit (or re-submit) a team's 18-hole score. Not live — a single
-    stored card per team. Requires at least 2 players on the team."""
+    stored card per team. Fixed-size teams must have a full roster;
+    flexible teams need at least 2 players."""
     import json
     team = await get_altshot_team(db_path, team_id)
     if not team:
         raise AltShotError("not_found")
-    if _altshot_team_size(team) < 2:
+    tt = await _fetchone(
+        db_path, "SELECT * FROM altshot_tee_times WHERE id = ?",
+        (team["tee_time_id"],))
+    roster = await _altshot_members(db_path, team_id)
+    if tt and tt["team_size"]:
+        if len(roster) != tt["team_size"]:
+            raise AltShotError("team_not_full")
+    elif len(roster) < 2:
         raise AltShotError("needs_players")
     if (not isinstance(holes, list) or len(holes) != 18
             or any(not isinstance(h, int) or h < 1 or h > 20
@@ -2531,33 +2740,59 @@ async def delete_altshot_score(db_path, team_id: str) -> None:
                    (team_id,))
 
 
+async def get_altshot_score(db_path, team_id: str) -> dict | None:
+    """The submitted score row for a team, or None if not yet submitted."""
+    return await _fetchone(
+        db_path, "SELECT * FROM altshot_scores WHERE team_id = ?",
+        (team_id,))
+
+
+async def altshot_team_member_ids(db_path, team_id: str) -> list[str]:
+    """Registered (Discord) member ids on a team's roster."""
+    members = await _altshot_members(db_path, team_id)
+    return [m["discord_id"] for m in members if m["discord_id"]]
+
+
 async def get_altshot_records(db_path, course: str,
-                              team_size: int) -> list[dict]:
-    """Per-course, per-team-size record leaderboard: all submitted team
-    scores for that size, best first. No notifications are ever sent for
+                              team_size: int,
+                              tee_position: str | None = None,
+                              pin_position: str | None = None,
+                              wind_strength: str | None = None,
+                              green_speed: str | None = None) -> list[dict]:
+    """Per-course, per-team-size, per-setup record leaderboard: all submitted
+    team scores for that roster size whose tee time matches the given
+    setup variables, best first. No notifications are ever sent for
     records."""
-    team_size_expr = (
-        "(1 + (t.player2_name != '')"
-        " + (t.player3_name != '') + (t.player4_name != ''))")
+    clauses = ["tt.course = ?"]
+    params: list = [course]
+    for col, val in (("tt.tee_position", tee_position),
+                     ("tt.pin_position", pin_position),
+                     ("tt.wind_strength", wind_strength),
+                     ("tt.green_speed", green_speed)):
+        if val:
+            clauses.append(f"{col} = ?")
+            params.append(val)
+    clauses.append(
+        "(SELECT COUNT(*) FROM altshot_team_members m"
+        " WHERE m.team_id = t.id) = ?")
+    params.append(team_size)
     rows = await _fetchall(
         db_path,
         "SELECT s.*, t.player1_discord_id, t.team_name,"
-        " t.player2_name, t.player3_name, t.player4_name,"
         " tt.course, tt.pars, tt.label AS tt_label,"
         " tt.tee_position, tt.pin_position, tt.wind_strength,"
         " tt.green_speed"
         " FROM altshot_scores s"
         " JOIN altshot_teams t ON t.id = s.team_id"
         " JOIN altshot_tee_times tt ON tt.id = t.tee_time_id"
-        f" WHERE tt.course = ? AND {team_size_expr} = ?"
+        f" WHERE {' AND '.join(clauses)}"
         " ORDER BY s.total ASC, s.submitted_at ASC",
-        (course, team_size),
+        tuple(params),
     )
     records = []
     for r in rows:
-        player = await get_player(db_path, r["player1_discord_id"])
-        p1 = display_name_of(player, r["player1_discord_id"])
-        names = _altshot_player_names(p1, r)
+        members = await _altshot_members(db_path, r["team_id"])
+        names = await _altshot_member_names(db_path, members)
         team_name = (r["team_name"] or "").strip()
         try:
             pars = [int(x) for x in (r["pars"] or "").split(",") if x]
@@ -2572,6 +2807,8 @@ async def get_altshot_records(db_path, course: str,
             "team_name": team_name,
             "team_display": team_name if team_name else " & ".join(names),
             "player_names": names,
+            "holes": _json_list(r["holes"]),
+            "pars": [int(x) for x in (r["pars"] or "").split(",") if x],
             "tee_time_label": r["tt_label"],
             "tee_position": r["tee_position"],
             "pin_position": r["pin_position"],

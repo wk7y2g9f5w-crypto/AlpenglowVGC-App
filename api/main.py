@@ -228,6 +228,25 @@ async def fetch_admin_status(discord_id: str) -> bool | None:
     return privileged or bool(names & ADMIN_ROLE_NAMES)
 
 
+# Mods may manage submitted AltShot scorecards alongside admins, but
+# Tournament Directors may not.
+MOD_ADMIN_ROLE_NAMES = frozenset({"Tournament Admin", "Admin", "Mod"})
+
+
+async def fetch_mod_admin_status(discord_id: str) -> bool | None:
+    """Is this Discord user a mod or admin (owner / Manage Server / Admin /
+    Mod / Tournament Admin)? Tournament Directors do NOT pass.
+
+    Used for AltShot scorecard manipulation: editing, deleting, or
+    otherwise changing a submitted score.
+    """
+    standing = await _fetch_guild_standing(discord_id)
+    if standing is None:
+        return None
+    privileged, names = standing
+    return privileged or bool(names & MOD_ADMIN_ROLE_NAMES)
+
+
 async def require_crew(user: CurrentUser) -> dict:
     """Dependency: 403 unless the caller is crew, 503 when unverifiable."""
     ok = await fetch_crew_status(user["discord_id"])
@@ -1747,6 +1766,7 @@ class AltShotTeeTimeCreate(BaseModel):
     green_speed: str = "pro"
     starts_at: str = ""
     max_teams: int = 2
+    team_size: int | None = None
     notes: str = ""
 
     @field_validator("label", "course")
@@ -1796,6 +1816,16 @@ class AltShotTeeTimeCreate(BaseModel):
             raise ValueError("max_teams must be 1 or 2")
         return v
 
+    @model_validator(mode="after")
+    def _fixed_size(self):
+        if self.max_teams == 1:
+            if self.team_size not in (2, 3, 4):
+                raise ValueError(
+                    "team_size (2-4) is required for 1-team tee times")
+        elif self.team_size is not None:
+            raise ValueError("team_size only applies to 1-team tee times")
+        return self
+
 
 class AltShotTeeTimeUpdate(BaseModel):
     label: str | None = None
@@ -1806,6 +1836,7 @@ class AltShotTeeTimeUpdate(BaseModel):
     green_speed: str | None = None
     starts_at: str | None = None
     max_teams: int | None = None
+    team_size: int | None = None
     notes: str | None = None
 
     @field_validator("tee_position")
@@ -1855,19 +1886,22 @@ class AltShotTeeTimeUpdate(BaseModel):
             raise ValueError("max_teams must be 1 or 2")
         return v
 
+    @field_validator("team_size")
+    @classmethod
+    def _size(cls, v: int | None) -> int | None:
+        if v is not None and v not in (2, 3, 4):
+            raise ValueError("team_size must be 2, 3, or 4")
+        return v
+
 
 class AltShotJoin(BaseModel):
     team_name: str = ""
-    player2_name: str = ""
-    player3_name: str = ""
-    player4_name: str = ""
+    extra_names: list[str] = []
 
 
 class AltShotTeamUpdate(BaseModel):
     team_name: str | None = None
-    player2_name: str | None = None
-    player3_name: str | None = None
-    player4_name: str | None = None
+    extra_names: list[str] | None = None
 
 
 class AltShotScoreSubmit(BaseModel):
@@ -1891,13 +1925,14 @@ async def _altshot_team_or_404(tt_id: str, team_id: str) -> dict:
 
 
 async def _altshot_team_guard(team: dict, user: CurrentUser) -> None:
-    """Only the team's player-1 or crew may edit it / its score."""
-    if team["player1_discord_id"] == user["discord_id"]:
+    """Any roster member or crew may edit the team / its score."""
+    member_ids = await db.altshot_team_member_ids(DB_PATH, team["id"])
+    if user["discord_id"] in member_ids:
         return
     crew = await fetch_crew_status(user["discord_id"])
     if not crew:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail="Only the team owner or crew can do this.")
+                            detail="Only a team member or crew can do this.")
 
 
 @app.get("/api/altshot-tee-times")
@@ -1916,13 +1951,19 @@ async def create_altshot_tee_time(body: AltShotTeeTimeCreate,
             detail="Unknown course — pick one from the course list.",
         )
     pars = ",".join(str(x) for x in auto)
-    tt_id = await db.create_altshot_tee_time(
-        DB_PATH, user["discord_id"], body.label.strip(), body.course.strip(),
-        pars, tee_position=body.tee_position, pin_position=body.pin_position,
-        wind_strength=body.wind_strength, green_speed=body.green_speed,
-        starts_at=body.starts_at.strip(), max_teams=body.max_teams,
-        notes=body.notes.strip(),
-    )
+    try:
+        tt_id = await db.create_altshot_tee_time(
+            DB_PATH, user["discord_id"], body.label.strip(),
+            body.course.strip(), pars, tee_position=body.tee_position,
+            pin_position=body.pin_position, wind_strength=body.wind_strength,
+            green_speed=body.green_speed, starts_at=body.starts_at.strip(),
+            max_teams=body.max_teams, team_size=body.team_size,
+            notes=body.notes.strip(),
+        )
+    except db.AltShotError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="team_size (2-4) is required for 1-team tee times.")
     return await _altshot_or_404(tt_id)
 
 
@@ -1939,7 +1980,8 @@ async def update_altshot_tee_time(tt_id: str, body: AltShotTeeTimeUpdate,
     if tt["creator_discord_id"] != user["discord_id"] and not crew:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="Only the creator or crew can edit this.")
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()
+              if v is not None or k == "team_size"}
     if "course" in fields:
         auto = gc.course_pars(fields["course"].strip(), 18)
         if not auto:
@@ -1947,7 +1989,20 @@ async def update_altshot_tee_time(tt_id: str, body: AltShotTeeTimeUpdate,
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Unknown course — pick one from the course list.")
         fields["pars"] = ",".join(str(x) for x in auto)
-    return await db.update_altshot_tee_time(DB_PATH, tt_id, fields)
+    try:
+        return await db.update_altshot_tee_time(DB_PATH, tt_id, fields)
+    except db.AltShotError as e:
+        msg = str(e)
+        if msg == "bad_team_size":
+            detail = ("team_size (2-4) is required for 1-team tee times"
+                      " and not allowed for 2-team tee times.")
+        elif msg == "too_many":
+            detail = ("A team already has more players than that roster"
+                      " size.")
+        else:
+            detail = "Could not update this tee time."
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
 
 
 @app.delete("/api/altshot-tee-times/{tt_id}")
@@ -1964,17 +2019,19 @@ async def delete_altshot_tee_time(tt_id: str, user: CurrentUser) -> dict:
 @app.post("/api/altshot-tee-times/{tt_id}/join")
 async def join_altshot_tee_time(tt_id: str, body: AltShotJoin,
                                 user: CurrentUser) -> dict:
+    tt = await _altshot_or_404(tt_id)
     try:
         return await db.join_altshot_tee_time(
             DB_PATH, tt_id, user["discord_id"],
-            team_name=body.team_name, player2_name=body.player2_name,
-            player3_name=body.player3_name, player4_name=body.player4_name)
+            team_name=body.team_name, extra_names=body.extra_names)
     except db.AltShotError as e:
         if str(e) == "not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Alt-shot tee time not found.")
+        detail = ("This team is full." if tt.get("team_size")
+                  else "This tee time already has 2 teams.")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail="This tee time already has 2 teams.")
+                            detail=detail)
 
 
 @app.post("/api/altshot-tee-times/{tt_id}/leave")
@@ -1991,7 +2048,15 @@ async def update_altshot_team(tt_id: str, team_id: str,
     team = await _altshot_team_or_404(tt_id, team_id)
     await _altshot_team_guard(team, user)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    await db.update_altshot_team(DB_PATH, team_id, fields)
+    try:
+        await db.update_altshot_team(DB_PATH, team_id, fields)
+    except db.AltShotError as e:
+        if str(e) == "too_many":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="That would put more players on the team than the"
+                       " roster allows.")
+        raise
     tt = await _altshot_or_404(tt_id)
     for t in tt["teams"]:
         if t["id"] == team_id:
@@ -2005,7 +2070,22 @@ async def submit_altshot_score(tt_id: str, team_id: str,
                                body: AltShotScoreSubmit,
                                user: CurrentUser) -> dict:
     team = await _altshot_team_or_404(tt_id, team_id)
-    await _altshot_team_guard(team, user)
+    existing = await db.get_altshot_score(DB_PATH, team_id)
+    if existing is not None:
+        # Changing a submitted scorecard is mod/admin only —
+        # tournament directors and team members may not do it.
+        ok = await fetch_mod_admin_status(user["discord_id"])
+        if ok is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify mod/admin status —"
+                       " try again shortly.")
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only a mod or admin can change a submitted score.")
+    else:
+        await _altshot_team_guard(team, user)
     try:
         return await db.submit_altshot_score(DB_PATH, team_id, body.holes,
                                              user["discord_id"])
@@ -2019,6 +2099,13 @@ async def submit_altshot_score(tt_id: str, team_id: str,
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Add at least 2 players to the team before"
                        " submitting a record.")
+        if msg == "team_not_full":
+            tt = await _altshot_or_404(tt_id)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"This team needs a full roster of"
+                       f" {tt.get('team_size')} players before submitting"
+                       " a record.")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Enter 18 hole scores (1-20 each).")
@@ -2028,20 +2115,51 @@ async def submit_altshot_score(tt_id: str, team_id: str,
 async def delete_altshot_score(tt_id: str, team_id: str,
                                user: CurrentUser) -> dict:
     team = await _altshot_team_or_404(tt_id, team_id)
-    await _altshot_team_guard(team, user)
+    # Deleting a submitted scorecard is mod/admin only — tournament
+    # directors and team members may not do it.
+    ok = await fetch_mod_admin_status(user["discord_id"])
+    if ok is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify mod/admin status — try again shortly.")
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a mod or admin can delete a submitted score.")
     await db.delete_altshot_score(DB_PATH, team_id)
     return {"ok": True}
 
 
 @app.get("/api/altshot-records")
-async def altshot_records(course: str, team_size: int,
-                          user: CurrentUser) -> dict:
+async def altshot_records(user: CurrentUser, course: str, team_size: int,
+                          tee_position: str = "back",
+                          pin_position: str = "black",
+                          wind_strength: str = "moderate",
+                          green_speed: str = "pro") -> dict:
     if team_size not in (2, 3, 4):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="team_size must be 2, 3, or 4.")
-    records = await db.get_altshot_records(DB_PATH, course.strip(), team_size)
+    for name, val, ok in (
+            ("tee_position", tee_position, ("front", "middle", "back")),
+            ("pin_position", pin_position, ("black", "white", "red")),
+            ("wind_strength", wind_strength, ("low", "moderate", "severe")),
+            ("green_speed", green_speed, ("veryfast", "pro"))):
+        if (val or "").strip().lower() not in ok:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown {name} '{val}'.")
+    records = await db.get_altshot_records(
+        DB_PATH, course.strip(), team_size,
+        tee_position=tee_position.strip().lower(),
+        pin_position=pin_position.strip().lower(),
+        wind_strength=wind_strength.strip().lower(),
+        green_speed=green_speed.strip().lower())
     return {"course": course.strip(), "team_size": team_size,
+            "tee_position": tee_position.strip().lower(),
+            "pin_position": pin_position.strip().lower(),
+            "wind_strength": wind_strength.strip().lower(),
+            "green_speed": green_speed.strip().lower(),
             "records": records}
 
 
@@ -2210,7 +2328,8 @@ async def season_standings(user: CurrentUser) -> dict:
 # Player profile
 # --------------------------------------------------------------------------
 def _profile_json(row: dict, is_crew: bool = False,
-                  is_admin: bool = False) -> dict:
+                  is_admin: bool = False,
+                  can_manage_scores: bool = False) -> dict:
     return {
         "discord_id": row["discord_id"],
         "display_name": row["display_name"],
@@ -2218,6 +2337,7 @@ def _profile_json(row: dict, is_crew: bool = False,
         "timezone": row.get("timezone"),
         "is_crew": is_crew,
         "is_admin": is_admin,
+        "can_manage_scores": can_manage_scores,
     }
 
 
@@ -2225,7 +2345,9 @@ def _profile_json(row: dict, is_crew: bool = False,
 async def get_me(user: CurrentUser) -> dict:
     crew = await fetch_crew_status(user["discord_id"])
     admin = await fetch_admin_status(user["discord_id"])
-    return _profile_json(user, is_crew=bool(crew), is_admin=bool(admin))
+    mod_admin = await fetch_mod_admin_status(user["discord_id"])
+    return _profile_json(user, is_crew=bool(crew), is_admin=bool(admin),
+                         can_manage_scores=bool(mod_admin))
 
 
 @app.patch("/api/players/me")

@@ -458,15 +458,10 @@ class ApiClient {
   }
 
   Future<AltShotTeeTime> joinAltShotTeeTime(String id,
-      {String teamName = '',
-      String player2Name = '',
-      String player3Name = '',
-      String player4Name = ''}) async {
+      {String teamName = '', List<String> extraNames = const []}) async {
     final body = await _post('/api/altshot-tee-times/$id/join', {
       'team_name': teamName,
-      'player2_name': player2Name,
-      'player3_name': player3Name,
-      'player4_name': player4Name,
+      'extra_names': extraNames,
     });
     return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
   }
@@ -477,7 +472,7 @@ class ApiClient {
   }
 
   Future<AltShotTeam> updateAltShotTeam(
-      String ttId, String teamId, Map<String, String> payload) async {
+      String ttId, String teamId, Map<String, dynamic> payload) async {
     final body = await _patch(
         '/api/altshot-tee-times/$ttId/teams/$teamId', payload);
     return AltShotTeam.fromJson(body as Map<String, dynamic>);
@@ -494,10 +489,19 @@ class ApiClient {
     await _delete('/api/altshot-tee-times/$ttId/teams/$teamId/score');
   }
 
-  Future<List<AltShotRecord>> getAltShotRecords(
-      String course, int teamSize) async {
-    final body = await _get('/api/altshot-records',
-        {'course': course, 'team_size': teamSize.toString()});
+  Future<List<AltShotRecord>> getAltShotRecords(String course, int teamSize,
+      {String teePosition = 'back',
+      String pinPosition = 'black',
+      String windStrength = 'moderate',
+      String greenSpeed = 'pro'}) async {
+    final body = await _get('/api/altshot-records', {
+      'course': course,
+      'team_size': teamSize.toString(),
+      'tee_position': teePosition,
+      'pin_position': pinPosition,
+      'wind_strength': windStrength,
+      'green_speed': greenSpeed,
+    });
     final items = (body as Map<String, dynamic>)['records'] as List;
     return items
         .map((e) => AltShotRecord.fromJson(e as Map<String, dynamic>))

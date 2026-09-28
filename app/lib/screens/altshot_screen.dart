@@ -6,6 +6,7 @@ import '../services/auth.dart';
 import '../widgets/common.dart';
 import 'altshot_detail_screen.dart';
 import 'altshot_form_screen.dart';
+import 'altshot_record_card_screen.dart';
 
 /// AltShot Records: team alternate-shot tee times plus a per-course record
 /// leaderboard. Tee times hold 1-2 teams; scores are submitted once per team
@@ -187,9 +188,18 @@ class _AltShotRecordsView extends StatefulWidget {
 }
 
 class _AltShotRecordsViewState extends State<_AltShotRecordsView> {
+  static const _tees = {'front': 'Front', 'middle': 'Middle', 'back': 'Back'};
+  static const _pins = {'black': 'Black', 'white': 'White', 'red': 'Red'};
+  static const _winds = {'low': 'Low', 'moderate': 'Moderate', 'severe': 'Severe'};
+  static const _greens = {'veryfast': 'Very Fast', 'pro': 'Pro'};
+
   List<GolfCourse> _courses = [];
   GolfCourse? _course;
   int _teamSize = 2;
+  String _tee = 'back';
+  String _pin = 'black';
+  String _wind = 'moderate';
+  String _greenSpeed = 'pro';
   Future<List<AltShotRecord>>? _future;
   bool _loading = true;
 
@@ -221,7 +231,11 @@ class _AltShotRecordsViewState extends State<_AltShotRecordsView> {
     setState(() {
       _future = _course == null
           ? null
-          : _api.getAltShotRecords(_course!.name, _teamSize);
+          : _api.getAltShotRecords(_course!.name, _teamSize,
+              teePosition: _tee,
+              pinPosition: _pin,
+              windStrength: _wind,
+              greenSpeed: _greenSpeed);
     });
   }
 
@@ -233,6 +247,34 @@ class _AltShotRecordsViewState extends State<_AltShotRecordsView> {
   void _pickSize(int s) {
     _teamSize = s;
     _reload();
+  }
+
+  Widget _filter(String label, String value, Map<String, String> options,
+      ValueChanged<String> onChanged) {
+    return Expanded(
+      child: DropdownButtonFormField<String>(
+        initialValue: value,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+          isDense: true,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        ),
+        items: options.entries
+            .map((e) => DropdownMenuItem(
+                value: e.key,
+                child: Text(e.value,
+                    style: const TextStyle(fontSize: 13))))
+            .toList(),
+        onChanged: (v) {
+          if (v != null) {
+            onChanged(v);
+            _reload();
+          }
+        },
+      ),
+    );
   }
 
   @override
@@ -274,6 +316,28 @@ class _AltShotRecordsViewState extends State<_AltShotRecordsView> {
             ],
           ),
         ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              _filter('Tees', _tee, _tees, (v) => _tee = v),
+              const SizedBox(width: 8),
+              _filter('Pins', _pin, _pins, (v) => _pin = v),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          child: Row(
+            children: [
+              _filter('Wind', _wind, _winds, (v) => _wind = v),
+              const SizedBox(width: 8),
+              _filter('Greens', _greenSpeed, _greens,
+                  (v) => _greenSpeed = v),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
         Expanded(
           child: _course == null
               ? const Center(
@@ -282,7 +346,11 @@ class _AltShotRecordsViewState extends State<_AltShotRecordsView> {
                   future: _future!,
                   onRefresh: () async {
                     final f = _api.getAltShotRecords(
-                        _course!.name, _teamSize);
+                        _course!.name, _teamSize,
+                        teePosition: _tee,
+                        pinPosition: _pin,
+                        windStrength: _wind,
+                        greenSpeed: _greenSpeed);
                     setState(() => _future = f);
                     await f;
                   },
@@ -310,6 +378,12 @@ class _AltShotRecordsViewState extends State<_AltShotRecordsView> {
                           margin: const EdgeInsets.symmetric(
                               horizontal: 12, vertical: 6),
                           child: ListTile(
+                            onTap: () => Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) =>
+                                    AltShotRecordCardScreen(record: r),
+                              ),
+                            ),
                             leading: CircleAvatar(
                               backgroundColor: i == 0
                                   ? Colors.amber

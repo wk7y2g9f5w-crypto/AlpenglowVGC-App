@@ -4,6 +4,24 @@
 /// Field names mirror the FastAPI backend's JSON keys. Nullable where the
 /// backend may omit them.
 
+/// Parse hole scores/pars from the API: either a JSON list of ints or a
+/// comma-separated string. Tolerant of whitespace and missing values.
+List<int> _csvInts(dynamic v) {
+  if (v == null) return const [];
+  if (v is List) {
+    return v
+        .map((e) => e is int ? e : int.tryParse(e.toString().trim()))
+        .whereType<int>()
+        .toList();
+  }
+  return v
+      .toString()
+      .split(',')
+      .map((s) => int.tryParse(s.trim()))
+      .whereType<int>()
+      .toList();
+}
+
 /// One round of a multi-round tournament: same course as the tournament,
 /// with its own tee/pin/wind settings. Green speed is tournament-wide.
 class TournamentRound {
@@ -316,6 +334,7 @@ class PlayerMe {
   final String? timezone;
   final bool isCrew;
   final bool isAdmin;
+  final bool canManageScores;
 
   PlayerMe({
     required this.discordId,
@@ -324,6 +343,7 @@ class PlayerMe {
     this.timezone,
     this.isCrew = false,
     this.isAdmin = false,
+    this.canManageScores = false,
   });
 
   factory PlayerMe.fromJson(Map<String, dynamic> j) => PlayerMe(
@@ -333,6 +353,7 @@ class PlayerMe {
         timezone: j['timezone']?.toString(),
         isCrew: j['is_crew'] == true,
         isAdmin: j['is_admin'] == true,
+        canManageScores: j['can_manage_scores'] == true,
       );
 }
 
@@ -459,6 +480,7 @@ class AltShotTeam {
   final String player1Name;
   final String teamName;
   final List<String> playerNames;
+  final List<String> memberDiscordIds;
   final int teamSize;
   final String displayName;
   final AltShotScore? score;
@@ -469,6 +491,7 @@ class AltShotTeam {
     required this.player1Name,
     required this.teamName,
     required this.playerNames,
+    required this.memberDiscordIds,
     required this.teamSize,
     required this.displayName,
     this.score,
@@ -482,6 +505,9 @@ class AltShotTeam {
         playerNames: ((j['player_names'] as List?) ?? [])
             .map((e) => e.toString())
             .toList(),
+        memberDiscordIds: ((j['member_discord_ids'] as List?) ?? [])
+            .map((e) => e.toString())
+            .toList(),
         teamSize: (j['team_size'] as num?)?.toInt() ?? 1,
         displayName: (j['display_name'] ?? '').toString(),
         score: j['score'] == null
@@ -491,6 +517,8 @@ class AltShotTeam {
 
   /// A team needs at least 2 players to submit a score to the records.
   bool get canSubmit => teamSize >= 2;
+
+  bool isMember(String discordId) => memberDiscordIds.contains(discordId);
 
   /// Subtitle line: every player on the team.
   String get playersLine => playerNames.join(' · ');
@@ -508,6 +536,7 @@ class AltShotTeeTime {
   final String greenSpeed;
   final String startsAt;
   final int maxTeams;
+  final int? teamSize;
   final String notes;
   final List<AltShotTeam> teams;
 
@@ -523,6 +552,7 @@ class AltShotTeeTime {
     required this.greenSpeed,
     required this.startsAt,
     required this.maxTeams,
+    this.teamSize,
     required this.notes,
     required this.teams,
   });
@@ -541,17 +571,23 @@ class AltShotTeeTime {
         greenSpeed: (j['green_speed'] ?? 'pro').toString(),
         startsAt: (j['starts_at'] ?? '').toString(),
         maxTeams: (j['max_teams'] as num?)?.toInt() ?? 2,
+        teamSize: (j['team_size'] as num?)?.toInt(),
         notes: (j['notes'] ?? '').toString(),
         teams: ((j['teams'] as List?) ?? [])
             .map((e) => AltShotTeam.fromJson(e as Map<String, dynamic>))
             .toList(),
       );
 
-  bool get isFull => teams.length >= maxTeams;
+  bool get isFull => isFixedRoster
+      ? teams.isNotEmpty && teams.first.teamSize >= (teamSize ?? 99)
+      : teams.length >= maxTeams;
+
+  /// Fixed-roster 1-team tee times: the single team has a set roster size.
+  bool get isFixedRoster => teamSize != null;
 
   AltShotTeam? myTeam(String discordId) {
     for (final t in teams) {
-      if (t.player1DiscordId == discordId) return t;
+      if (t.memberDiscordIds.contains(discordId)) return t;
     }
     return null;
   }
@@ -574,6 +610,8 @@ class AltShotRecord {
   final int teamSize;
   final int total;
   final int? toPar;
+  final List<int> holes;
+  final List<int> pars;
   final String teeTimeLabel;
   final String teePosition;
   final String pinPosition;
@@ -588,6 +626,8 @@ class AltShotRecord {
     required this.teamSize,
     required this.total,
     this.toPar,
+    required this.holes,
+    required this.pars,
     required this.teeTimeLabel,
     required this.teePosition,
     required this.pinPosition,
@@ -605,6 +645,8 @@ class AltShotRecord {
         teamSize: (j['team_size'] as num?)?.toInt() ?? 2,
         total: (j['total'] as num).toInt(),
         toPar: (j['to_par'] as num?)?.toInt(),
+        holes: _csvInts(j['holes']),
+        pars: _csvInts(j['pars']),
         teeTimeLabel: (j['tee_time_label'] ?? '').toString(),
         teePosition: (j['tee_position'] ?? '').toString(),
         pinPosition: (j['pin_position'] ?? '').toString(),
