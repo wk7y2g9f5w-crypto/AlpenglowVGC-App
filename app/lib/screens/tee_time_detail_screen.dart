@@ -150,20 +150,29 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       icon: const Icon(Icons.remove),
                       label: const Text('Leave'),
                     ),
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => ScoreEntryScreen(
-                          auth: widget.auth,
-                          settings: widget.settings,
-                          tournament: widget.tournament,
-                          teeTime: tt,
-                        ),
-                      ));
-                    },
-                    icon: const Icon(Icons.scoreboard),
-                    label: const Text('Enter scores'),
-                  ),
+                  if (inIt)
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => ScoreEntryScreen(
+                            auth: widget.auth,
+                            settings: widget.settings,
+                            tournament: widget.tournament,
+                            teeTime: tt,
+                          ),
+                        ));
+                      },
+                      icon: const Icon(Icons.scoreboard),
+                      label: const Text('Enter scores'),
+                    ),
+                  if (!inIt)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text(
+                        'Join this tee time to enter scores.',
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
+                    ),
                 ],
               ),
               if (isCreator && pending.isNotEmpty) ...[

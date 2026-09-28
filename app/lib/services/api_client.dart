@@ -30,6 +30,10 @@ String friendlyApiMessage(ApiException e) {
       return 'Scores can only be entered after the tee time.';
     case 'already_registered':
       return 'You are already registered.';
+    case 'not_in_tee_time':
+      return "You're not in this tee time — join it first, then enter scores.";
+    case 'player_not_in_tee_time':
+      return "That player isn't in this tee time.";
     default:
       return e.message;
   }
