@@ -1779,25 +1779,22 @@ class AltShotApiTestCase(ApiTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(len(r.json()["tee_times"]), 1)
 
-    def test_create_with_team_names(self):
+    def test_create_ignores_team_names(self):
+        # No team names in alt-shot: name fields are ignored (not 422),
+        # no team_name key is returned, and displays are structural.
         tt = self._create_tt(team1_name="Eagles", team2_name="Falcons")
         teams = self._teams_by_number(tt)
-        self.assertEqual(teams[1]["team_name"], "Eagles")
-        self.assertEqual(teams[1]["display_name"], "Eagles")
-        # Team 2 may be named while still empty.
-        self.assertEqual(teams[2]["team_name"], "Falcons")
-        self.assertEqual(teams[2]["display_name"], "Falcons")
+        self.assertNotIn("team_name", teams[1])
+        self.assertNotIn("team_name", teams[2])
+        self.assertEqual(teams[1]["display_name"], "Team 1")
+        self.assertEqual(teams[2]["display_name"], "Team 2")
         self.assertEqual(teams[2]["member_discord_ids"], [])
-        # A conflicting name fails the whole create: nothing is left
-        # behind.
-        r = self.client.post(
-            "/api/altshot-tee-times", headers=self.h("3"),
-            json={"label": "x", "course": "Pebble Beach Golf Links",
-                  "starts_at": "2030-10-03T14:00:00Z",
-                  "team2_name": "eagles"})
-        self.assertEqual(r.status_code, 409, r.text)
+        # The same "name" on another tee time is fine — nothing is
+        # claimed.
+        tt2 = self._create_tt(uid="3", team1_name="Eagles")
+        self.assertNotIn("team_name", self._teams_by_number(tt2)[1])
         r = self.client.get("/api/altshot-tee-times", headers=self.h("3"))
-        self.assertEqual(len(r.json()["tee_times"]), 1)
+        self.assertEqual(len(r.json()["tee_times"]), 2)
 
     def test_create_bad_course_422(self):
         r = self.client.post("/api/altshot-tee-times", headers=self.h("1"),
@@ -1904,23 +1901,17 @@ class AltShotApiTestCase(ApiTestCase):
     def _team_url(self, tt_id, team_id, suffix=""):
         return (f"/api/altshot-tee-times/{tt_id}/teams/{team_id}" + suffix)
 
-    def test_update_team_names_and_display(self):
+    def test_update_ignores_team_names(self):
         tt = self._create_tt()
         team = self._teams_by_number(tt)[1]
-        # The organizer renames team 1.
+        # Team names are ignored: the display stays structural.
         r = self.client.patch(self._team_url(tt["id"], team["id"]),
                               headers=self.h("1"),
                               json={"team_name": "The Eagles"})
         self.assertEqual(r.status_code, 200, r.text)
         t = self._teams_by_number(r.json())[1]
-        self.assertEqual(t["team_name"], "The Eagles")
-        self.assertEqual(t["display_name"], "The Eagles")
-        # Blank name: falls back to "Team N".
-        r = self.client.patch(self._team_url(tt["id"], team["id"]),
-                              headers=self.h("1"), json={"team_name": ""})
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(
-            self._teams_by_number(r.json())[1]["display_name"], "Team 1")
+        self.assertNotIn("team_name", t)
+        self.assertEqual(t["display_name"], "Team 1")
         # Typed-in guest names are rejected on fixed 2-team tee times.
         r = self.client.patch(self._team_url(tt["id"], team["id"]),
                               headers=self.h("1"),
@@ -1929,26 +1920,8 @@ class AltShotApiTestCase(ApiTestCase):
         # A stranger may not edit teams.
         r = self.client.patch(self._team_url(tt["id"], team["id"]),
                               headers=self.h("9"),
-                              json={"team_name": "Hijacked"})
+                              json={"move_discord_id": "1"})
         self.assertEqual(r.status_code, 403, r.text)
-
-    def test_rename_to_locked_name_409(self):
-        tt = self._create_tt(team1_name="Eagles")
-        self._fill_two_team(tt, 2, ["1", "2", "3", "4"])  # locks {1, 2}
-        tt2 = self._create_tt(uid="5")
-        team2 = self._teams_by_number(tt2)[1]
-        r = self.client.patch(self._team_url(tt2["id"], team2["id"]),
-                              headers=self.h("5"),
-                              json={"team_name": "eagles"})
-        self.assertEqual(r.status_code, 409, r.text)
-        self.assertIn("belongs to another crew", r.json()["detail"])
-        # An original crew member may reuse it as a subset elsewhere.
-        tt3 = self._create_tt(uid="2")
-        team3 = self._teams_by_number(tt3)[1]
-        r = self.client.patch(self._team_url(tt3["id"], team3["id"]),
-                              headers=self.h("2"),
-                              json={"team_name": "Eagles"})
-        self.assertEqual(r.status_code, 200, r.text)
 
     def test_switch_team_before_scoring(self):
         tt = self._create_tt()
@@ -2035,13 +2008,6 @@ class AltShotApiTestCase(ApiTestCase):
                               headers=self.h("1"),
                               json={"remove_discord_id": "3"})
         self.assertEqual(r.status_code, 409, r.text)
-        # ...but renaming still works.
-        r = self.client.patch(self._team_url(tt["id"], t1["id"]),
-                              headers=self.h("1"),
-                              json={"team_name": "Champs"})
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(
-            self._teams_by_number(r.json())[1]["team_name"], "Champs")
 
     def test_submit_needs_both_teams_full(self):
         tt = self._create_tt()
@@ -2122,14 +2088,9 @@ class AltShotApiTestCase(ApiTestCase):
                              headers=self.h("1"),
                              json={"holes": [4] * 18})
         self.assertEqual(r.status_code, 403, r.text)
-        # A roster member (not just the creator) can edit the team name,
-        # but re-submitting a score is mod/admin only.
+        # Re-submitting a score is mod/admin only.
         self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
                          headers=self.h("2"), json={})
-        r = self.client.patch(self._team_url(tt["id"], team["id"]),
-                              headers=self.h("2"),
-                              json={"team_name": "Duo"})
-        self.assertEqual(r.status_code, 200, r.text)
         r = self.client.post(self._team_url(tt["id"], team["id"], "/score"),
                              headers=self.h("2"),
                              json={"holes": [3] * 18})
@@ -2167,10 +2128,6 @@ class AltShotApiTestCase(ApiTestCase):
                              wind_strength="moderate", green_speed="pro")
         tt = self._fill_two_team(tt, 2, ["1", "2", "3", "4"])
         teams = self._teams_by_number(tt)
-        r = self.client.patch(self._team_url(tt["id"], teams[1]["id"]),
-                              headers=self.h("1"),
-                              json={"team_name": "Big Squad"})
-        self.assertEqual(r.status_code, 200, r.text)
         r = self.client.post(self._team_url(tt["id"], teams[1]["id"],
                                              "/score"),
                              headers=self.h("1"), json={"holes": [3] * 18})
@@ -2197,7 +2154,8 @@ class AltShotApiTestCase(ApiTestCase):
         self.assertEqual(recs[0]["total"], 54)
         self.assertEqual(recs[0]["to_par"], -18)
         self.assertEqual(recs[0]["team_size"], 2)
-        self.assertEqual(recs[0]["team_display"], "Big Squad")
+        self.assertEqual(recs[0]["team_display"], "User1 & User2")
+        self.assertNotIn("team_name", recs[0])
         # Read-only scorecard data ships with each record.
         self.assertEqual(recs[0]["holes"], [3] * 18)
         self.assertEqual(len(recs[0]["pars"]), 18)
@@ -2358,10 +2316,9 @@ class AltShotRecordsSummaryApiTestCase(ApiTestCase):
     def _team(self, tt, number):
         return next(t for t in tt["teams"] if t["team_number"] == number)
 
-    def _fill_and_score(self, course, team_size, holes, uids, team_name="",
-                        **setup):
+    def _fill_and_score(self, course, team_size, holes, uids, **setup):
         """Create a fixed 2-team tee time, fill both teams with registered
-        players, optionally name team 1, and submit team 1's score."""
+        players, and submit team 1's score."""
         tt = self._create_tt(uids[0], course=course, team_size=team_size,
                              **setup)
         t1, t2 = self._team(tt, 1), self._team(tt, 2)
@@ -2374,11 +2331,6 @@ class AltShotRecordsSummaryApiTestCase(ApiTestCase):
             r = self.client.post(
                 f"/api/altshot-tee-times/{tt['id']}/join",
                 headers=self.h(uid), json={"team_id": t2["id"]})
-            self.assertEqual(r.status_code, 200, r.text)
-        if team_name:
-            r = self.client.patch(
-                f"/api/altshot-tee-times/{tt['id']}/teams/{t1['id']}",
-                headers=self.h(uids[0]), json={"team_name": team_name})
             self.assertEqual(r.status_code, 200, r.text)
         r = self.client.post(
             f"/api/altshot-tee-times/{tt['id']}/teams/{t1['id']}/score",
@@ -2408,7 +2360,7 @@ class AltShotRecordsSummaryApiTestCase(ApiTestCase):
 
     def test_summary_best_per_course(self):
         self._fill_and_score("Pebble Beach Golf Links", 2, [4] * 18,
-                             ["1", "2", "3", "4"], team_name="Aces")
+                             ["1", "2", "3", "4"])
         self._fill_and_score("TPC Sawgrass", 2, [5] * 18,
                              ["5", "6", "7", "8"])
         recs = self._summary(team_size=2)["records"]
@@ -2416,7 +2368,8 @@ class AltShotRecordsSummaryApiTestCase(ApiTestCase):
                                      "TPC Sawgrass"})
         peb = recs["Pebble Beach Golf Links"]
         self.assertEqual(peb["total"], 72)
-        self.assertEqual(peb["team_display"], "Aces")
+        self.assertEqual(peb["team_display"], "User1 & User2")
+        self.assertNotIn("team_name", peb)
         self.assertEqual(peb["to_par"], 72 - self._par_total(
             "Pebble Beach Golf Links"))
         saw = recs["TPC Sawgrass"]
@@ -2429,11 +2382,11 @@ class AltShotRecordsSummaryApiTestCase(ApiTestCase):
         self._fill_and_score("Pebble Beach Golf Links", 2, [5] * 18,
                              ["1", "2", "3", "4"])
         self._fill_and_score("Pebble Beach Golf Links", 2, [4] * 18,
-                             ["5", "6", "7", "8"], team_name="Aces")
+                             ["5", "6", "7", "8"])
         recs = self._summary(team_size=2)["records"]
         self.assertEqual(recs["Pebble Beach Golf Links"]["total"], 72)
         self.assertEqual(recs["Pebble Beach Golf Links"]["team_display"],
-                         "Aces")
+                         "User5 & User6")
 
     def test_summary_filters_by_team_size_and_setup(self):
         self._fill_and_score("Pebble Beach Golf Links", 2, [4] * 18,

@@ -1927,9 +1927,8 @@ class AltShotTeeTimeCreate(BaseModel):
     starts_at: str = Field(default="", validate_default=True)
     max_teams: int = 2
     team_size: int = 2
-    team1_name: str = ""
-    team2_name: str = ""
     notes: str = ""
+    # No team names in alt-shot: teams are identified by their players.
 
     @field_validator("label", "course")
     @classmethod
@@ -2070,9 +2069,9 @@ class AltShotTeeTimeUpdate(BaseModel):
 
 
 class AltShotJoin(BaseModel):
-    team_name: str = ""
     extra_names: list[str] = []
     team_id: str | None = None
+    # No team names in alt-shot: teams are identified by their players.
 
 
 class AltShotSwitch(BaseModel):
@@ -2080,10 +2079,10 @@ class AltShotSwitch(BaseModel):
 
 
 class AltShotTeamUpdate(BaseModel):
-    team_name: str | None = None
     extra_names: list[str] | None = None
     move_discord_id: str | None = None
     remove_discord_id: str | None = None
+    # No team names in alt-shot: teams are identified by their players.
 
 
 class AltShotScoreSubmit(BaseModel):
@@ -2140,13 +2139,8 @@ async def create_altshot_tee_time(body: AltShotTeeTimeCreate,
             pin_position=body.pin_position, wind_strength=body.wind_strength,
             green_speed=body.green_speed, starts_at=body.starts_at.strip(),
             max_teams=body.max_teams, team_size=body.team_size,
-            team1_name=body.team1_name.strip(),
-            team2_name=body.team2_name.strip(),
             notes=body.notes.strip(),
         )
-    except db.TeamNameError as e:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except db.AltShotError:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -2209,11 +2203,8 @@ async def join_altshot_tee_time(tt_id: str, body: AltShotJoin,
     try:
         return await db.join_altshot_tee_time(
             DB_PATH, tt_id, user["discord_id"],
-            team_name=body.team_name, extra_names=body.extra_names,
+            extra_names=body.extra_names,
             team_id=body.team_id)
-    except db.TeamNameError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=str(e))
     except db.AltShotError as e:
         msg = str(e)
         if msg == "not_found":
@@ -2242,9 +2233,6 @@ async def switch_altshot_team(tt_id: str, body: AltShotSwitch,
     try:
         return await db.switch_altshot_team(
             DB_PATH, tt_id, user["discord_id"], body.team_id)
-    except db.TeamNameError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=str(e))
     except db.AltShotError as e:
         msg = str(e)
         if msg == "not_found":
@@ -2273,7 +2261,7 @@ async def update_altshot_team(tt_id: str, team_id: str,
     tt = await _altshot_or_404(tt_id)
     if tt.get("max_teams") == 2 and tt.get("team_size"):
         # Fixed two teams: only the organizer or crew may edit teams
-        # (rename, move a player, remove a player). Returns the full tee
+        # (move a player, remove a player). Returns the full tee
         # time since moves affect both teams.
         crew = await fetch_crew_status(user["discord_id"])
         if tt["creator_discord_id"] != user["discord_id"] and not crew:
@@ -2289,12 +2277,8 @@ async def update_altshot_team(tt_id: str, team_id: str,
         try:
             return await db.manage_altshot_team(
                 DB_PATH, tt_id, team_id,
-                team_name=body.team_name,
                 move_discord_id=body.move_discord_id,
                 remove_discord_id=body.remove_discord_id)
-        except db.TeamNameError as e:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                                detail=str(e))
         except db.AltShotError as e:
             msg = str(e)
             if msg == "not_found":
@@ -2316,9 +2300,6 @@ async def update_altshot_team(tt_id: str, team_id: str,
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
         await db.update_altshot_team(DB_PATH, team_id, fields)
-    except db.TeamNameError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=str(e))
     except db.AltShotError as e:
         if str(e) == "too_many":
             raise HTTPException(
@@ -2587,9 +2568,6 @@ async def join_matchplay_tee_time(tt_id: str, body: MatchPlayJoin,
     try:
         return await db.join_matchplay_tee_time(
             DB_PATH, tt_id, user["discord_id"], body.side_number)
-    except db.TeamNameError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=str(e))
     except db.MatchPlayError as e:
         msg = str(e)
         if msg == "not_found":

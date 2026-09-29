@@ -134,7 +134,6 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
 
   /// Legacy flexible 2-team join: the caller starts their own team.
   Future<void> _joinLegacy(_Detail d) async {
-    final nameCtrl = TextEditingController();
     final extraCtrls = List.generate(3, (_) => TextEditingController());
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -144,16 +143,6 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Team name (optional)',
-                  helperText: 'Leave blank and Golf+ usernames will show'
-                      ' on the leaderboard.',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 8),
               for (var i = 0; i < extraCtrls.length; i++) ...[
                 TextField(
                   controller: extraCtrls[i],
@@ -182,7 +171,6 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
               child: const Text('Cancel')),
           ElevatedButton(
               onPressed: () => Navigator.of(ctx).pop({
-                    'team_name': nameCtrl.text.trim(),
                     'extra_names': extraCtrls
                         .map((c) => c.text.trim())
                         .where((s) => s.isNotEmpty)
@@ -198,7 +186,6 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
           d,
           await _api.joinAltShotTeeTime(
             d.tt.id,
-            teamName: (result['team_name'] as String?) ?? '',
             extraNames:
                 (result['extra_names'] as List?)?.cast<String>() ?? [],
           ));
@@ -223,13 +210,12 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
     }
   }
 
-  /// 1-team / legacy edit dialog: team name plus text-name players
+  /// 1-team / legacy edit dialog: text-name players
   /// (teammates not in the app). Registered members are fixed.
   Future<void> _editTeamLegacy(_Detail d, AltShotTeam team) async {
     final registeredCount = team.memberDiscordIds.length;
     final cap = d.tt.isOneTeam ? (d.tt.teamSize ?? 4) : 4;
     final maxExtras = (cap - registeredCount).clamp(0, 4);
-    final nameCtrl = TextEditingController(text: team.teamName);
     final currentExtras = team.playerNames
         .sublist(registeredCount.clamp(0, team.playerNames.length));
     final extraCtrls =
@@ -246,16 +232,6 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                TextField(
-                  controller: nameCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Team name (optional)',
-                    helperText: 'Leave blank and Golf+ usernames will show'
-                        ' on the leaderboard.',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
                 if (registeredCount > 0)
                   Align(
                     alignment: Alignment.centerLeft,
@@ -301,7 +277,6 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
                 child: const Text('Cancel')),
             ElevatedButton(
                 onPressed: () => Navigator.of(ctx).pop({
-                      'team_name': nameCtrl.text.trim(),
                       'extra_names': extraCtrls
                           .map((c) => c.text.trim())
                           .where((s) => s.isNotEmpty)
@@ -314,7 +289,6 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
     if (result == null) return;
     try {
       await _api.updateAltShotTeam(d.tt.id, team.id, {
-        'team_name': (result['team_name'] as String?) ?? '',
         'extra_names': (result['extra_names'] as List?) ?? [],
       });
       if (mounted) _refresh();
@@ -323,15 +297,14 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
     }
   }
 
-  /// Fixed 2-team manage dialog (organizer/crew): rename the team, move a
-  /// player to the other team, or remove a player. Moves and removals are
-  /// blocked once any score is submitted.
+  /// Fixed 2-team manage dialog (organizer/crew): move a player to the
+  /// other team, or remove a player. Moves and removals are blocked once
+  /// any score is submitted.
   Future<void> _manageTeam(_Detail d, AltShotTeam team) async {
     final tt = d.tt;
     final other =
         tt.teams.firstWhere((t) => t.id != team.id, orElse: () => team);
     final locked = tt.anyScoreSubmitted;
-    final nameCtrl = TextEditingController(text: team.teamName);
 
     await showDialog<void>(
       context: context,
@@ -342,16 +315,6 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                TextField(
-                  controller: nameCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Team name (optional)',
-                    helperText: 'Leave blank and Golf+ usernames will show'
-                        ' on the leaderboard.',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
                 const Text('Players',
                     style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(height: 4),
@@ -430,21 +393,7 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
           actions: [
             TextButton(
                 onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text('Cancel')),
-            ElevatedButton(
-                onPressed: () async {
-                  Navigator.of(ctx).pop();
-                  try {
-                    _applyTeeTime(
-                        d,
-                        await _api.manageAltShotTeam(tt.id, team.id, {
-                          'team_name': nameCtrl.text.trim(),
-                        }));
-                  } on ApiException catch (e) {
-                    if (mounted) showSnack(context, e.message, error: true);
-                  }
-                },
-                child: const Text('Save')),
+                child: const Text('Done')),
           ],
         ),
       );
@@ -616,7 +565,7 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
                           '${fixed2 ? ' (${team.teamSize}/$size)' : ''}',
                           style:
                               const TextStyle(fontWeight: FontWeight.bold)),
-                      if (team.teamName.isNotEmpty)
+                      if (team.playersLine.isNotEmpty)
                         Text(team.playersLine,
                             style: const TextStyle(
                                 fontSize: 12, color: Colors.grey)),

@@ -688,7 +688,6 @@ class AltShotTeam {
   final String id;
   final String player1DiscordId;
   final String player1Name;
-  final String teamName;
   final List<String> playerNames;
   final List<String> memberDiscordIds;
   final int teamSize;
@@ -700,7 +699,6 @@ class AltShotTeam {
     required this.id,
     required this.player1DiscordId,
     required this.player1Name,
-    required this.teamName,
     required this.playerNames,
     required this.memberDiscordIds,
     required this.teamSize,
@@ -713,7 +711,6 @@ class AltShotTeam {
         id: j['id'].toString(),
         player1DiscordId: (j['player1_discord_id'] ?? '').toString(),
         player1Name: (j['player1_name'] ?? '').toString(),
-        teamName: (j['team_name'] ?? '').toString(),
         playerNames: ((j['player_names'] as List?) ?? [])
             .map((e) => e.toString())
             .toList(),
@@ -858,7 +855,6 @@ class AltShotTeeTime {
 
 class AltShotRecord {
   final String teamDisplay;
-  final String teamName;
   final List<String> playerNames;
   final int teamSize;
   final int total;
@@ -874,7 +870,6 @@ class AltShotRecord {
 
   AltShotRecord({
     required this.teamDisplay,
-    required this.teamName,
     required this.playerNames,
     required this.teamSize,
     required this.total,
@@ -891,7 +886,6 @@ class AltShotRecord {
 
   factory AltShotRecord.fromJson(Map<String, dynamic> j) => AltShotRecord(
         teamDisplay: (j['team_display'] ?? '').toString(),
-        teamName: (j['team_name'] ?? '').toString(),
         playerNames: ((j['player_names'] as List?) ?? [])
             .map((e) => e.toString())
             .toList(),

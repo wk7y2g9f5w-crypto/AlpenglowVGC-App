@@ -36,8 +36,6 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
 
   late final TextEditingController _label;
   late final TextEditingController _notes;
-  late final TextEditingController _team1Name;
-  late final TextEditingController _team2Name;
   List<GolfCourse> _courses = [];
   GolfCourse? _course;
   Map<String, AltShotCourseRecord> _records = {};
@@ -61,8 +59,6 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
     final e = widget.existing;
     _label = TextEditingController(text: e?.label ?? '');
     _notes = TextEditingController(text: e?.notes ?? '');
-    _team1Name = TextEditingController();
-    _team2Name = TextEditingController();
     _tee = e?.teePosition ?? 'back';
     _pin = e?.pinPosition ?? 'black';
     _wind = e?.windStrength ?? 'moderate';
@@ -121,8 +117,6 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
   void dispose() {
     _label.dispose();
     _notes.dispose();
-    _team1Name.dispose();
-    _team2Name.dispose();
     super.dispose();
   }
 
@@ -175,8 +169,6 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
       };
       if (widget.existing == null) {
         if (_maxTeams == 2) {
-          payload['team1_name'] = _team1Name.text.trim();
-          payload['team2_name'] = _team2Name.text.trim();
         }
         await _api.createAltShotTeeTime(payload);
       } else {
@@ -355,28 +347,8 @@ class _AltShotFormScreenState extends State<AltShotFormScreen> {
                 ),
                 if (_maxTeams == 2 && widget.existing == null) ...[
                   const SizedBox(height: 12),
-                  TextField(
-                    controller: _team1Name,
-                    decoration: const InputDecoration(
-                      labelText: 'Team 1 name (optional)',
-                      helperText: 'Leave blank and Golf+ usernames will show'
-                          ' on the leaderboard.',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _team2Name,
-                    decoration: const InputDecoration(
-                      labelText: 'Team 2 name (optional)',
-                      helperText: 'Leave blank and Golf+ usernames will show'
-                          ' on the leaderboard.',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
                   const Text(
-                    'You start on Team 1. Team names lock to your crew once used.',
+                    'You start on Team 1.',
                     style: TextStyle(fontSize: 12, color: Colors.grey),
                   ),
                 ],

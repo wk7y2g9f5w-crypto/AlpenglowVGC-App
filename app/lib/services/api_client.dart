@@ -458,11 +458,8 @@ class ApiClient {
   }
 
   Future<AltShotTeeTime> joinAltShotTeeTime(String id,
-      {String teamName = '',
-      List<String> extraNames = const [],
-      String? teamId}) async {
+      {List<String> extraNames = const [], String? teamId}) async {
     final body = await _post('/api/altshot-tee-times/$id/join', {
-      'team_name': teamName,
       'extra_names': extraNames,
       if (teamId case final tid) 'team_id': tid,
     });
