@@ -44,6 +44,8 @@ String friendlyApiMessage(ApiException e) {
       return 'You\'re already in another tee time for that round — leave it first to join this one.';
     case 'round_already_submitted':
       return 'A card for that round was already submitted — one scorecard per round per player.';
+    case 'active_season_exists':
+      return 'A season is already active — end it before starting a new one.';
     default:
       return e.message;
   }
@@ -343,7 +345,10 @@ class ApiClient {
       final season = map['season'] as Map<String, dynamic>?;
       final items = (map['standings'] as List? ?? []);
       return SeasonStandings(
+        seasonId: (season?['id'] as num?)?.toInt(),
         seasonName: (season?['name'] ?? '').toString(),
+        seasonStartDate: season?['start_date']?.toString(),
+        seasonEndDate: season?['end_date']?.toString(),
         entries: items
             .whereType<Map<String, dynamic>>()
             .map(SeasonStandingEntry.fromJson)
@@ -353,6 +358,23 @@ class ApiClient {
       if (e.statusCode == 404) return const SeasonStandings.empty();
       rethrow;
     }
+  }
+
+  Future<Map<String, dynamic>> createSeason({
+    required String name,
+    String? startDate,
+    String? endDate,
+  }) async {
+    final payload = <String, dynamic>{'name': name};
+    if (startDate != null) payload['start_date'] = startDate;
+    if (endDate != null) payload['end_date'] = endDate;
+    final body = await _post('/api/seasons', payload);
+    return (body as Map<String, dynamic>?) ?? {};
+  }
+
+  Future<Map<String, dynamic>> completeSeason(int seasonId) async {
+    final body = await _post('/api/seasons/$seasonId/complete');
+    return (body as Map<String, dynamic>?) ?? {};
   }
 
   // --- Players -------------------------------------------------------------

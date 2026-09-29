@@ -8,6 +8,7 @@ import '../widgets/course_art.dart';
 import 'tournament_detail_screen.dart';
 import 'create_tournament_screen.dart';
 import 'season_standings_screen.dart';
+import 'new_season_screen.dart';
 
 /// Home tab: list of tournaments with pull-to-refresh.
 class TournamentsScreen extends StatefulWidget {
@@ -24,6 +25,7 @@ class TournamentsScreen extends StatefulWidget {
 class _TournamentsScreenState extends State<TournamentsScreen> {
   late Future<List<Tournament>> _future;
   bool _isCrew = false;
+  bool _isAdmin = false;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -40,7 +42,12 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
   Future<void> _loadCrewFlag() async {
     try {
       final me = await _api.getMe();
-      if (mounted) setState(() => _isCrew = me.isCrew);
+      if (mounted) {
+        setState(() {
+          _isCrew = me.isCrew;
+          _isAdmin = me.isAdmin;
+        });
+      }
     } catch (_) {
       // Not crew (or offline) — the create button just stays hidden.
     }
@@ -72,6 +79,21 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
               );
             },
           ),
+          if (_isAdmin)
+            IconButton(
+              tooltip: 'New season',
+              icon: const Icon(Icons.calendar_month),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => NewSeasonScreen(
+                      auth: widget.auth,
+                      settings: widget.settings,
+                    ),
+                  ),
+                );
+              },
+            ),
         ],
       ),
       floatingActionButton: _isCrew

@@ -916,6 +916,115 @@ class ApiTestCase(unittest.TestCase):
                                                     "active"))
         self.assertEqual(seasons, [])
 
+    # -- season create / complete -------------------------------------
+    def _season_body(self, name="Winter 2026", start="2026-10-01",
+                     end="2027-03-31"):
+        body = {"name": name}
+        if start is not None:
+            body["start_date"] = start
+        if end is not None:
+            body["end_date"] = end
+        return body
+
+    def test_create_season_success(self):
+        self._admin(True)
+        r = self.client.post("/api/seasons", headers=self.h("1"),
+                             json=self._season_body())
+        self.assertEqual(r.status_code, 201, r.text)
+        body = r.json()
+        self.assertEqual(body["name"], "Winter 2026")
+        self.assertEqual(body["status"], "active")
+        self.assertEqual(body["start_date"], "2026-10-01")
+        self.assertEqual(body["end_date"], "2027-03-31")
+        season = run(db.get_season(self.db_path, body["id"]))
+        self.assertEqual(season["name"], "Winter 2026")
+
+    def test_create_season_no_dates(self):
+        self._admin(True)
+        r = self.client.post("/api/seasons", headers=self.h("1"),
+                             json={"name": "Open Season"})
+        self.assertEqual(r.status_code, 201, r.text)
+        body = r.json()
+        self.assertIsNone(body["start_date"])
+        self.assertIsNone(body["end_date"])
+
+    def test_create_season_409_when_active_exists(self):
+        self._admin(True)
+        run(db.create_season(self.db_path, GUILD, "Fall 2026", "1"))
+        r = self.client.post("/api/seasons", headers=self.h("1"),
+                             json=self._season_body())
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "active_season_exists")
+
+    def test_create_season_422_blank_name(self):
+        self._admin(True)
+        r = self.client.post("/api/seasons", headers=self.h("1"),
+                             json=self._season_body(name="   "))
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_create_season_422_start_after_end(self):
+        self._admin(True)
+        r = self.client.post("/api/seasons", headers=self.h("1"),
+                             json=self._season_body(start="2027-04-01",
+                                                    end="2027-03-31"))
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_create_season_422_bad_date(self):
+        self._admin(True)
+        r = self.client.post("/api/seasons", headers=self.h("1"),
+                             json=self._season_body(start="not-a-date"))
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_create_season_403_not_admin(self):
+        self._admin(False)
+        r = self.client.post("/api/seasons", headers=self.h("1"),
+                             json=self._season_body())
+        self.assertEqual(r.status_code, 403, r.text)
+
+    def test_complete_season_success(self):
+        self._admin(True)
+        sid = run(db.create_season(self.db_path, GUILD, "Fall 2026", "1"))
+        r = self.client.post(f"/api/seasons/{sid}/complete",
+                             headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["status"], "completed")
+        season = run(db.get_season(self.db_path, sid))
+        self.assertEqual(season["status"], "completed")
+
+    def test_complete_season_404_missing(self):
+        self._admin(True)
+        r = self.client.post("/api/seasons/99999/complete",
+                             headers=self.h("1"))
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertEqual(r.json()["code"], "season_not_found")
+
+    def test_complete_season_409_already_completed(self):
+        self._admin(True)
+        sid = run(db.create_season(self.db_path, GUILD, "Fall 2026", "1"))
+        run(db.complete_season(self.db_path, sid))
+        r = self.client.post(f"/api/seasons/{sid}/complete",
+                             headers=self.h("1"))
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "season_not_active")
+
+    def test_complete_season_403_not_admin(self):
+        self._admin(False)
+        sid = run(db.create_season(self.db_path, GUILD, "Fall 2026", "1"))
+        r = self.client.post(f"/api/seasons/{sid}/complete",
+                             headers=self.h("1"))
+        self.assertEqual(r.status_code, 403, r.text)
+
+    def test_seasons_standings_includes_dates(self):
+        sid = run(db.create_season(self.db_path, GUILD, "Fall 2026", "123",
+                                   start_date="2026-09-01",
+                                   end_date="2026-12-31"))
+        r = self.client.get("/api/seasons/standings", headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        season = r.json()["season"]
+        self.assertEqual(season["id"], sid)
+        self.assertEqual(season["start_date"], "2026-09-01")
+        self.assertEqual(season["end_date"], "2026-12-31")
+
     # -- profile ------------------------------------------------------
     def test_profile_fields(self):
         self.with_tz("123")

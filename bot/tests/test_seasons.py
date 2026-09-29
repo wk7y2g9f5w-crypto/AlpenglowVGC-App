@@ -99,6 +99,20 @@ class SeasonDbTest(unittest.IsolatedAsyncioTestCase):
         rows = await db.get_active_seasons(self.db_path, "guild1")
         self.assertEqual([s["id"] for s in rows], [s1])
 
+    async def test_create_season_with_dates(self):
+        sid = await db.create_season(
+            self.db_path, "guild1", "Dated", "admin1",
+            start_date="2026-10-01", end_date="2027-03-31")
+        s = await db.get_season(self.db_path, sid)
+        self.assertEqual(s["start_date"], "2026-10-01")
+        self.assertEqual(s["end_date"], "2027-03-31")
+        # dates are optional
+        sid2 = await db.create_season(self.db_path, "guild1", "Undated",
+                                      "admin1")
+        s2 = await db.get_season(self.db_path, sid2)
+        self.assertIsNone(s2["start_date"])
+        self.assertIsNone(s2["end_date"])
+
     async def test_points_aggregate(self):
         sid = await db.create_season(self.db_path, "guild1", "S1", "admin1")
         t1 = await self._make_tournament("T1")

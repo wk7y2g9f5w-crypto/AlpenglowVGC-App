@@ -162,7 +162,9 @@ CREATE TABLE IF NOT EXISTS seasons(
   status TEXT NOT NULL DEFAULT 'active'
     CHECK(status IN ('active','completed')),
   created_by TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  start_date TEXT,
+  end_date TEXT
 );
 CREATE TABLE IF NOT EXISTS season_tournaments(
   season_id INTEGER NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
@@ -517,6 +519,15 @@ async def _migrate(db_path: str) -> None:
             " WHERE end_date IS NULL"
         )
         await con.commit()
+
+        # seasons.start_date / end_date (nullable; older seasons have none).
+        cur = await con.execute("PRAGMA table_info(seasons)")
+        season_cols = [r[1] for r in await cur.fetchall()]
+        for col in ("start_date", "end_date"):
+            if col not in season_cols:
+                await con.execute(
+                    f"ALTER TABLE seasons ADD COLUMN {col} TEXT")
+                await con.commit()
 
         # Every tournament gets at least round 1 (copies the tournament's
         # own tee/pin/wind and overall dates). The rounds table itself is
@@ -1653,12 +1664,15 @@ async def side_quest_recent(db_path, guild_id, limit=10) -> list[dict]:
 
 
 # ------------------------------------------------------------------- seasons
-async def create_season(db_path, guild_id, name, created_by) -> int:
+async def create_season(db_path, guild_id, name, created_by,
+                      start_date: str | None = None,
+                      end_date: str | None = None) -> int:
     lastrowid, _ = await _execute(
         db_path,
-        "INSERT INTO seasons (guild_id, name, status, created_by, created_at)"
-        " VALUES (?,?,'active',?,?)",
-        (guild_id, name, created_by, utcnow_iso()),
+        "INSERT INTO seasons (guild_id, name, status, created_by, created_at,"
+        " start_date, end_date)"
+        " VALUES (?,?,'active',?,?,?,?)",
+        (guild_id, name, created_by, utcnow_iso(), start_date, end_date),
     )
     return lastrowid
 

@@ -7,8 +7,7 @@ import 'common.dart';
 /// Season points standings list, shared by the tournament detail
 /// Leaderboard tab's "Season" dropdown and the standalone Season
 /// Standings screen reachable from the Tournaments tab.
-class SeasonStandingsView extends StatefulWidget {
-  final ApiClient api;
+class SeasonStandingsView extends StatefulWidget {  final ApiClient api;
 
   const SeasonStandingsView({super.key, required this.api});
 
@@ -53,10 +52,24 @@ class _SeasonStandingsViewState extends State<SeasonStandingsView> {
             if (i == 0) {
               return Padding(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                child: Text(
-                  s.seasonName.isEmpty ? 'Season standings' : s.seasonName,
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.bold),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      s.seasonName.isEmpty ? 'Season standings' : s.seasonName,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    if (_dateRangeLabel(s) != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          _dateRangeLabel(s)!,
+                          style: TextStyle(
+                              fontSize: 13, color: Colors.grey.shade600),
+                        ),
+                      ),
+                  ],
                 ),
               );
             }
@@ -88,4 +101,25 @@ class _SeasonStandingsViewState extends State<SeasonStandingsView> {
       },
     );
   }
+}
+
+/// "Mar 1, 2026 – Sep 30, 2026", or a single date, or null when the
+/// season carries no date range.
+String? _dateRangeLabel(SeasonStandings s) {
+  String? fmt(String? iso) {
+    if (iso == null || iso.isEmpty) return null;
+    final d = DateTime.tryParse(iso);
+    if (d == null) return iso;
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    return '${months[d.month - 1]} ${d.day}, ${d.year}';
+  }
+
+  final start = fmt(s.seasonStartDate);
+  final end = fmt(s.seasonEndDate);
+  if (start == null && end == null) return null;
+  if (start != null && end != null) return '$start – $end';
+  return start ?? end;
 }

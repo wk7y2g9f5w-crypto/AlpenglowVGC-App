@@ -360,16 +360,25 @@ class SeasonStandingEntry {
 /// Season points standings: the active season's name plus ranked entries.
 /// [SeasonStandings.empty] represents "no active season / no standings".
 class SeasonStandings {
+  final int? seasonId;
   final String seasonName;
+  final String? seasonStartDate; // YYYY-MM-DD or null
+  final String? seasonEndDate; // YYYY-MM-DD or null
   final List<SeasonStandingEntry> entries;
 
   const SeasonStandings({
+    this.seasonId,
     required this.seasonName,
     required this.entries,
+    this.seasonStartDate,
+    this.seasonEndDate,
   });
 
   const SeasonStandings.empty()
-      : seasonName = '',
+      : seasonId = null,
+        seasonName = '',
+        seasonStartDate = null,
+        seasonEndDate = null,
         entries = const [];
 }
 

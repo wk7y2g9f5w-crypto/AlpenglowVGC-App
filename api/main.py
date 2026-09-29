@@ -24,6 +24,7 @@ import re
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import datetime as _dt
 from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -2797,6 +2798,45 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
 # --------------------------------------------------------------------------
 # Seasons
 # --------------------------------------------------------------------------
+class SeasonCreate(BaseModel):
+    """Mirrors /season create: admin-only, one active season at a time."""
+
+    name: str
+    start_date: str | None = None  # YYYY-MM-DD
+    end_date: str | None = None  # YYYY-MM-DD
+
+    @field_validator("name")
+    @classmethod
+    def _nonempty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("must be non-empty")
+        return v[:80]
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _iso_date(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = (v or "").strip()
+        if not v:
+            return None
+        try:
+            _dt.date.fromisoformat(v)
+        except ValueError:
+            raise ValueError("must be a valid YYYY-MM-DD date")
+        return v
+
+    @model_validator(mode="after")
+    def _date_order(self) -> "SeasonCreate":
+        if self.start_date and self.end_date:
+            if _dt.date.fromisoformat(self.start_date) > _dt.date.fromisoformat(
+                self.end_date
+            ):
+                raise ValueError("start_date must not be after end_date")
+        return self
+
+
 @app.get("/api/seasons/standings")
 async def season_standings(user: CurrentUser) -> dict:
     season = await db.get_active_season(DB_PATH, GUILD_ID)
@@ -2811,6 +2851,8 @@ async def season_standings(user: CurrentUser) -> dict:
             "id": season["id"],
             "name": season["name"],
             "status": season["status"],
+            "start_date": season.get("start_date"),
+            "end_date": season.get("end_date"),
         },
         "standings": [
             {
@@ -2822,6 +2864,56 @@ async def season_standings(user: CurrentUser) -> dict:
             }
             for r in rows
         ],
+    }
+
+
+@app.post("/api/seasons", status_code=status.HTTP_201_CREATED)
+async def create_season(body: SeasonCreate, user: AdminUser) -> dict:
+    existing = await db.get_active_season(DB_PATH, GUILD_ID)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "active_season_exists",
+                "active_season_id": existing["id"],
+                "active_season_name": existing["name"],
+            },
+        )
+    sid = await db.create_season(
+        DB_PATH, GUILD_ID, body.name, user["discord_id"],
+        start_date=body.start_date, end_date=body.end_date,
+    )
+    season = await db.get_season(DB_PATH, sid)
+    return {
+        "id": season["id"],
+        "name": season["name"],
+        "status": season["status"],
+        "start_date": season.get("start_date"),
+        "end_date": season.get("end_date"),
+    }
+
+
+@app.post("/api/seasons/{season_id}/complete")
+async def complete_season(season_id: int, user: AdminUser) -> dict:
+    season = await db.get_season(DB_PATH, season_id)
+    if not season or str(season["guild_id"]) != str(GUILD_ID):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "season_not_found"},
+        )
+    if season["status"] != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "season_not_active"},
+        )
+    await db.complete_season(DB_PATH, season_id)
+    season = await db.get_season(DB_PATH, season_id)
+    return {
+        "id": season["id"],
+        "name": season["name"],
+        "status": season["status"],
+        "start_date": season.get("start_date"),
+        "end_date": season.get("end_date"),
     }
 
 
