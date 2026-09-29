@@ -79,13 +79,26 @@ class MatchPlayApiTestCase(ApiTestCase):
         self.assertIsNone(tt["score"])
 
     def test_create_bestball_happy(self):
-        tt = self._create_tt(format="bestball", team_size=3,
-                             side1_team_name="Aces",
-                             side2_team_name="Kings")
+        tt = self._create_tt(format="bestball", team_size=3)
         self.assertEqual(tt["format"], "bestball")
         self.assertEqual(tt["side_cap"], 3)
-        self.assertEqual(tt["sides"][0]["display_name"], "Aces")
-        self.assertEqual(tt["sides"][1]["team_name"], "Kings")
+        # No team names: sides are identified by their players.
+        self.assertNotIn("team_name", tt["sides"][0])
+        self.assertNotIn("team_name", tt["sides"][1])
+        self.assertEqual(tt["sides"][0]["display_name"], "User1")
+        self.assertEqual(tt["sides"][1]["display_name"], "")
+
+    def test_create_ignores_team_name_fields(self):
+        # Stale clients may still send side team names; they are ignored,
+        # never 422, and never create a registry claim.
+        tt = self._create_tt(format="bestball", team_size=2,
+                             side1_team_name="Eagles",
+                             side2_team_name="Kings")
+        self.assertNotIn("team_name", tt["sides"][0])
+        self.assertEqual(tt["sides"][0]["display_name"], "User1")
+        # No registry row was created for the ignored name.
+        row = run(db._team_name_row(self.db_path, "eagles"))
+        self.assertIsNone(row)
 
     def test_create_defaults_setup_back_black(self):
         tt = self._create_tt()
@@ -420,12 +433,20 @@ class MatchPlayApiTestCase(ApiTestCase):
         tt = self._create_tt()
         r = self.client.patch(f"/api/matchplay/tee-times/{tt['id']}",
                               headers=self.h("1"),
-                              json={"label": "Renamed",
-                                    "side1_team_name": "Birdies"})
+                              json={"label": "Renamed"})
         self.assertEqual(r.status_code, 200, r.text)
         body = r.json()
         self.assertEqual(body["label"], "Renamed")
-        self.assertEqual(body["sides"][0]["team_name"], "Birdies")
+        self.assertNotIn("team_name", body["sides"][0])
+
+    def test_update_ignores_team_name_fields(self):
+        # Stale clients may still send side team names on update; ignored.
+        tt = self._create_tt(format="bestball", team_size=2)
+        r = self.client.patch(f"/api/matchplay/tee-times/{tt['id']}",
+                              headers=self.h("1"),
+                              json={"side1_team_name": "Eagles"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotIn("team_name", r.json()["sides"][0])
 
     def test_update_tee_time_403_not_creator(self):
         tt = self._create_tt()

@@ -506,7 +506,6 @@ class MatchPlayScore {
 class MatchPlaySide {
   final String id;
   final int sideNumber;
-  final String teamName;
   final List<String> memberDiscordIds;
   final List<String> memberNames;
   final int size;
@@ -515,7 +514,6 @@ class MatchPlaySide {
   MatchPlaySide({
     required this.id,
     required this.sideNumber,
-    required this.teamName,
     required this.memberDiscordIds,
     required this.memberNames,
     required this.size,
@@ -525,7 +523,6 @@ class MatchPlaySide {
   factory MatchPlaySide.fromJson(Map<String, dynamic> j) => MatchPlaySide(
         id: j['id'].toString(),
         sideNumber: (j['side_number'] as num?)?.toInt() ?? 1,
-        teamName: (j['team_name'] ?? '').toString(),
         memberDiscordIds: ((j['member_discord_ids'] as List?) ?? [])
             .map((e) => e.toString())
             .toList(),

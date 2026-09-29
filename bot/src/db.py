@@ -3493,15 +3493,14 @@ async def _matchplay_member_names(db_path, members: list[dict]) -> list[str]:
 async def _matchplay_side_json(db_path, side: dict) -> dict:
     members = await _matchplay_side_members(db_path, side["id"])
     names = await _matchplay_member_names(db_path, members)
-    team_name = (side.get("team_name") or "").strip()
+    # Sides are identified purely by their players' names — no team names.
     return {
         "id": side["id"],
         "side_number": side["side_number"],
-        "team_name": team_name,
         "member_discord_ids": [m["discord_id"] for m in members],
         "member_names": names,
         "size": len(names),
-        "display_name": team_name if team_name else " & ".join(names),
+        "display_name": " & ".join(names),
     }
 
 
@@ -3583,8 +3582,7 @@ async def create_matchplay_tee_time(
     tee_position: str = "back", pin_position: str = "black",
     wind_strength: str = "moderate", green_speed: str = "pro",
     starts_at: str = "", format: str = "single", team_size: int = 1,
-    notes: str = "", side1_team_name: str = "",
-    side2_team_name: str = "",
+    notes: str = "",
 ) -> str:
     import uuid
     if format not in ("single", "bestball"):
@@ -3598,23 +3596,7 @@ async def create_matchplay_tee_time(
     tt_id = uuid.uuid4().hex[:12]
     side1_id = uuid.uuid4().hex[:12]
     side2_id = uuid.uuid4().hex[:12]
-    # Claim team names before inserting anything; roll the claims back if
-    # the second name is taken. 1v1 match play has no team-name locking.
-    _claims = []
-    if format == "bestball":
-        try:
-            for tname, ids, ref in (
-                    (side1_team_name, [creator_discord_id],
-                     f"matchplay:side:{side1_id}"),
-                    (side2_team_name, [], f"matchplay:side:{side2_id}")):
-                ok, msg = await team_name_claim(db_path, tname, ids, ref)
-                if not ok:
-                    raise TeamNameError(msg)
-                _claims.append(ref)
-        except TeamNameError:
-            for ref in _claims:
-                await team_name_release(db_path, ref)
-            raise
+    # No team names in matchplay: sides are identified by their players.
     await _execute(
         db_path,
         "INSERT INTO matchplay_tee_times (id, creator_discord_id, label,"
@@ -3625,13 +3607,12 @@ async def create_matchplay_tee_time(
          pin_position, wind_strength, green_speed, starts_at, format,
          team_size, notes, utcnow_iso()),
     )
-    for n, tname, side_id in ((1, side1_team_name, side1_id),
-                              (2, side2_team_name, side2_id)):
+    for n, side_id in ((1, side1_id), (2, side2_id)):
         await _execute(
             db_path,
             "INSERT INTO matchplay_sides (id, tee_time_id, side_number,"
             " team_name, created_at) VALUES (?,?,?,?,?)",
-            (side_id, tt_id, n, (tname or "").strip(), utcnow_iso()),
+            (side_id, tt_id, n, "", utcnow_iso()),
         )
         if n == 1:
             # The creator takes side 1's first spot.
@@ -3716,15 +3697,6 @@ async def join_matchplay_tee_time(db_path, tt_id: str, discord_id: str,
     cap = 1 if tt["format"] == "single" else (tt["team_size"] or 2)
     if len(members) >= cap:
         raise MatchPlayError("full")
-    claim_ref = f"matchplay:side:{side['id']}"
-    tname = (side["team_name"] or "").strip()
-    new_ids = [m["discord_id"] for m in members] + [discord_id]
-    # 1v1 match play has no team-name locking.
-    lock_names = tt["format"] == "bestball" and bool(tname)
-    if lock_names:
-        ok, msg = await team_name_claim(db_path, tname, new_ids, claim_ref)
-        if not ok:
-            raise TeamNameError(msg)
     import uuid
     await _execute(
         db_path,
@@ -3732,8 +3704,6 @@ async def join_matchplay_tee_time(db_path, tt_id: str, discord_id: str,
         " created_at) VALUES (?,?,?,?)",
         (uuid.uuid4().hex[:12], side["id"], discord_id, utcnow_iso()),
     )
-    if lock_names and len(new_ids) >= cap:
-        await team_name_finalize(db_path, tname, claim_ref, new_ids)
     return await get_matchplay_tee_time(db_path, tt_id)
 
 
@@ -3771,34 +3741,7 @@ async def update_matchplay_tee_time(db_path, tt_id: str,
             f"UPDATE matchplay_tee_times SET {', '.join(sets)} WHERE id = ?",
             tuple(updates[k] for k in updates) + (tt_id,),
         )
-    for key, side_number in (("side1_team_name", 1), ("side2_team_name", 2)):
-        if key in fields:
-            new_name = (fields[key] or "").strip()
-            side = await _fetchone(
-                db_path,
-                "SELECT * FROM matchplay_sides WHERE tee_time_id = ?"
-                " AND side_number = ?",
-                (tt_id, side_number),
-            )
-            if side is None:
-                continue
-            old_name = (side["team_name"] or "").strip()
-            claim_ref = f"matchplay:side:{side['id']}"
-            members = await _matchplay_side_members(db_path, side["id"])
-            member_ids = [m["discord_id"] for m in members]
-            # 1v1 match play has no team-name locking; the name is stored
-            # as-is without a registry claim.
-            if tt["format"] == "bestball":
-                ok, msg = await team_name_rename(
-                    db_path, old_name, new_name, member_ids, claim_ref)
-                if not ok:
-                    raise TeamNameError(msg)
-            await _execute(
-                db_path,
-                "UPDATE matchplay_sides SET team_name = ?"
-                " WHERE tee_time_id = ? AND side_number = ?",
-                (new_name, tt_id, side_number),
-            )
+    # No team names in matchplay: side names are never renamed.
     return await get_matchplay_tee_time(db_path, tt_id)
 
 
@@ -3810,7 +3753,6 @@ async def delete_matchplay_tee_time(db_path, tt_id: str) -> None:
         await _execute(
             db_path, "DELETE FROM matchplay_side_members WHERE side_id = ?",
             (s["id"],))
-        await team_name_release(db_path, f"matchplay:side:{s['id']}")
     await _execute(db_path, "DELETE FROM matchplay_sides WHERE tee_time_id = ?",
                    (tt_id,))
     await _execute(db_path, "DELETE FROM matchplay_scores WHERE tee_time_id = ?",
@@ -3940,19 +3882,6 @@ async def save_matchplay_score(db_path, tt_id: str, hole_results: list,
     if outcome["status"] == "completed":
         await _matchplay_apply_records(
             db_path, tt, outcome["winner_side"], +1)
-    # Backstop: lock any named side's team name to its roster now that the
-    # match is being scored (sides are full by this point, so this is
-    # normally already finalized at join time).
-    sides = await _fetchall(
-        db_path, "SELECT * FROM matchplay_sides WHERE tee_time_id = ?",
-        (tt_id,))
-    for s in sides:
-        tname = (s["team_name"] or "").strip()
-        if tname:
-            members = await _matchplay_side_members(db_path, s["id"])
-            await team_name_finalize(
-                db_path, tname, f"matchplay:side:{s['id']}",
-                [m["discord_id"] for m in members])
     score = await get_matchplay_score(db_path, tt_id)
     return await _matchplay_score_json(db_path, tt, score)
 

@@ -6,7 +6,8 @@
 - Rule under test: once a team name is chosen it is locked to the crew
   of players who first used it — no other group of players may play
   under that name. Players stay free to play under *different* names
-  with other people. One registry across AltShot and Matchplay.
+  with other people. The registry covers AltShot only; matchplay has no
+  team names and never touches it.
 - unittest only; run with: python -m pytest tests/ -q
 """
 import sys
@@ -15,7 +16,7 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS_DIR))
 
-from test_api import ApiTestCase  # noqa: E402
+from test_api import ApiTestCase, run  # noqa: E402
 
 from src import db  # noqa: E402
 
@@ -24,7 +25,7 @@ STARTS_AT = "2030-10-03T14:00:00Z"
 
 
 class TeamNameLockApiTestCase(ApiTestCase):
-    """Team-name locking across AltShot and Matchplay."""
+    """Team-name locking (AltShot). Matchplay has no team names."""
 
     # -- helpers ------------------------------------------------------
     def _mp_create(self, uid="1", **over):
@@ -43,10 +44,6 @@ class TeamNameLockApiTestCase(ApiTestCase):
         return self.client.post(
             f"/api/matchplay/tee-times/{tt_id}/join", headers=self.h(uid),
             json={"side_number": side})
-
-    def _mp_rename(self, tt_id, uid, **names):
-        return self.client.patch(f"/api/matchplay/tee-times/{tt_id}",
-                                 headers=self.h(uid), json=names)
 
     def _as_create(self, uid="1", **over):
         body = {
@@ -86,114 +83,37 @@ class TeamNameLockApiTestCase(ApiTestCase):
         self.assertEqual(db.normalize_team_name("   "), "")
         self.assertEqual(db.normalize_team_name(None), "")
 
-    # -- matchplay create ---------------------------------------------
-    def test_fresh_claim_ok(self):
-        r = self._mp_create("1", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json()["sides"][0]["team_name"], "Eagles")
-
-    def test_second_crew_same_name_409(self):
-        r = self._mp_create("1", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 200, r.text)
-        r = self._mp_create("3", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 409, r.text)
-        self.assertIn("taken by another crew", r.json()["detail"])
-
-    def test_case_insensitive_409(self):
-        r = self._mp_create("1", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 200, r.text)
-        r = self._mp_create("3", side1_team_name="  EAGLES ")
-        self.assertEqual(r.status_code, 409, r.text)
-
-    def test_same_tee_time_both_sides_same_name_409(self):
-        # The two opposing sides of one match may not share a name; the
-        # tee time must not be left half-created either.
+    # -- matchplay: no team names at all -----------------------------
+    def test_matchplay_ignores_team_names_no_claim(self):
+        # Matchplay sides are identified by their players; any team-name
+        # fields sent are ignored and create no registry claim.
         r = self._mp_create("1", side1_team_name="Eagles",
-                            side2_team_name="Eagles")
-        self.assertEqual(r.status_code, 409, r.text)
-        r = self.client.get("/api/matchplay/tee-times", headers=self.h("1"))
-        self.assertEqual(r.json()["tee_times"], [])
-
-    def test_blank_name_never_claims(self):
-        r = self._mp_create("1", side1_team_name="   ")
+                            side2_team_name="Kings")
         self.assertEqual(r.status_code, 200, r.text)
-        r = self._mp_create("3", side1_team_name="")
-        self.assertEqual(r.status_code, 200, r.text)
+        tt = r.json()
+        self.assertNotIn("team_name", tt["sides"][0])
+        self.assertNotIn("team_name", tt["sides"][1])
+        self.assertEqual(tt["sides"][0]["display_name"], "User1")
+        self.assertIsNone(run(db._team_name_row(self.db_path, "eagles")))
+        self.assertIsNone(run(db._team_name_row(self.db_path, "kings")))
 
-    # -- finalize on full roster + subset reuse -----------------------
-    def test_finalize_and_owner_subset_reuse(self):
-        tt = self._mp_create("1", side1_team_name="Eagles").json()
+    def test_matchplay_join_never_claims(self):
+        tt = self._mp_create("1").json()
         r = self._mp_join(tt["id"], "2", 1)
         self.assertEqual(r.status_code, 200, r.text)
-        # Side 1 is full (2/2) -> "Eagles" locked to {1, 2}.
-        # The original creator alone may reuse it with a new crew...
-        r = self._mp_create("1", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 200, r.text)
-        # ... and so may the other original member ...
-        r = self._mp_create("2", side2_team_name="Eagles")
-        self.assertEqual(r.status_code, 200, r.text)
-        # ... but a stranger may not.
-        r = self._mp_create("3", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 409, r.text)
-        self.assertIn("belongs to another crew", r.json()["detail"])
+        tt = self.client.get(f"/api/matchplay/tee-times/{tt['id']}",
+                             headers=self.h("1")).json()
+        for s in tt["sides"]:
+            self.assertNotIn("team_name", s)
 
-    def test_outsider_join_finalized_side_409(self):
-        tt = self._mp_create("1", side1_team_name="Eagles").json()
-        self._mp_join(tt["id"], "2", 1)  # full -> finalized {1, 2}
-        tt2 = self._mp_create("1", side1_team_name="Eagles").json()
-        r = self._mp_join(tt2["id"], "3", 1)
-        self.assertEqual(r.status_code, 409, r.text)
-        self.assertIn("belongs to another crew", r.json()["detail"])
-        # Membership unchanged: the join was rolled back.
-        tt2 = self.client.get(f"/api/matchplay/tee-times/{tt2['id']}",
-                              headers=self.h("1")).json()
-        self.assertEqual(tt2["sides"][0]["member_discord_ids"], ["1"])
-
-    def test_rename_to_taken_name_409(self):
-        self._mp_create("1", side1_team_name="Eagles")
-        tt2 = self._mp_create("3", side1_team_name="Sharks").json()
-        r = self._mp_rename(tt2["id"], "3", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 409, r.text)
-        # The failed rename left the old name in place.
-        tt2 = self.client.get(f"/api/matchplay/tee-times/{tt2['id']}",
-                              headers=self.h("3")).json()
-        self.assertEqual(tt2["sides"][0]["team_name"], "Sharks")
-
-    def test_rename_away_releases_pending_claim(self):
-        tt = self._mp_create("1", side1_team_name="Eagles").json()
-        r = self._mp_rename(tt["id"], "1", side1_team_name="Sharks")
+    def test_matchplay_update_ignores_team_names(self):
+        tt = self._mp_create("1").json()
+        r = self.client.patch(f"/api/matchplay/tee-times/{tt['id']}",
+                              headers=self.h("1"),
+                              json={"side1_team_name": "Eagles"})
         self.assertEqual(r.status_code, 200, r.text)
-        # "Eagles" was only tentative, so another crew can claim it now.
-        r = self._mp_create("3", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 200, r.text)
-
-    def test_same_players_different_name_ok(self):
-        self._mp_create("1", side1_team_name="Eagles")
-        # Nobody is locked out of playing under a *different* name.
-        r = self._mp_create("1", side1_team_name="Sharks")
-        self.assertEqual(r.status_code, 200, r.text)
-        r = self._mp_create("3", side2_team_name="Sharks")
-        self.assertEqual(r.status_code, 409, r.text)  # taken by crew {1}
-
-    def test_delete_releases_pending_claim(self):
-        tt = self._mp_create("1", side1_team_name="Eagles").json()
-        r = self.client.delete(f"/api/matchplay/tee-times/{tt['id']}",
-                               headers=self.h("1"))
-        self.assertEqual(r.status_code, 200, r.text)
-        r = self._mp_create("3", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 200, r.text)
-
-    def test_delete_keeps_finalized_lock(self):
-        tt = self._mp_create("1", side1_team_name="Eagles").json()
-        self._mp_join(tt["id"], "2", 1)  # full -> finalized {1, 2}
-        r = self.client.delete(f"/api/matchplay/tee-times/{tt['id']}",
-                               headers=self.h("1"))
-        self.assertEqual(r.status_code, 200, r.text)
-        # Finalized bindings survive deletion: the crew still owns it.
-        r = self._mp_create("1", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 200, r.text)
-        r = self._mp_create("3", side1_team_name="Eagles")
-        self.assertEqual(r.status_code, 409, r.text)
+        self.assertNotIn("team_name", r.json()["sides"][0])
+        self.assertIsNone(run(db._team_name_row(self.db_path, "eagles")))
 
     # -- altshot -------------------------------------------------------
     def test_altshot_fixed_roster_name_lock(self):
@@ -261,28 +181,11 @@ class TeamNameLockApiTestCase(ApiTestCase):
         r = self._as_rename(tt3["id"], tt3["teams"][0]["id"], "2", "Eagles")
         self.assertEqual(r.status_code, 200, r.text)
 
-    # -- cross-category: one global registry ---------------------------
-    def test_name_locked_across_altshot_and_matchplay(self):
+    # -- matchplay names never enter the registry ----------------------
+    def test_matchplay_name_does_not_block_altshot(self):
+        # A name sent on a matchplay create is ignored, so an AltShot team
+        # may freely claim it afterwards.
         self._mp_create("1", side1_team_name="Eagles")
         tt = self._as_create("3", max_teams=1, team_size=2).json()
         r = self._as_rename(tt["id"], tt["teams"][0]["id"], "3", "Eagles")
-        self.assertEqual(r.status_code, 409, r.text)
-
-    def test_single_format_has_no_team_name_lock(self):
-        # 1v1 match play ignores team-name claims entirely: even when
-        # names are supplied, no registry row is created and another
-        # player may reuse the name elsewhere.
-        r = self._mp_create("1", format="single", team_size=1,
-                            side1_team_name="Lone Wolves",
-                            side2_team_name="Solo Artists")
         self.assertEqual(r.status_code, 200, r.text)
-        tt = r.json()
-        self.assertEqual(tt["format"], "single")
-        # No registry claim: a best-ball side can claim the same name.
-        r2 = self._mp_create("2", side1_team_name="Lone Wolves")
-        self.assertEqual(r2.status_code, 200, r2.text)
-        # And an AltShot team can claim the 1v1's other unused name.
-        tt3 = self._as_create("3", max_teams=1, team_size=2).json()
-        r3 = self._as_rename(tt3["id"], tt3["teams"][0]["id"], "3",
-                             "Solo Artists")
-        self.assertEqual(r3.status_code, 200, r3.text)

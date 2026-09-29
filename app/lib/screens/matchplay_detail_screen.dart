@@ -207,39 +207,25 @@ class _MatchPlayDetailScreenState extends State<MatchPlayDetailScreen> {
                     style: const TextStyle(color: Colors.grey)),
               ],
             ),
-            if (side.teamName.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(side.memberNames.join(' · '),
-                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
-            ] else ...[
-              const SizedBox(height: 4),
-              Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: [
-                  for (final name in side.memberNames)
-                    Chip(
-                      label: Text(name,
-                          style: const TextStyle(fontSize: 12)),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  if (inThisSide)
-                    const Chip(
-                      label: Text('You',
-                          style: TextStyle(fontSize: 11)),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                ],
-              ),
-            ],
-            if (side.teamName.isNotEmpty && inThisSide)
-              const Padding(
-                padding: EdgeInsets.only(top: 4),
-                child: Chip(
-                  label: Text('You', style: TextStyle(fontSize: 11)),
-                  visualDensity: VisualDensity.compact,
-                ),
-              ),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: [
+                for (final name in side.memberNames)
+                  Chip(
+                    label: Text(name,
+                        style: const TextStyle(fontSize: 12)),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                if (inThisSide)
+                  const Chip(
+                    label: Text('You',
+                        style: TextStyle(fontSize: 11)),
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
+            ),
             const SizedBox(height: 8),
             if (mySide == null)
               OutlinedButton.icon(

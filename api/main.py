@@ -1768,8 +1768,7 @@ class MatchPlayTeeTimeCreate(BaseModel):
     format: str = "single"
     team_size: int | None = None
     notes: str = ""
-    side1_team_name: str = ""
-    side2_team_name: str = ""
+    # No team names in matchplay: sides are identified by their players.
 
     @field_validator("label", "course")
     @classmethod
@@ -1849,8 +1848,7 @@ class MatchPlayTeeTimeUpdate(BaseModel):
     green_speed: str | None = None
     starts_at: str | None = None
     notes: str | None = None
-    side1_team_name: str | None = None
-    side2_team_name: str | None = None
+    # No team names in matchplay: sides are identified by their players.
 
     @field_validator("starts_at")
     @classmethod
@@ -2531,8 +2529,6 @@ async def create_matchplay_tee_time(body: MatchPlayTeeTimeCreate,
             green_speed=body.green_speed, starts_at=body.starts_at.strip(),
             format=body.format, team_size=body.team_size or 1,
             notes=body.notes.strip(),
-            side1_team_name=body.side1_team_name.strip(),
-            side2_team_name=body.side2_team_name.strip(),
         )
     except db.MatchPlayError as e:
         msg = str(e)
@@ -2545,9 +2541,6 @@ async def create_matchplay_tee_time(body: MatchPlayTeeTimeCreate,
             detail = "Could not create this match-play tee time."
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
-    except db.TeamNameError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=str(e))
     return await _matchplay_or_404(tt_id)
 
 
@@ -2573,11 +2566,7 @@ async def update_matchplay_tee_time(tt_id: str, body: MatchPlayTeeTimeUpdate,
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Unknown course — pick one from the course list.")
         fields["pars"] = ",".join(str(x) for x in auto)
-    try:
-        return await db.update_matchplay_tee_time(DB_PATH, tt_id, fields)
-    except db.TeamNameError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=str(e))
+    return await db.update_matchplay_tee_time(DB_PATH, tt_id, fields)
 
 
 @app.delete("/api/matchplay/tee-times/{tt_id}")

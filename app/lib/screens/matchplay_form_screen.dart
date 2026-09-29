@@ -35,8 +35,6 @@ class _MatchPlayFormScreenState extends State<MatchPlayFormScreen> {
 
   late final TextEditingController _label;
   late final TextEditingController _notes;
-  late final TextEditingController _side1Name;
-  late final TextEditingController _side2Name;
   List<GolfCourse> _courses = [];
   GolfCourse? _course;
   String _tee = 'back';
@@ -58,10 +56,6 @@ class _MatchPlayFormScreenState extends State<MatchPlayFormScreen> {
     final e = widget.existing;
     _label = TextEditingController(text: e?.label ?? '');
     _notes = TextEditingController(text: e?.notes ?? '');
-    _side1Name = TextEditingController(
-        text: e != null && e.sides.isNotEmpty ? e.sides[0].teamName : '');
-    _side2Name = TextEditingController(
-        text: e != null && e.sides.length > 1 ? e.sides[1].teamName : '');
     _tee = e?.teePosition ?? 'back';
     _pin = e?.pinPosition ?? 'black';
     _wind = e?.windStrength ?? 'moderate';
@@ -101,8 +95,6 @@ class _MatchPlayFormScreenState extends State<MatchPlayFormScreen> {
   void dispose() {
     _label.dispose();
     _notes.dispose();
-    _side1Name.dispose();
-    _side2Name.dispose();
     super.dispose();
   }
 
@@ -153,12 +145,8 @@ class _MatchPlayFormScreenState extends State<MatchPlayFormScreen> {
       if (widget.existing == null) {
         payload['format'] = _format;
         payload['team_size'] = _format == 'bestball' ? _teamSize : 1;
-        payload['side1_team_name'] = _side1Name.text.trim();
-        payload['side2_team_name'] = _side2Name.text.trim();
         await _api.createMatchPlayTeeTime(payload);
       } else {
-        payload['side1_team_name'] = _side1Name.text.trim();
-        payload['side2_team_name'] = _side2Name.text.trim();
         await _api.updateMatchPlayTeeTime(widget.existing!.id, payload);
       }
       if (mounted) Navigator.of(context).pop(true);
@@ -305,30 +293,6 @@ class _MatchPlayFormScreenState extends State<MatchPlayFormScreen> {
                   onTap: _pickWhen,
                 ),
                 const SizedBox(height: 4),
-                TextField(
-                  controller: _side1Name,
-                  decoration: const InputDecoration(
-                    labelText: 'Side 1 team name (optional)',
-                    hintText: 'Shown instead of player names',
-                    helperText: 'Leave blank and Golf+ usernames will show'
-                        ' on the leaderboard.',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _side2Name,
-                  decoration: const InputDecoration(
-                    labelText: 'Side 2 team name (optional)',
-                    hintText: 'Shown instead of player names',
-                    helperText: 'Leave blank and Golf+ usernames will show'
-                        ' on the leaderboard.',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                ),
-                const SizedBox(height: 12),
                 TextField(
                   controller: _notes,
                   decoration: const InputDecoration(
