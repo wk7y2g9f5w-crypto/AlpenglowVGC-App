@@ -998,6 +998,11 @@ class _LeaderboardTab extends StatefulWidget {
 
 class _LeaderboardTabState extends State<_LeaderboardTab> {
   late Future<List<LeaderboardEntry>> _future;
+  Future<SeasonStandings>? _seasonFuture;
+
+  /// 0 = tournament leaderboard, 1 = season points standings.
+  int _view = 0;
+
   Timer? _poll;
 
   ApiClient get _api => ApiClient(
@@ -1008,9 +1013,10 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
     super.initState();
     _future = _api.getLeaderboard(widget.tournament.id);
     // Live leaderboard: silently re-fetch every 30s while this screen is
-    // open, so newly submitted cards appear without a manual pull.
+    // open, so newly submitted cards appear without a manual pull. Only
+    // the tournament view polls; the season view refreshes on pull only.
     _poll = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted) _refresh();
+      if (mounted && _view == 0) _refresh();
     });
   }
 
@@ -1026,6 +1032,12 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
     await f;
   }
 
+  Future<void> _refreshSeason() async {
+    final f = _api.seasonStandings();
+    setState(() => _seasonFuture = f);
+    await f;
+  }
+
   String _formatToPar(String? toPar) {
     if (toPar == null || toPar.isEmpty || toPar == 'null') return '–';
     final n = int.tryParse(toPar);
@@ -1036,6 +1048,97 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
 
   @override
   Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: DropdownButtonFormField<int>(
+            initialValue: _view,
+            decoration: const InputDecoration(
+              labelText: 'Standings',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: const [
+              DropdownMenuItem(value: 0, child: Text('Tournament')),
+              DropdownMenuItem(value: 1, child: Text('Season')),
+            ],
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() {
+                _view = v;
+                if (v == 1) _seasonFuture ??= _api.seasonStandings();
+              });
+            },
+          ),
+        ),
+        Expanded(child: _view == 0 ? _tournamentView() : _seasonView()),
+      ],
+    );
+  }
+
+  Widget _seasonView() {
+    _seasonFuture ??= _api.seasonStandings();
+    return AsyncBody<SeasonStandings>(
+      future: _seasonFuture!,
+      onRefresh: _refreshSeason,
+      builder: (context, s) {
+        if (s.entries.isEmpty) {
+          return ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: const [
+              SizedBox(height: 120),
+              Center(child: Text('No season standings yet.')),
+            ],
+          );
+        }
+        return ListView.builder(
+          physics: const AlwaysScrollableScrollPhysics(),
+          itemCount: s.entries.length + 1,
+          itemBuilder: (context, i) {
+            if (i == 0) {
+              return Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                child: Text(
+                  s.seasonName.isEmpty
+                      ? 'Season standings'
+                      : s.seasonName,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              );
+            }
+            final e = s.entries[i - 1];
+            final handle = e.golfplusHandle;
+            return ListTile(
+              leading: CircleAvatar(
+                backgroundColor: i == 1
+                    ? Colors.amber.shade700
+                    : Colors.grey.shade300,
+                child: Text('$i',
+                    style: TextStyle(
+                        color: i == 1 ? Colors.white : Colors.black87,
+                        fontWeight: FontWeight.bold)),
+              ),
+              title: Text(
+                handle != null && handle.isNotEmpty
+                    ? '${e.displayName} ($handle)'
+                    : e.displayName,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Text(
+                  '${e.tournamentsPlayed} ${e.tournamentsPlayed == 1 ? 'tournament' : 'tournaments'}'),
+              trailing: Text('${e.totalPoints} pts',
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 16)),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _tournamentView() {
     return AsyncBody<List<LeaderboardEntry>>(
       future: _future,
       onRefresh: _refresh,

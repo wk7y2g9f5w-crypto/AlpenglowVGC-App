@@ -327,6 +327,52 @@ class LeaderboardEntry {
   bool get isPending => status == 'pending';
 }
 
+/// One row of the season points standings
+/// (GET /api/seasons/standings -> standings[]).
+class SeasonStandingEntry {
+  final String discordId;
+  final String displayName;
+  final String? golfplusHandle;
+  final int totalPoints;
+  final int tournamentsPlayed;
+
+  const SeasonStandingEntry({
+    required this.discordId,
+    required this.displayName,
+    this.golfplusHandle,
+    required this.totalPoints,
+    required this.tournamentsPlayed,
+  });
+
+  factory SeasonStandingEntry.fromJson(Map<String, dynamic> json) {
+    return SeasonStandingEntry(
+      discordId: (json['discord_id'] ?? '').toString(),
+      displayName:
+          (json['display_name'] ?? json['name'] ?? '?').toString(),
+      golfplusHandle: json['golfplus_handle']?.toString(),
+      totalPoints: (json['total_points'] as num?)?.toInt() ?? 0,
+      tournamentsPlayed:
+          (json['tournaments_played'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// Season points standings: the active season's name plus ranked entries.
+/// [SeasonStandings.empty] represents "no active season / no standings".
+class SeasonStandings {
+  final String seasonName;
+  final List<SeasonStandingEntry> entries;
+
+  const SeasonStandings({
+    required this.seasonName,
+    required this.entries,
+  });
+
+  const SeasonStandings.empty()
+      : seasonName = '',
+        entries = const [];
+}
+
 class PlayerMe {
   final String discordId;
   final String displayName;

@@ -333,6 +333,28 @@ class ApiClient {
     return (body as Map<String, dynamic>? ?? {});
   }
 
+  /// Typed season points standings. Returns [SeasonStandings.empty] when
+  /// there is no active season (API 404 no_active_season) instead of
+  /// throwing, so the UI can show a friendly empty state.
+  Future<SeasonStandings> seasonStandings() async {
+    try {
+      final body = await _get('/api/seasons/standings');
+      final map = body as Map<String, dynamic>? ?? {};
+      final season = map['season'] as Map<String, dynamic>?;
+      final items = (map['standings'] as List? ?? []);
+      return SeasonStandings(
+        seasonName: (season?['name'] ?? '').toString(),
+        entries: items
+            .whereType<Map<String, dynamic>>()
+            .map(SeasonStandingEntry.fromJson)
+            .toList(growable: false),
+      );
+    } on ApiException catch (e) {
+      if (e.statusCode == 404) return const SeasonStandings.empty();
+      rethrow;
+    }
+  }
+
   // --- Players -------------------------------------------------------------
 
   Future<PlayerMe> getMe() async {
