@@ -10,7 +10,7 @@ import '../widgets/score_badge.dart';
 
 /// Native score entry screen mirroring the Discord bot's tap-to-enter UI.
 ///
-/// - Player picker (anyone in the tee time)
+/// - Player chips (everyone in the tee time, always visible)
 /// - Par-relative quick buttons when hole pars are known, numeric entry otherwise
 /// - Auto-advance, prev/next, custom score 1–15
 /// - Running total + to-par header
@@ -161,6 +161,24 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       _loading = true;
     });
     _loadCard(_player?.discordId, rn).then((_) {
+      if (mounted) setState(() => _loading = false);
+    });
+  }
+
+  /// Switch to another player's scorecard. Any pending debounced live
+  /// save for the current player is flushed first so a quick switch
+  /// can't drop a just-entered score, then the new player's card
+  /// loads fresh from the server.
+  Future<void> _pickPlayer(TeeTimePlayer p) async {
+    if (p.discordId == _player?.discordId) return;
+    _saveTimer?.cancel();
+    if (_player != null) await _liveSave();
+    if (!mounted) return;
+    setState(() {
+      _player = p;
+      _loading = true;
+    });
+    _loadCard(p.discordId, _roundNumber).then((_) {
       if (mounted) setState(() => _loading = false);
     });
   }
@@ -501,35 +519,30 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
               },
             ),
           ),
-        // Header: player picker + running total / to-par.
+        // Header: player chips (every player in the tee time, always
+        // visible) + running total / to-par. Tapping a chip switches to
+        // that player's scorecard instantly.
         Container(
           padding: const EdgeInsets.all(12),
           color: Theme.of(context).colorScheme.surfaceContainerHighest,
           child: Row(
             children: [
               Expanded(
-                child: DropdownButtonFormField<TeeTimePlayer>(
-                  initialValue: _player,
-                  decoration: const InputDecoration(
-                    labelText: 'Player',
-                    border: OutlineInputBorder(),
-                    isDense: true,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: widget.teeTime.players.map((p) {
+                      final selected = p.discordId == _player?.discordId;
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ChoiceChip(
+                          label: Text(p.displayName),
+                          selected: selected,
+                          onSelected: (_) => _pickPlayer(p),
+                        ),
+                      );
+                    }).toList(),
                   ),
-                  items: widget.teeTime.players
-                      .map((p) => DropdownMenuItem(
-                          value: p, child: Text(p.displayName)))
-                      .toList(),
-                  onChanged: (p) {
-                    if (p == null || p.discordId == _player?.discordId) return;
-                    _saveTimer?.cancel();
-                    setState(() {
-                      _player = p;
-                      _loading = true;
-                    });
-                    _loadCard(p.discordId, _roundNumber).then((_) {
-                      if (mounted) setState(() => _loading = false);
-                    });
-                  },
                 ),
               ),
               const SizedBox(width: 12),
