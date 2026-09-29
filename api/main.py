@@ -868,6 +868,15 @@ async def create_tournament(body: TournamentCreate, user: CrewUser) -> dict:
         ),
     )
     await db.enqueue_outbox(DB_PATH, "tournament_created", {"tournament_id": tid})
+    # Auto-link the new tournament to every active season so its season
+    # points land automatically on completion. Failure-safe: a link failure
+    # must never break tournament creation (the bot's /tournament create
+    # does the same).
+    try:
+        for s in await db.get_active_seasons(DB_PATH, GUILD_ID):
+            await db.add_tournament_to_season(DB_PATH, s["id"], tid)
+    except Exception as e:
+        print(f"season auto-link failed for tournament {tid}: {e}")
     t = await db.get_tournament(DB_PATH, tid)
     rounds = await db.list_rounds(DB_PATH, tid)
     return _tournament_json(t, registered=False, rounds=rounds)

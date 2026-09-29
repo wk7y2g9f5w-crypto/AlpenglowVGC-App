@@ -1677,6 +1677,16 @@ async def get_active_season(db_path, guild_id) -> dict | None:
     )
 
 
+async def get_active_seasons(db_path, guild_id) -> list[dict]:
+    """All active seasons (oldest first) for auto-linking new tournaments."""
+    return await _fetchall(
+        db_path,
+        "SELECT * FROM seasons WHERE guild_id = ? AND status = 'active'"
+        " ORDER BY id ASC",
+        (guild_id,),
+    )
+
+
 async def list_seasons(db_path, guild_id) -> list[dict]:
     return await _fetchall(
         db_path,

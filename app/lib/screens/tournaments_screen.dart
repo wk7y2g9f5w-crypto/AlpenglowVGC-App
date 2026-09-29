@@ -7,6 +7,7 @@ import '../widgets/common.dart';
 import '../widgets/course_art.dart';
 import 'tournament_detail_screen.dart';
 import 'create_tournament_screen.dart';
+import 'season_standings_screen.dart';
 
 /// Home tab: list of tournaments with pull-to-refresh.
 class TournamentsScreen extends StatefulWidget {
@@ -54,7 +55,25 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Tournaments')),
+      appBar: AppBar(
+        title: const Text('Tournaments'),
+        actions: [
+          IconButton(
+            tooltip: 'Season standings',
+            icon: const Icon(Icons.emoji_events),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => SeasonStandingsScreen(
+                    auth: widget.auth,
+                    settings: widget.settings,
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
       floatingActionButton: _isCrew
           ? FloatingActionButton.extended(
               onPressed: () async {

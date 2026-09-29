@@ -895,6 +895,27 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(rows[0]["total_points"], 100)
         self.assertEqual(rows[1]["discord_id"], "456")
 
+    def test_create_tournament_auto_links_active_season(self):
+        sid = run(db.create_season(self.db_path, GUILD, "Fall 2026", "123"))
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body())
+        self.assertEqual(r.status_code, 201, r.text)
+        tid = r.json()["id"]
+        seasons = run(db.get_seasons_for_tournament(self.db_path, tid,
+                                                    "active"))
+        self.assertEqual([s["id"] for s in seasons], [sid])
+
+    def test_create_tournament_no_active_season_no_link(self):
+        self._crew(True)
+        r = self.client.post("/api/tournaments", headers=self.h("123"),
+                             json=self._create_body())
+        self.assertEqual(r.status_code, 201, r.text)
+        tid = r.json()["id"]
+        seasons = run(db.get_seasons_for_tournament(self.db_path, tid,
+                                                    "active"))
+        self.assertEqual(seasons, [])
+
     # -- profile ------------------------------------------------------
     def test_profile_fields(self):
         self.with_tz("123")

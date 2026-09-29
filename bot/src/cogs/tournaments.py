@@ -417,6 +417,16 @@ class Tournaments(commands.Cog):
                 for _ in range(rounds)
             ],
         )
+        # Auto-link to every active season so season points award on
+        # completion without a manual /season add_tournament step.
+        # Failure-safe: never break tournament creation.
+        try:
+            for s in await db.get_active_seasons(
+                    self.bot.db_path, str(interaction.guild_id)):
+                await db.add_tournament_to_season(self.bot.db_path, s["id"],
+                                                  tid)
+        except Exception as e:  # noqa: BLE001 - creation must survive
+            print(f"season auto-link failed for tournament {tid}: {e}")
         self.bot.add_view(RegisterView(tid))
 
         # Real rounds carry the default-split dates from create_tournament.

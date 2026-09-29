@@ -83,6 +83,22 @@ class SeasonDbTest(unittest.IsolatedAsyncioTestCase):
         linked = await db.get_season_tournaments(self.db_path, sid)
         self.assertEqual([t["id"] for t in linked], [tid])
 
+    async def test_get_active_seasons_plural(self):
+        self.assertEqual(await db.get_active_seasons(self.db_path, "guild1"),
+                         [])
+        s1 = await db.create_season(self.db_path, "guild1", "S1", "admin1")
+        s2 = await db.create_season(self.db_path, "guild1", "S2", "admin1")
+        rows = await db.get_active_seasons(self.db_path, "guild1")
+        self.assertEqual([s["id"] for s in rows], [s1, s2])
+        # A completed season is excluded.
+        self.assertTrue(await db.complete_season(self.db_path, s2))
+        rows = await db.get_active_seasons(self.db_path, "guild1")
+        self.assertEqual([s["id"] for s in rows], [s1])
+        # Other guilds are excluded.
+        await db.create_season(self.db_path, "guild2", "Other", "admin1")
+        rows = await db.get_active_seasons(self.db_path, "guild1")
+        self.assertEqual([s["id"] for s in rows], [s1])
+
     async def test_points_aggregate(self):
         sid = await db.create_season(self.db_path, "guild1", "S1", "admin1")
         t1 = await self._make_tournament("T1")

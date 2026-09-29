@@ -6,6 +6,7 @@ import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
 import '../widgets/course_art.dart';
+import '../widgets/season_standings_view.dart';
 import 'profile_screen.dart';
 import 'tee_time_detail_screen.dart';
 
@@ -998,7 +999,6 @@ class _LeaderboardTab extends StatefulWidget {
 
 class _LeaderboardTabState extends State<_LeaderboardTab> {
   late Future<List<LeaderboardEntry>> _future;
-  Future<SeasonStandings>? _seasonFuture;
 
   /// 0 = tournament leaderboard, 1 = season points standings.
   int _view = 0;
@@ -1032,12 +1032,6 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
     await f;
   }
 
-  Future<void> _refreshSeason() async {
-    final f = _api.seasonStandings();
-    setState(() => _seasonFuture = f);
-    await f;
-  }
-
   String _formatToPar(String? toPar) {
     if (toPar == null || toPar.isEmpty || toPar == 'null') return '–';
     final n = int.tryParse(toPar);
@@ -1065,10 +1059,7 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
             ],
             onChanged: (v) {
               if (v == null) return;
-              setState(() {
-                _view = v;
-                if (v == 1) _seasonFuture ??= _api.seasonStandings();
-              });
+              setState(() => _view = v);
             },
           ),
         ),
@@ -1077,66 +1068,9 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
     );
   }
 
-  Widget _seasonView() {
-    _seasonFuture ??= _api.seasonStandings();
-    return AsyncBody<SeasonStandings>(
-      future: _seasonFuture!,
-      onRefresh: _refreshSeason,
-      builder: (context, s) {
-        if (s.entries.isEmpty) {
-          return ListView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            children: const [
-              SizedBox(height: 120),
-              Center(child: Text('No season standings yet.')),
-            ],
-          );
-        }
-        return ListView.builder(
-          physics: const AlwaysScrollableScrollPhysics(),
-          itemCount: s.entries.length + 1,
-          itemBuilder: (context, i) {
-            if (i == 0) {
-              return Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                child: Text(
-                  s.seasonName.isEmpty
-                      ? 'Season standings'
-                      : s.seasonName,
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.bold),
-                ),
-              );
-            }
-            final e = s.entries[i - 1];
-            final handle = e.golfplusHandle;
-            return ListTile(
-              leading: CircleAvatar(
-                backgroundColor: i == 1
-                    ? Colors.amber.shade700
-                    : Colors.grey.shade300,
-                child: Text('$i',
-                    style: TextStyle(
-                        color: i == 1 ? Colors.white : Colors.black87,
-                        fontWeight: FontWeight.bold)),
-              ),
-              title: Text(
-                handle != null && handle.isNotEmpty
-                    ? '${e.displayName} ($handle)'
-                    : e.displayName,
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-              subtitle: Text(
-                  '${e.tournamentsPlayed} ${e.tournamentsPlayed == 1 ? 'tournament' : 'tournaments'}'),
-              trailing: Text('${e.totalPoints} pts',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold, fontSize: 16)),
-            );
-          },
-        );
-      },
-    );
-  }
+  /// Season points standings, shared with the standalone Season
+  /// Standings screen.
+  Widget _seasonView() => SeasonStandingsView(api: _api);
 
   Widget _tournamentView() {
     return AsyncBody<List<LeaderboardEntry>>(
