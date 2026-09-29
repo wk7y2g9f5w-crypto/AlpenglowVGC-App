@@ -668,7 +668,12 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
             Text(formatDateRange(t.startDate, t.endDate),
                 style: const TextStyle(
                     color: Colors.white70, fontSize: 14)),
-            if (t.settingsSummary.isNotEmpty) ...[
+            if (t.isMultiRound) ...[
+              const SizedBox(height: 4),
+              const Text('Follow settings below for round setup in Golf+',
+                  style: TextStyle(
+                      color: Colors.white70, fontSize: 13)),
+            ] else if (t.settingsSummary.isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(t.settingsSummary,
                   style: const TextStyle(
