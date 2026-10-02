@@ -7,12 +7,14 @@ and Discord always agree.
 
 This service NEVER modifies the bot's behavior: it shares the one SQLite
 file, keeps transactions short (the bot's db layer opens a fresh connection
-per call), and never writes to Discord (channels/messages/roles are
-bot-only). The one exception is a read-only lookup of the caller's guild
-roles via Discord's REST API, used solely to gate admin-only endpoints —
-mirroring the bot's own admin/mod/Tournament Director check.
+per call), and never writes to Discord (channels/messages are bot-only).
+The exceptions are two Discord REST API interactions: a read-only lookup of
+the caller's guild roles to gate admin-only endpoints — mirroring the bot's
+own admin/mod/Tournament Director check — and granting/revoking the
+Mod and Tournament Director crew roles for the in-app crew management
+screen (Admin-role changes stay owner-managed in Discord itself).
 
-Auth: every request except /api/health needs
+Auth: every request except /api/health and /privacy needs
 ``Authorization: Bearer <discord_user_oauth_token>``. The token is validated
 per-request against Discord's /users/@me endpoint and is never stored or
 logged.
@@ -62,7 +64,8 @@ DB_PATH = (
 GUILD_ID = str(config.GUILD_ID)
 
 import httpx  # noqa: E402
-from fastapi import Depends, FastAPI, HTTPException, Request, status  # noqa: E402
+from fastapi import (Depends, FastAPI, HTTPException, Request, Response,
+                     status)  # noqa: E402
 from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
 
 
@@ -130,8 +133,11 @@ CurrentUser = Annotated[dict, Depends(get_current_user)]
 # Mirrors the bot's admin model (cogs/common.py is_admin): the "Tournament
 # Admin" role, the "Tournament Director" role, or Manage Server permission —
 # plus the "Mod" and "Admin" crew roles, since the app's admin surface is
-# meant for any admin/moderator. Read-only Discord REST lookup; the API
-# never writes to Discord.
+# meant for any admin/moderator. Discord REST lookups gate crew/admin-only
+# endpoints; the only write the API ever performs is granting/revoking the
+# Mod and Tournament Director roles in the crew management screen (see
+# discord_modify_member_role — Admin-role changes stay owner-managed in
+# Discord itself).
 CREW_ROLE_NAMES = frozenset(
     {"Tournament Admin", "Admin", "Mod", "Tournament Director"}
 )
@@ -246,6 +252,105 @@ async def fetch_mod_admin_status(discord_id: str) -> bool | None:
         return None
     privileged, names = standing
     return privileged or bool(names & MOD_ADMIN_ROLE_NAMES)
+
+
+# --------------------------------------------------------------------------
+# Discord REST helpers for the in-app crew management screen.
+# Module-level functions so unit tests can monkeypatch them, mirroring the
+# fetch_*_status pattern above. These are the API's only Discord writes:
+# granting/revoking Mod and Tournament Director roles.
+# --------------------------------------------------------------------------
+def _discord_headers() -> dict | None:
+    """Bot-token auth headers for the Discord REST API.
+
+    None when no bot token is configured (DISCORD_TOKEN env, else the bot's
+    config).
+    """
+    token = os.environ.get("DISCORD_TOKEN") or config.DISCORD_TOKEN
+    if not token:
+        return None
+    return {"Authorization": f"Bot {token}"}
+
+
+def _discord_guild_id() -> str:
+    """Guild id for Discord REST calls (GUILD_ID env, else bot config)."""
+    return os.environ.get("GUILD_ID") or str(config.GUILD_ID or "")
+
+
+async def discord_guild_roles() -> list[dict] | None:
+    """All roles in the guild, via Discord's REST API.
+
+    None when Discord couldn't be reached or the API isn't configured.
+    """
+    headers = _discord_headers()
+    guild_id = _discord_guild_id()
+    if not headers or not guild_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"https://discord.com/api/v10/guilds/{guild_id}/roles",
+                headers=headers,
+            )
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        return resp.json()
+    except (ValueError, TypeError):
+        return None
+
+
+async def discord_guild_members() -> list[dict] | None:
+    """Up to 1000 guild members, via Discord's REST API.
+
+    None when Discord couldn't be reached or the API isn't configured.
+    """
+    headers = _discord_headers()
+    guild_id = _discord_guild_id()
+    if not headers or not guild_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"https://discord.com/api/v10/guilds/{guild_id}/members",
+                params={"limit": 1000},
+                headers=headers,
+            )
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        return resp.json()
+    except (ValueError, TypeError):
+        return None
+
+
+async def discord_modify_member_role(discord_id: str, role_id: str,
+                                     action: str) -> int | None:
+    """Grant (PUT) or revoke (DELETE) a guild role for a member.
+
+    Returns the HTTP status code, or None on transport failure. Discord
+    answers 204 on success and 404 when the member isn't in the guild.
+    """
+    headers = _discord_headers()
+    guild_id = _discord_guild_id()
+    if not headers or not guild_id or action not in ("grant", "revoke"):
+        return None
+    method = "PUT" if action == "grant" else "DELETE"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.request(
+                method,
+                f"https://discord.com/api/v10/guilds/{guild_id}"
+                f"/members/{discord_id}/roles/{role_id}",
+                headers=headers,
+            )
+    except httpx.HTTPError:
+        return None
+    return resp.status_code
 
 
 async def require_crew(user: CurrentUser) -> dict:
@@ -732,6 +837,79 @@ async def coded_http_exception_handler(request: Request, exc: HTTPException):
 @app.get("/api/health")
 async def health() -> dict:
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Privacy policy (public page; the app links it from Settings)
+# --------------------------------------------------------------------------
+PRIVACY_POLICY_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alpenglow VGC Privacy Policy</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 40em;
+         margin: 2em auto; padding: 0 1.2em; line-height: 1.6; color: #222; }
+  h1 { font-size: 1.5em; } h2 { font-size: 1.15em; margin-top: 1.8em; }
+  .meta { color: #666; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<h1>Alpenglow VGC Privacy Policy</h1>
+<p class="meta">Dated 2026-10-02</p>
+
+<p>Alpenglow VGC is a community-run golf club for Golf+ players. This policy
+describes what data the Alpenglow VGC companion app and its server collect,
+how it is used, and how you can delete it.</p>
+
+<h2>What we collect</h2>
+<ul>
+  <li><strong>Discord identity.</strong> When you sign in with Discord, we
+  receive your Discord user ID and username. Your sign-in token is validated
+  per request and is never stored.</li>
+  <li><strong>Player profile.</strong> Your display name, optional Golf+ handle,
+  and optional timezone (used to show tee times in your local time).</li>
+  <li><strong>Push notifications.</strong> Your device's APNs push token and
+  your notification preferences (which event types you want to hear about).</li>
+  <li><strong>Tournament activity.</strong> Tournament registrations, tee time
+  memberships, and scorecards you submit — including an optional witness name
+  you may enter on a scorecard. Completed rounds feed season points, course
+  records, and leaderboards.</li>
+  <li><strong>Match play, alt-shot, and casual rounds.</strong> Your
+  participation, scores, and win/loss records in match-play, alt-shot, and
+  casual rounds.</li>
+</ul>
+
+<h2>How it is used</h2>
+<p>Your data is stored in the app's server database (hosted on Render) and is
+used only to operate the community's tournaments, tee times, scorecards, and
+leaderboards. Tournament information you participate in is visible to other
+community members — for example on leaderboards, the tee sheet, and in posts
+the club's Discord bot makes to the community's Discord server. Your data is
+never sold, rented, or shared with advertisers.</p>
+
+<h2>Deletion</h2>
+<p>You can permanently delete your account and all associated personal data at
+any time: in the app, go to <strong>Settings &rarr; Delete Account</strong>.
+Alternatively, ask a server admin through the Alpenglow VGC Discord server and
+they will delete it for you. Deletion removes your profile, device tokens,
+notification preferences, registrations, tee time memberships, scorecards,
+and season points. Shared community history (such as completed tournament
+results and leaderboards) is left intact so other members' records stay
+complete.</p>
+
+<h2>Contact</h2>
+<p>Questions about this policy? Reach a server admin through the Alpenglow VGC
+Discord server.</p>
+</body>
+</html>"""
+
+
+@app.get("/privacy", include_in_schema=False)
+async def privacy_policy() -> Response:
+    """Public static privacy policy page, linked from the app's Settings."""
+    return Response(content=PRIVACY_POLICY_HTML, media_type="text/html")
 
 
 # --------------------------------------------------------------------------
@@ -1251,6 +1429,115 @@ async def delete_tournament(tournament_id: int, user: AdminUser) -> dict:
     counts = await db.tournament_usage_counts(DB_PATH, t["id"])
     await db.delete_tournament(DB_PATH, t["id"])
     return {"deleted": True, "counts": counts}
+
+
+# --------------------------------------------------------------------------
+# Crew management (admins only): list players with crew roles, grant/revoke
+# Mod and Tournament Director. This is the API's only write path to Discord.
+# --------------------------------------------------------------------------
+@app.get("/api/admin/players")
+async def admin_list_players(user: AdminUser) -> dict:
+    """Registered players with their crew-relevant Discord roles.
+
+    Resolves roles with one guild-roles fetch and one guild-members fetch
+    (not one call per player). 503 when Discord can't be reached.
+    """
+    players = await db.list_players(DB_PATH)
+    roles = await discord_guild_roles()
+    members = await discord_guild_members()
+    if roles is None or members is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not reach Discord — try again shortly.",
+        )
+    role_names = {r.get("id"): r.get("name") for r in roles if r.get("id")}
+    member_crew_roles: dict[str, list[str]] = {}
+    for m in members:
+        uid = str((m.get("user") or {}).get("id"))
+        names = sorted(
+            {role_names[r] for r in (m.get("roles") or [])
+             if r in role_names and role_names[r] in CREW_ROLE_NAMES}
+        )
+        if uid:
+            member_crew_roles[uid] = names
+    return {
+        "players": [
+            {
+                "discord_id": p["discord_id"],
+                "display_name": p["display_name"],
+                "golfplus_handle": p["golfplus_handle"],
+                "roles": member_crew_roles.get(str(p["discord_id"]), []),
+            }
+            for p in players
+        ]
+    }
+
+
+class CrewRoleChange(BaseModel):
+    discord_id: str
+    role: str
+    action: str
+
+
+# Roles the app may grant/revoke. "Admin" and "Tournament Admin" are
+# deliberately excluded: admin changes stay owner-managed in Discord itself,
+# so this endpoint can never be used to escalate someone to full admin.
+MANAGEABLE_CREW_ROLES = frozenset({"Mod", "Tournament Director"})
+
+
+@app.post("/api/admin/crew/roles")
+async def change_crew_role(body: CrewRoleChange, user: AdminUser) -> dict:
+    """Grant or revoke a crew role via the Discord REST API (admins only)."""
+    if body.role not in MANAGEABLE_CREW_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="role must be exactly 'Mod' or 'Tournament Director'."
+                   " 'Admin' and 'Tournament Admin' are owner-managed in"
+                   " Discord and cannot be changed here.",
+        )
+    if body.action not in ("grant", "revoke"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="action must be 'grant' or 'revoke'.",
+        )
+    player = await db.get_player(DB_PATH, body.discord_id)
+    if player is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Player is not registered.",
+        )
+    roles = await discord_guild_roles()
+    if roles is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not reach Discord — try again shortly.",
+        )
+    role_id = next(
+        (r.get("id") for r in roles if r.get("name") == body.role), None)
+    if role_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Role '{body.role}' not found in the guild.",
+        )
+    result = await discord_modify_member_role(
+        body.discord_id, role_id, body.action)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Discord request failed — try again shortly.",
+        )
+    if result == 204:
+        return {"ok": True, "discord_id": body.discord_id,
+                "role": body.role, "action": body.action}
+    if result == 404:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Member is not in the guild.",
+        )
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=f"Discord returned status {result}.",
+    )
 
 
 @app.post("/api/tee-times/{tee_time_id}/request")
@@ -2961,6 +3248,19 @@ async def update_me(body: PlayerUpdate, user: CurrentUser) -> dict:
         # Empty string -> NULL (unlink), like the bot's /unlink_golfplus.
         await db.set_golfplus_handle(DB_PATH, pid, handle or None)
     return _profile_json(await db.get_player(DB_PATH, pid))
+
+
+@app.delete("/api/players/me")
+async def delete_me(user: CurrentUser) -> dict:
+    """Permanently delete the caller's account and personal data.
+
+    Removes the player row, device tokens, notification preferences, and
+    every registration, tee time membership, scorecard, and season-points
+    row tied to the user (see db.delete_player_data for the full cascade).
+    Shared tournament history is left intact. Irreversible.
+    """
+    await db.delete_player_data(DB_PATH, user["discord_id"])
+    return {"deleted": True, "discord_id": user["discord_id"]}
 
 
 # --------------------------------------------------------------------------

@@ -49,6 +49,22 @@ async def fake_fetch_mod_admin_status(discord_id: str):
     return False
 
 
+async def fake_discord_guild_roles():
+    """Default: Discord unreachable. Override per-case."""
+    return None
+
+
+async def fake_discord_guild_members():
+    """Default: Discord unreachable. Override per-case."""
+    return None
+
+
+async def fake_discord_modify_member_role(discord_id: str, role_id: str,
+                                          action: str):
+    """Default: Discord unreachable. Override per-case."""
+    return None
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -67,6 +83,9 @@ class ApiTestCase(unittest.TestCase):
         main.fetch_crew_status = fake_fetch_crew_status
         main.fetch_admin_status = fake_fetch_admin_status
         main.fetch_mod_admin_status = fake_fetch_mod_admin_status
+        main.discord_guild_roles = fake_discord_guild_roles
+        main.discord_guild_members = fake_discord_guild_members
+        main.discord_modify_member_role = fake_discord_modify_member_role
         self.client = None
         self._enter_client()
 
@@ -2544,6 +2563,332 @@ class AltShotRecordsSummaryApiTestCase(ApiTestCase):
             params={"team_size": 2, "tee_position": "bogus"},
             headers=self.h("1"))
         self.assertEqual(r.status_code, 422, r.text)
+
+
+class AppStorePrepApiTestCase(ApiTestCase):
+    """Privacy page, account deletion, and crew role management."""
+
+    # -- helpers ------------------------------------------------------
+    def _seed_deletion_rows(self, uid):
+        """Seed one row per user-subject table for uid; return parent ids."""
+        team_id = run(db.create_team(self.db_path, self.t_open,
+                                     f"Del Team {uid}", "someone"))
+        tt_id = run(db.create_tee_time(self.db_path, self.t_open, "Del TT",
+                                       "2026-10-05T10:00:00+00:00", 4,
+                                       "someone", "chan"))
+        season_id = run(db.create_season(self.db_path, GUILD, "Del Season",
+                                         "someone"))
+
+        async def ex(sql, params):
+            return await db._execute(self.db_path, sql, params)
+
+        run(ex("INSERT INTO players (discord_id, display_name) VALUES (?,?)",
+               (uid, f"User{uid}")))
+        run(ex("INSERT INTO devices (discord_id, push_token, platform,"
+               " updated_at) VALUES (?,?,?,?)",
+               (uid, f"tok-{uid}", "ios", "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO notification_prefs (discord_id, updated_at)"
+               " VALUES (?,?)", (uid, "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO push_outbox (discord_id, title, body, created_at)"
+               " VALUES (?,?,?,?)", (uid, "t", "b", "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO registrations (tournament_id, player_discord_id,"
+               " registered_at) VALUES (?,?,?)",
+               (self.t_open, uid, "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO team_members (team_id, player_discord_id)"
+               " VALUES (?,?)", (team_id, uid)))
+        run(ex("INSERT INTO tee_time_players (tee_time_id, player_discord_id)"
+               " VALUES (?,?)", (tt_id, uid)))
+        run(ex("INSERT INTO join_requests (tee_time_id, player_discord_id,"
+               " created_at) VALUES (?,?,?)",
+               (tt_id, uid, "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO scorecards (tournament_id, round_number,"
+               " player_discord_id, holes_json, total, submitted_at)"
+               " VALUES (?,?,?,?,?,?)",
+               (self.t_open, 1, uid, "[4,4,4]", 12,
+                "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO season_points (season_id, tournament_id,"
+               " player_discord_id, position, points) VALUES (?,?,?,?,?)",
+               (season_id, self.t_open, uid, 1, 10)))
+        run(ex("INSERT INTO casual_tee_times (id, creator_discord_id, label,"
+               " course, pars, starts_at, created_at) VALUES (?,?,?,?,?,?,?)",
+               (f"cas-{uid}", "someone", "Cas", "Augusta", PARS_18,
+                "2026-10-05T10:00:00+00:00", "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO casual_tee_time_players (tee_time_id, discord_id,"
+               " joined_at) VALUES (?,?,?)",
+               (f"cas-{uid}", uid, "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO altshot_teams (id, tee_time_id,"
+               " player1_discord_id, created_at) VALUES (?,?,?,?)",
+               (f"alt-{uid}", "some-tt", uid, "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO altshot_team_members (id, team_id, discord_id,"
+               " name, created_at) VALUES (?,?,?,?,?)",
+               (f"altm-{uid}", f"alt-{uid}", uid, f"User{uid}",
+                "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO matchplay_side_members (id, side_id, discord_id,"
+               " created_at) VALUES (?,?,?,?)",
+               (f"mpm-{uid}", "side-1", uid, "2026-10-02T00:00:00")))
+        run(ex("INSERT INTO matchplay_records (id, format, discord_id,"
+               " player_name) VALUES (?,?,?,?)",
+               (f"mpr-{uid}", "single", uid, f"User{uid}")))
+
+    def _count(self, table, col, uid):
+        rows = run(db._fetchall(
+            self.db_path,
+            f"SELECT COUNT(*) AS n FROM {table} WHERE {col} = ?", (uid,)))
+        return rows[0]["n"]
+
+    # -- privacy ------------------------------------------------------
+    def test_privacy_public_no_auth(self):
+        r = self.client.get("/privacy")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("text/html", r.headers["content-type"])
+        self.assertIn("Alpenglow VGC Privacy Policy", r.text)
+        self.assertIn("2026-10-02", r.text)
+        self.assertIn("Delete Account", r.text)
+
+    # -- account deletion ---------------------------------------------
+    def test_delete_me_unauthorized(self):
+        r = self.client.delete("/api/players/me")
+        self.assertEqual(r.status_code, 401)
+
+    def test_delete_me_cascades(self):
+        self._seed_deletion_rows("123")
+        self._seed_deletion_rows("999")
+        r = self.client.delete("/api/players/me", headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"deleted": True, "discord_id": "123"})
+
+        subject_tables = [
+            ("players", "discord_id"), ("devices", "discord_id"),
+            ("notification_prefs", "discord_id"), ("push_outbox", "discord_id"),
+            ("registrations", "player_discord_id"),
+            ("team_members", "player_discord_id"),
+            ("tee_time_players", "player_discord_id"),
+            ("join_requests", "player_discord_id"),
+            ("scorecards", "player_discord_id"),
+            ("season_points", "player_discord_id"),
+            ("casual_tee_time_players", "discord_id"),
+            ("altshot_team_members", "discord_id"),
+            ("matchplay_side_members", "discord_id"),
+            ("matchplay_records", "discord_id"),
+        ]
+        for table, col in subject_tables:
+            self.assertEqual(self._count(table, col, "123"), 0,
+                             f"{table} still has rows for deleted user")
+            self.assertGreater(self._count(table, col, "999"), 0,
+                               f"{table} lost the OTHER user's rows")
+
+        # Shared altshot team row survives with player1_discord_id nulled.
+        row = run(db._fetchone(
+            self.db_path,
+            "SELECT player1_discord_id FROM altshot_teams WHERE id = ?",
+            ("alt-123",)))
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["player1_discord_id"])
+        # Shared history untouched: tournament and season still exist.
+        self.assertIsNotNone(run(db.get_tournament(self.db_path,
+                                                   self.t_open)))
+        self.assertIsNotNone(run(db.get_season(self.db_path, 1)))
+
+    def test_delete_me_unknown_user_ok(self):
+        # Auth'd but no player row: still 200 (idempotent).
+        r = self.client.get("/api/players/me", headers=self.h("777"))
+        self.assertEqual(r.status_code, 200)
+        run(db._execute(self.db_path,
+                        "DELETE FROM players WHERE discord_id = ?", ("777",)))
+        r = self.client.delete("/api/players/me", headers=self.h("777"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["deleted"], True)
+
+    # -- admin player list --------------------------------------------
+    def _discord(self, roles, members):
+        async def fake_roles():
+            return roles
+
+        async def fake_members():
+            return members
+
+        main.discord_guild_roles = fake_roles
+        main.discord_guild_members = fake_members
+
+    def _ok_roles_members(self):
+        self._discord(
+            [{"id": "r-mod", "name": "Mod"},
+             {"id": "r-td", "name": "Tournament Director"},
+             {"id": "r-admin", "name": "Admin"},
+             {"id": "r-fun", "name": "Fun"}],
+            [{"user": {"id": "123"}, "roles": ["r-mod", "r-admin", "r-fun"]},
+             {"user": {"id": "456"}, "roles": ["r-td"]},
+             {"user": {"id": "789"}, "roles": []}],
+        )
+
+    def test_admin_players_list(self):
+        self._admin(True)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        run(db.upsert_player(self.db_path, "456", "Amy"))
+        run(db.upsert_player(self.db_path, "789", "NoRole"))
+        run(db.set_golfplus_handle(self.db_path, "123", "zedvr"))
+        r = self.client.get("/api/admin/players", headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        players = r.json()["players"]
+        # Ordered by display_name; only crew roles surfaced, sorted.
+        # (The authed caller "1" is upserted as User1 by the auth flow.)
+        by_name = {p["display_name"]: p for p in players}
+        names = sorted(by_name)
+        self.assertEqual(names, ["Amy", "NoRole", "User1", "Zed"])
+        ordered = [p["display_name"] for p in players]
+        self.assertEqual(ordered, sorted(ordered))
+        self.assertEqual(by_name["Amy"]["roles"], ["Tournament Director"])
+        self.assertEqual(by_name["NoRole"]["roles"], [])
+        self.assertEqual(by_name["Zed"]["roles"], ["Admin", "Mod"])
+        self.assertEqual(by_name["Zed"]["discord_id"], "123")
+        self.assertEqual(by_name["Zed"]["golfplus_handle"], "zedvr")
+
+    def test_admin_players_forbidden_non_admin(self):
+        self._admin(False)
+        self._ok_roles_members()
+        r = self.client.get("/api/admin/players", headers=self.h("1"))
+        self.assertEqual(r.status_code, 403)
+
+    def test_admin_players_503_when_discord_down(self):
+        self._admin(True)
+        # Defaults: discord helpers return None -> 503.
+        r = self.client.get("/api/admin/players", headers=self.h("1"))
+        self.assertEqual(r.status_code, 503)
+
+    # -- crew role grant/revoke ---------------------------------------
+    def _modify(self, result):
+        calls = []
+
+        async def fake(discord_id, role_id, action):
+            calls.append({"discord_id": discord_id, "role_id": role_id,
+                          "action": action})
+            return result
+
+        main.discord_modify_member_role = fake
+        return calls
+
+    def test_crew_role_grant(self):
+        self._admin(True)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        calls = self._modify(204)
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123", "role": "Mod",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"ok": True, "discord_id": "123",
+                                    "role": "Mod", "action": "grant"})
+        # PUT used for grant, with the Mod role id resolved from guild roles.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["role_id"], "r-mod")
+
+    def test_crew_role_revoke(self):
+        self._admin(True)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        calls = self._modify(204)
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123",
+                                   "role": "Tournament Director",
+                                   "action": "revoke"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["action"], "revoke")
+        self.assertEqual(calls[0]["role_id"], "r-td")
+
+    def test_crew_role_forbidden_non_admin(self):
+        self._admin(False)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        self._modify(204)
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123", "role": "Mod",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_crew_role_422_admin(self):
+        self._admin(True)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123", "role": "Admin",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 422, r.text)
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123",
+                                   "role": "Tournament Admin",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_crew_role_422_bad_action(self):
+        self._admin(True)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123", "role": "Mod",
+                                   "action": "ban"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_crew_role_404_unknown_role_in_guild(self):
+        self._admin(True)
+        # Guild has no "Mod" role even though it is a manageable name.
+        self._discord([{"id": "r-td", "name": "Tournament Director"}], [])
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        self._modify(204)
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123", "role": "Mod",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_crew_role_404_unregistered_player(self):
+        self._admin(True)
+        self._ok_roles_members()
+        self._modify(204)
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "nope", "role": "Mod",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_crew_role_404_member_not_in_guild(self):
+        self._admin(True)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        self._modify(404)  # Discord: member not in guild
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123", "role": "Mod",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_crew_role_502_discord_failure(self):
+        self._admin(True)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        self._modify(None)  # transport failure
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123", "role": "Mod",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 502, r.text)
+        self._modify(500)  # unexpected Discord status
+        r = self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                             json={"discord_id": "123", "role": "Mod",
+                                   "action": "grant"})
+        self.assertEqual(r.status_code, 502, r.text)
+
+    def test_crew_role_verify_put_vs_delete(self):
+        # Directly verify the helper maps grant->PUT, revoke->DELETE.
+        self._admin(True)
+        self._ok_roles_members()
+        run(db.upsert_player(self.db_path, "123", "Zed"))
+        calls = self._modify(204)
+        self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                         json={"discord_id": "123", "role": "Mod",
+                               "action": "grant"})
+        self.client.post("/api/admin/crew/roles", headers=self.h("1"),
+                         json={"discord_id": "123", "role": "Mod",
+                               "action": "revoke"})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["action"], "grant")
+        self.assertEqual(calls[1]["action"], "revoke")
 
 
 if __name__ == "__main__":

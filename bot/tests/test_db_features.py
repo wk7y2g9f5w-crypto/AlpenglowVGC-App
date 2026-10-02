@@ -585,5 +585,91 @@ class FormatTeeTimeLocalTest(unittest.TestCase):
         self.assertEqual(common_mod.format_tee_time_local("not-a-time", "UTC"), "")
 
 
+@requires_aiosqlite
+class TestDeletePlayerData(TempDbTest):
+    """Account deletion: db.delete_player_data wipes the user's rows,
+    leaves shared history, and db.list_players orders by display name."""
+
+    async def test_list_players_ordered(self):
+        await db.upsert_player(self.db_path, "u1", "Zed")
+        await db.upsert_player(self.db_path, "u2", "Amy")
+        rows = await db.list_players(self.db_path)
+        self.assertEqual([r["discord_id"] for r in rows], ["u2", "u1"])
+        self.assertEqual(rows[0]["display_name"], "Amy")
+
+    async def test_delete_player_data(self):
+        tid = await self._make_tournament()
+        sid = await db.create_season(self.db_path, "guild1", "S1", "admin1")
+        tt_id = await self._make_tee_time(tid, players=("victim", "other"))
+        await db.upsert_player(self.db_path, "victim", "Victim")
+        await db.upsert_player(self.db_path, "other", "Other")
+        await db.register_device(self.db_path, "victim", "tok-victim", "ios")
+        await db.register_device(self.db_path, "other", "tok-other", "ios")
+        await db.set_notification_prefs(
+            self.db_path, "victim",
+            {"tournament_starts": False, "round_starts": True, "ace": True,
+             "albatross": True, "top3_changes": True})
+        await db.enqueue_push(self.db_path, "victim", "t", "b")
+        await db.register_player(self.db_path, tid, "victim")
+        await db.record_season_points(
+            self.db_path, sid, tid, [("victim", 1, 10), ("other", 2, 7)])
+        # Shared altshot team row: victim is player1, other also on the team.
+        await db._execute(
+            self.db_path,
+            "INSERT INTO altshot_teams (id, tee_time_id, player1_discord_id,"
+            " created_at) VALUES (?,?,?,?)",
+            ("alt-1", "tt-1", "victim", "2026-10-02T00:00:00"),
+        )
+        await db._execute(
+            self.db_path,
+            "INSERT INTO altshot_team_members (id, team_id, discord_id, name,"
+            " created_at) VALUES (?,?,?,?,?)",
+            ("altm-1", "alt-1", "victim", "Victim", "2026-10-02T00:00:00"),
+        )
+        await db._execute(
+            self.db_path,
+            "INSERT INTO matchplay_records (id, format, discord_id,"
+            " player_name) VALUES (?,?,?,?)",
+            ("mpr-1", "single", "victim", "Victim"),
+        )
+
+        result = await db.delete_player_data(self.db_path, "victim")
+        self.assertEqual(result["discord_id"], "victim")
+        self.assertGreater(result["deleted"]["players"], 0)
+
+        for table, col in [
+            ("players", "discord_id"), ("devices", "discord_id"),
+            ("notification_prefs", "discord_id"), ("push_outbox", "discord_id"),
+            ("registrations", "player_discord_id"),
+            ("tee_time_players", "player_discord_id"),
+            ("season_points", "player_discord_id"),
+            ("altshot_team_members", "discord_id"),
+            ("matchplay_records", "discord_id"),
+        ]:
+            rows = await db._fetchall(
+                self.db_path, f"SELECT * FROM {table} WHERE {col} = ?",
+                ("victim",))
+            self.assertEqual(rows, [], f"{table} still has victim rows")
+
+        # Other player's rows survive.
+        other = await db._fetchone(
+            self.db_path, "SELECT * FROM devices WHERE discord_id = ?",
+            ("other",))
+        self.assertIsNotNone(other)
+        pts = await db._fetchone(
+            self.db_path,
+            "SELECT * FROM season_points WHERE player_discord_id = ?",
+            ("other",))
+        self.assertIsNotNone(pts)
+        # Shared team row survives with player1 nulled.
+        team = await db._fetchone(
+            self.db_path, "SELECT * FROM altshot_teams WHERE id = 'alt-1'")
+        self.assertIsNotNone(team)
+        self.assertIsNone(team["player1_discord_id"])
+        # Shared history intact: tournament + tee time still there.
+        self.assertIsNotNone(await db.get_tournament(self.db_path, tid))
+        self.assertIsNotNone(await db.get_tee_time(self.db_path, tt_id))
+
+
 if __name__ == "__main__":
     unittest.main()

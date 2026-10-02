@@ -1056,6 +1056,67 @@ async def get_timezone(db_path, discord_id: str) -> str | None:
     return (row or {}).get("timezone") or None
 
 
+async def list_players(db_path) -> list[dict]:
+    """All registered players, for the admin player list. Ordered by name."""
+    return await _fetchall(
+        db_path,
+        "SELECT discord_id, display_name, golfplus_handle FROM players"
+        " ORDER BY display_name ASC",
+    )
+
+
+async def delete_player_data(db_path, discord_id: str) -> dict:
+    """Permanently erase one player's personal data (account deletion).
+
+    Deletes every row where the user is the subject:
+      players, devices, notification_prefs, push_outbox, registrations,
+      team_members, tee_time_players, join_requests, scorecards,
+      season_points, casual_tee_time_players, altshot_team_members,
+      matchplay_side_members, matchplay_records.
+    altshot_teams.player1_discord_id is SET NULL (the column is nullable and
+    the team row is shared with the other teammates).
+
+    Deliberately LEFT intact (documented here so nobody "fixes" it later):
+      tournaments, tee_times, teams, casual/altshot/matchplay tee times and
+      their scores, seasons, season_tournaments, matches (shared tournament
+      history that also belongs to the opponent), side_quests, boards,
+      outbox, tournament_leaders, leaderboard_snapshots, push_sent_log,
+      team_name_registry, and all created_by / submitted_by / verified_by /
+      reported_by / decided_by / logged_by audit columns. Some of those
+      audit columns are NOT NULL; they identify shared community entities,
+      not the deleted user as personal data.
+    """
+    tables = [
+        ("players", "discord_id"),
+        ("devices", "discord_id"),
+        ("notification_prefs", "discord_id"),
+        ("push_outbox", "discord_id"),
+        ("registrations", "player_discord_id"),
+        ("team_members", "player_discord_id"),
+        ("tee_time_players", "player_discord_id"),
+        ("join_requests", "player_discord_id"),
+        ("scorecards", "player_discord_id"),
+        ("season_points", "player_discord_id"),
+        ("casual_tee_time_players", "discord_id"),
+        ("altshot_team_members", "discord_id"),
+        ("matchplay_side_members", "discord_id"),
+        ("matchplay_records", "discord_id"),
+    ]
+    deleted: dict[str, int] = {}
+    for table, col in tables:
+        _, n = await _execute(
+            db_path, f"DELETE FROM {table} WHERE {col} = ?", (discord_id,))
+        deleted[table] = n
+    _, n = await _execute(
+        db_path,
+        "UPDATE altshot_teams SET player1_discord_id = NULL"
+        " WHERE player1_discord_id = ?",
+        (discord_id,),
+    )
+    deleted["altshot_teams.player1_discord_id_nulled"] = n
+    return {"discord_id": discord_id, "deleted": deleted}
+
+
 # ------------------------------------------------------------- registrations
 async def register_player(db_path, tournament_id, discord_id) -> bool:
     """Returns True if this is a new registration, False if already registered."""
