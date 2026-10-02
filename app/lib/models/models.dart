@@ -412,6 +412,33 @@ class PlayerMe {
       );
 }
 
+/// A player row for the crew management admin list, from GET /api/admin/players.
+class CrewPlayer {
+  final String discordId;
+  final String displayName;
+  final String? golfplusHandle;
+  final List<String> roles;
+
+  CrewPlayer({
+    required this.discordId,
+    required this.displayName,
+    this.golfplusHandle,
+    List<String>? roles,
+  }) : roles = roles ?? [];
+
+  bool hasRole(String role) =>
+      roles.any((r) => r.toLowerCase() == role.toLowerCase());
+
+  factory CrewPlayer.fromJson(Map<String, dynamic> j) => CrewPlayer(
+        discordId: j['discord_id'].toString(),
+        displayName: (j['display_name'] ?? j['discord_id']).toString(),
+        golfplusHandle: j['golfplus_handle']?.toString(),
+        roles: (j['roles'] as List? ?? [])
+            .map((r) => r.toString())
+            .toList(growable: false),
+      );
+}
+
 /// A Golf+ course with official hole-by-hole pars, from /api/courses.
 class GolfCourse {
   final String name;

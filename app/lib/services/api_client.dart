@@ -396,6 +396,39 @@ class ApiClient {
     return (body as Map<String, dynamic>? ?? {});
   }
 
+  /// Permanently delete the caller's own player record (auth required).
+  /// Returns the raw response body (e.g. {"deleted": true, "discord_id": ...}).
+  Future<Map<String, dynamic>> deleteAccount() async {
+    final body = await _delete('/api/players/me');
+    return (body as Map<String, dynamic>? ?? {});
+  }
+
+  // --- Admin -----------------------------------------------------------------
+
+  /// List all players with their crew roles (admin only).
+  Future<List<CrewPlayer>> getCrewPlayers() async {
+    final body = await _get('/api/admin/players');
+    final list = (body as Map<String, dynamic>?)?['players'] as List? ?? [];
+    return list
+        .map((e) => CrewPlayer.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Grant or revoke a crew role on a player (admin only).
+  /// [role] is "Mod" or "Tournament Director"; [action] is "grant" or "revoke".
+  Future<Map<String, dynamic>> setCrewRole({
+    required String discordId,
+    required String role,
+    required String action,
+  }) async {
+    final body = await _post('/api/admin/crew/roles', {
+      'discord_id': discordId,
+      'role': role,
+      'action': action,
+    });
+    return (body as Map<String, dynamic>? ?? {});
+  }
+
   // --- Push notifications --------------------------------------------------
 
   Future<void> registerDevice(String pushToken) async {

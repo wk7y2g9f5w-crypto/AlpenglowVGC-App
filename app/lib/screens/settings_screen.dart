@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import 'crew_management_screen.dart';
 
 /// Settings: API base URL, Discord OAuth config, logout.
+///
+/// Also hosts the privacy-policy link, the admin-only crew management entry,
+/// and the self-service delete-account flow.
 class SettingsScreen extends StatefulWidget {
   final AuthService auth;
   final SettingsService settings;
@@ -21,6 +26,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _clientId;
   late final TextEditingController _redirectUri;
   bool _saving = false;
+  bool _isAdmin = false;
+
+  ApiClient get _api => ApiClient(
+      baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
 
   @override
   void initState() {
@@ -28,6 +37,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _baseUrl = TextEditingController(text: widget.settings.baseUrl);
     _clientId = TextEditingController(text: widget.settings.clientId);
     _redirectUri = TextEditingController(text: widget.settings.redirectUri);
+    _loadAdminFlag();
   }
 
   @override
@@ -36,6 +46,71 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _clientId.dispose();
     _redirectUri.dispose();
     super.dispose();
+  }
+
+  /// Open the privacy policy in the external browser (App Store requirement).
+  Future<void> _openPrivacyPolicy() async {
+    const privacyUrl = 'https://alpenglow-vgc.onrender.com/privacy';
+    try {
+      final ok = await launchUrl(Uri.parse(privacyUrl),
+          mode: LaunchMode.externalApplication);
+      if (!ok && mounted) {
+        showSnack(context, 'Could not open the privacy policy.',
+            error: true);
+      }
+    } catch (_) {
+      if (mounted) {
+        showSnack(context, 'Could not open the privacy policy.',
+            error: true);
+      }
+    }
+  }
+
+  /// Two-step delete-account flow: the user must type "delete" before the red
+  /// Delete button enables (copied from the End-season dialog in
+  /// new_season_screen.dart). On success the server-side record is removed
+  /// and the user is logged out locally.
+  Future<void> _deleteAccount() async {
+    final controller = TextEditingController();
+    try {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => _DeleteAccountDialog(controller: controller),
+      );
+      if (confirm != true || !mounted) return;
+      try {
+        await _api.deleteAccount();
+        await widget.auth.logout();
+        if (mounted) {
+          showSnack(context,
+              'Your account and data have been deleted. Sorry to see you go.');
+        }
+      } on ApiException catch (e) {
+        if (e.statusCode == 401 || e.statusCode == 404) {
+          // Account already gone or session expired — log out locally anyway.
+          await widget.auth.logout();
+          if (mounted) {
+            showSnack(context,
+                'Account already deleted or session expired. Logged out.');
+          }
+        } else if (mounted) {
+          showSnack(context, friendlyApiMessage(e), error: true);
+        }
+      }
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  /// Admin gating: fetches /api/players/me and remembers is_admin, the same
+  /// pattern as tournament_detail_screen.dart. Stays non-admin on failure.
+  Future<void> _loadAdminFlag() async {
+    try {
+      final me = await _api.getMe();
+      if (mounted) setState(() => _isAdmin = me.isAdmin);
+    } catch (_) {
+      // Leave the admin rows hidden.
+    }
   }
 
   Future<void> _save() async {
@@ -131,6 +206,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 32),
           const Divider(),
           const SizedBox(height: 8),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.privacy_tip),
+            title: const Text('Privacy Policy'),
+            trailing: const Icon(Icons.open_in_new),
+            onTap: _openPrivacyPolicy,
+          ),
+          if (_isAdmin)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.admin_panel_settings),
+              title: const Text('Crew management'),
+              subtitle: const Text('Grant or revoke crew roles'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => CrewManagementScreen(
+                    auth: widget.auth,
+                    settings: widget.settings,
+                  ),
+                ),
+              ),
+            ),
+          const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: () async {
               final confirm = await showDialog<bool>(
@@ -154,6 +253,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icon: const Icon(Icons.logout, color: Colors.red),
             label:
                 const Text('Log out', style: TextStyle(color: Colors.red)),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: _deleteAccount,
+            icon: const Icon(Icons.delete_forever, color: Colors.red),
+            label: const Text('Delete account',
+                style: TextStyle(color: Colors.red)),
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: Colors.red.shade700),
+            ),
           ),
         ],
       ),
@@ -240,6 +349,80 @@ class _NotificationPrefsState extends State<_NotificationPrefs> {
             value: _prefs![key] ?? true,
             onChanged: (v) => _toggle(key, v),
           ),
+      ],
+    );
+  }
+}
+
+/// Two-step "Delete account" confirmation: the user must type "delete"
+/// (case-insensitive, trimmed) before the red Delete button enables.
+/// Mirrors the End-season dialog in new_season_screen.dart.
+class _DeleteAccountDialog extends StatefulWidget {
+  final TextEditingController controller;
+
+  const _DeleteAccountDialog({required this.controller});
+
+  @override
+  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
+}
+
+class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  bool get _matches =>
+      widget.controller.text.trim().toLowerCase() == 'delete';
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  void _onChanged() => setState(() {});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Delete account?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'This permanently deletes your Alpenglow VGC player profile and '
+            'all of your app data. This cannot be undone.',
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Type "delete" to confirm:',
+            style: TextStyle(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: widget.controller,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              hintText: 'delete',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _matches ? () => Navigator.of(context).pop(true) : null,
+          style:
+              FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
+          child: const Text('Delete'),
+        ),
       ],
     );
   }
