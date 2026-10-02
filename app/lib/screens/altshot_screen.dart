@@ -382,7 +382,7 @@ class _AltShotRecordsViewState extends State<_AltShotRecordsView> {
                                           : Colors.black54,
                                       fontWeight: FontWeight.bold)),
                             ),
-                            title: Text(r.teamDisplay,
+                            title: Text(r.handleTitle,
                                 style: const TextStyle(
                                     fontWeight: FontWeight.bold)),
                             subtitle: Column(

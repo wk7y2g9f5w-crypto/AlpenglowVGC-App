@@ -108,3 +108,10 @@ class StartsAtRequiredApiTestCase(ApiTestCase):
             headers=self.h("1"),
             json={"label": "x", "date": "", "time": ""})
         self.assertEqual(r.status_code, 422, r.text)
+
+
+# Unbind the imported base class so pytest does not collect ApiTestCase's whole
+# suite a second time under this module. Each duplicate suite burns another
+# ~50MB of temp DBs in /tmp's 512MB tmpfs and breaks full runs with
+# "database or disk is full".
+del ApiTestCase

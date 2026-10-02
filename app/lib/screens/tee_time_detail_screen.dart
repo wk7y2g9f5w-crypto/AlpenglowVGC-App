@@ -380,7 +380,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                 const SizedBox(height: 8),
                 ...pending.map((r) => Card(
                       child: ListTile(
-                        title: Text(r.displayName),
+                        title: Text(r.handleName),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [

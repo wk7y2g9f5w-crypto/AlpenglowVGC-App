@@ -187,3 +187,10 @@ class TeamNameLockApiTestCase(ApiTestCase):
         rows = run(db._fetchall(
             self.db_path, "SELECT * FROM team_name_registry", ()))
         self.assertEqual(rows, [])
+
+
+# Unbind the imported base class so pytest does not collect ApiTestCase's whole
+# suite a second time under this module. Each duplicate suite burns another
+# ~50MB of temp DBs in /tmp's 512MB tmpfs and breaks full runs with
+# "database or disk is full".
+del ApiTestCase

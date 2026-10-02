@@ -18,7 +18,7 @@ class AltShotRecordCardScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final n = record.holes.length.clamp(0, 18);
     return Scaffold(
-      appBar: AppBar(title: Text(record.teamDisplay)),
+      appBar: AppBar(title: Text(record.handleTitle)),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [

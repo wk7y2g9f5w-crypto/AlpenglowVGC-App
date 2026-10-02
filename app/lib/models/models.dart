@@ -4,6 +4,32 @@
 /// Field names mirror the FastAPI backend's JSON keys. Nullable where the
 /// backend may omit them.
 
+/// Display rule (Cayden): everywhere the app shows a player to other
+/// people, show ONLY their Golf+ username. Falls back to the display name
+/// when no handle is set. Pure Dart so models can use it too.
+String golferDisplayName(String displayName, String? golfplusHandle) {
+  final handle = (golfplusHandle ?? '').trim();
+  return handle.isNotEmpty ? handle : displayName;
+}
+
+/// One rostered player with an optional Golf+ handle, as sent by the API's
+/// app-only enrichment (api/main.py `_player_with_handle`).
+class RosterMember {
+  final String? discordId;
+  final String displayName;
+  final String? golfplusHandle;
+
+  const RosterMember({this.discordId, required this.displayName, this.golfplusHandle});
+
+  factory RosterMember.fromJson(Map<String, dynamic> j) => RosterMember(
+        discordId: j['discord_id']?.toString(),
+        displayName: (j['display_name'] ?? j['discord_id'] ?? '?').toString(),
+        golfplusHandle: j['golfplus_handle']?.toString(),
+      );
+
+  String get handleName => golferDisplayName(displayName, golfplusHandle);
+}
+
 /// Parse hole scores/pars from the API: either a JSON list of ints or a
 /// comma-separated string. Tolerant of whitespace and missing values.
 List<int> _csvInts(dynamic v) {
@@ -237,12 +263,14 @@ class TeeTimeRequest {
   final String id;
   final String playerDiscordId;
   final String displayName;
+  final String? golfplusHandle;
   final String status;
 
   TeeTimeRequest({
     required this.id,
     required this.playerDiscordId,
     required this.displayName,
+    this.golfplusHandle,
     required this.status,
   });
 
@@ -250,8 +278,11 @@ class TeeTimeRequest {
         id: j['id'].toString(),
         playerDiscordId: j['player_discord_id'].toString(),
         displayName: (j['display_name'] ?? j['player_discord_id']).toString(),
+        golfplusHandle: j['golfplus_handle']?.toString(),
         status: (j['status'] ?? 'pending').toString(),
       );
+
+  String get handleName => golferDisplayName(displayName, golfplusHandle);
 }
 
 class Scorecard {
@@ -302,8 +333,13 @@ class LeaderboardEntry {
 
   dynamic operator [](String key) => raw[key];
 
-  String get name =>
-      (raw['display_name'] ?? raw['name'] ?? raw['player'] ?? '?').toString();
+  String get name {
+    // Handle-first display rule: Golf+ username only, never real names.
+    final handle = (raw['golfplus_handle']?.toString() ?? '').trim();
+    if (handle.isNotEmpty) return handle;
+    return (raw['display_name'] ?? raw['name'] ?? raw['player'] ?? '?')
+        .toString();
+  }
   String? get rank => raw['rank']?.toString();
   String? get total => raw['total']?.toString();
   String? get toPar => raw['to_par']?.toString() ?? raw['toPar']?.toString();
@@ -532,13 +568,18 @@ class CasualTeeTime {
 class CasualPlayer {
   final String discordId;
   final String displayName;
+  final String? golfplusHandle;
 
-  CasualPlayer({required this.discordId, required this.displayName});
+  CasualPlayer(
+      {required this.discordId, required this.displayName, this.golfplusHandle});
 
   factory CasualPlayer.fromJson(Map<String, dynamic> j) => CasualPlayer(
         discordId: j['discord_id'].toString(),
         displayName: (j['display_name'] ?? j['discord_id']).toString(),
+        golfplusHandle: j['golfplus_handle']?.toString(),
       );
+
+  String get handleName => golferDisplayName(displayName, golfplusHandle);
 }
 
 String _capWord(String s) =>
@@ -599,6 +640,7 @@ class MatchPlaySide {
   final int sideNumber;
   final List<String> memberDiscordIds;
   final List<String> memberNames;
+  final List<RosterMember> members;
   final int size;
   final String displayName;
 
@@ -607,6 +649,7 @@ class MatchPlaySide {
     required this.sideNumber,
     required this.memberDiscordIds,
     required this.memberNames,
+    required this.members,
     required this.size,
     required this.displayName,
   });
@@ -620,11 +663,22 @@ class MatchPlaySide {
         memberNames: ((j['member_names'] as List?) ?? [])
             .map((e) => e.toString())
             .toList(),
+        members: ((j['members'] as List?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(RosterMember.fromJson)
+            .toList(),
         size: (j['size'] as num?)?.toInt() ?? 0,
         displayName: (j['display_name'] ?? '').toString(),
       );
 
   bool isMember(String discordId) => memberDiscordIds.contains(discordId);
+
+  /// Side label recomposed from Golf+ handles (handle-first display rule).
+  /// Falls back to the server-composed label when structured members are
+  /// absent (older servers).
+  String get handleLabel => members.isEmpty
+      ? displayName
+      : members.map((m) => m.handleName).join(' & ');
 }
 
 class MatchPlayTeeTime {
@@ -725,6 +779,7 @@ class MatchPlayTeeTime {
 class MatchPlayRecord {
   final String discordId;
   final String playerName;
+  final String? golfplusHandle;
   final int wins;
   final int losses;
   final int ties;
@@ -732,6 +787,7 @@ class MatchPlayRecord {
   MatchPlayRecord({
     required this.discordId,
     required this.playerName,
+    this.golfplusHandle,
     required this.wins,
     required this.losses,
     required this.ties,
@@ -741,10 +797,13 @@ class MatchPlayRecord {
       MatchPlayRecord(
         discordId: j['discord_id'].toString(),
         playerName: (j['player_name'] ?? j['discord_id']).toString(),
+        golfplusHandle: j['golfplus_handle']?.toString(),
         wins: (j['wins'] as num?)?.toInt() ?? 0,
         losses: (j['losses'] as num?)?.toInt() ?? 0,
         ties: (j['ties'] as num?)?.toInt() ?? 0,
       );
+
+  String get handleName => golferDisplayName(playerName, golfplusHandle);
 
   String get recordLine => '$wins–$losses–$ties';
 
@@ -781,6 +840,7 @@ class AltShotTeam {
   final String player1Name;
   final List<String> playerNames;
   final List<String> memberDiscordIds;
+  final List<RosterMember> members;
   final int teamSize;
   final String displayName;
   final int teamNumber;
@@ -792,6 +852,7 @@ class AltShotTeam {
     required this.player1Name,
     required this.playerNames,
     required this.memberDiscordIds,
+    required this.members,
     required this.teamSize,
     required this.displayName,
     this.teamNumber = 1,
@@ -808,6 +869,10 @@ class AltShotTeam {
         memberDiscordIds: ((j['member_discord_ids'] as List?) ?? [])
             .map((e) => e.toString())
             .toList(),
+        members: ((j['members'] as List?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(RosterMember.fromJson)
+            .toList(),
         teamSize: (j['team_size'] as num?)?.toInt() ?? 1,
         displayName: (j['display_name'] ?? '').toString(),
         teamNumber: (j['team_number'] as num?)?.toInt() ?? 1,
@@ -821,8 +886,20 @@ class AltShotTeam {
 
   bool isMember(String discordId) => memberDiscordIds.contains(discordId);
 
+  /// Display names with the handle-first rule: registered members show
+  /// their Golf+ username; typed-in extras (1-team legacy) show as-is.
+  /// The first memberDiscordIds.length entries of playerNames correspond
+  /// to members in order.
+  List<String> get handleNames {
+    final out = <String>[];
+    for (var i = 0; i < playerNames.length; i++) {
+      out.add(i < members.length ? members[i].handleName : playerNames[i]);
+    }
+    return out;
+  }
+
   /// Subtitle line: every player on the team.
-  String get playersLine => playerNames.join(' · ');
+  String get playersLine => handleNames.join(' · ');
 }
 
 class AltShotTeeTime {
@@ -947,6 +1024,7 @@ class AltShotTeeTime {
 class AltShotRecord {
   final String teamDisplay;
   final List<String> playerNames;
+  final List<RosterMember> players;
   final int teamSize;
   final int total;
   final int? toPar;
@@ -962,6 +1040,7 @@ class AltShotRecord {
   AltShotRecord({
     required this.teamDisplay,
     required this.playerNames,
+    required this.players,
     required this.teamSize,
     required this.total,
     this.toPar,
@@ -980,6 +1059,10 @@ class AltShotRecord {
         playerNames: ((j['player_names'] as List?) ?? [])
             .map((e) => e.toString())
             .toList(),
+        players: ((j['players'] as List?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(RosterMember.fromJson)
+            .toList(),
         teamSize: (j['team_size'] as num?)?.toInt() ?? 2,
         total: (j['total'] as num).toInt(),
         toPar: (j['to_par'] as num?)?.toInt(),
@@ -993,8 +1076,18 @@ class AltShotRecord {
         submittedAt: (j['submitted_at'] ?? '').toString(),
       );
 
-  /// Subtitle: every player on the team (plus the team name when set).
-  String get playersLine => playerNames.join(' · ');
+  /// Subtitle: every player on the team, Golf+ usernames first.
+  String get playersLine => (players.isNotEmpty
+          ? players.map((p) => p.handleName)
+          : playerNames)
+      .join(' · ');
+
+  /// Title: roster recomposed from Golf+ usernames (' & ' separated,
+  /// matching the old teamDisplay shape).
+  String get handleTitle => (players.isNotEmpty
+          ? players.map((p) => p.handleName)
+          : playerNames)
+      .join(' & ');
 
   String get settingsSummary {
     final parts = <String>[
@@ -1020,12 +1113,14 @@ class AltShotCourseRecord {
   final int total;
   final int? toPar;
   final String teamDisplay;
+  final List<RosterMember> players;
 
   AltShotCourseRecord({
     required this.course,
     required this.total,
     this.toPar,
     required this.teamDisplay,
+    required this.players,
   });
 
   factory AltShotCourseRecord.fromJson(Map<String, dynamic> j) =>
@@ -1034,7 +1129,16 @@ class AltShotCourseRecord {
         total: (j['total'] as num).toInt(),
         toPar: (j['to_par'] as num?)?.toInt(),
         teamDisplay: (j['team_display'] ?? '').toString(),
+        players: ((j['players'] as List?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(RosterMember.fromJson)
+            .toList(),
       );
+
+  /// Record holders recomposed from Golf+ usernames.
+  String get holderLine => players.isNotEmpty
+      ? players.map((p) => p.handleName).join(' & ')
+      : teamDisplay;
 
   /// "68 (-4) · Aces" — same score formatting as [AltShotRecord.scoreLine].
   String get recordLine {
@@ -1043,6 +1147,6 @@ class AltShotCourseRecord {
         : (toPar == 0
             ? '$total (E)'
             : '$total (${toPar! > 0 ? '+' : ''}$toPar)');
-    return '$score · $teamDisplay';
+    return '$score · $holderLine';
   }
 }

@@ -114,8 +114,8 @@ class _MatchPlayTeeTimeListState extends State<_MatchPlayTeeTimeList> {
   }
 
   String _subtitle(MatchPlayTeeTime tt) {
-    final s1 = tt.sides.isNotEmpty ? tt.sides[0].displayName : '';
-    final s2 = tt.sides.length > 1 ? tt.sides[1].displayName : '';
+    final s1 = tt.sides.isNotEmpty ? tt.sides[0].handleLabel : '';
+    final s2 = tt.sides.length > 1 ? tt.sides[1].handleLabel : '';
     final matchup =
         s1.isNotEmpty && s2.isNotEmpty ? '$s1 vs $s2' : tt.formatSummary;
     final score = tt.score;
@@ -273,7 +273,7 @@ class _MatchPlayRecordsViewState extends State<_MatchPlayRecordsView> {
                                     : Colors.black54,
                                 fontWeight: FontWeight.bold)),
                       ),
-                      title: Text(r.playerName,
+                      title: Text(r.handleName,
                           style: const TextStyle(
                               fontWeight: FontWeight.bold)),
                       subtitle: Text(

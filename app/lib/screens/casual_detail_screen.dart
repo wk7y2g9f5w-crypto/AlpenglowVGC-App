@@ -142,7 +142,7 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.person),
-                  title: Text(p.displayName +
+                  title: Text(p.handleName +
                       (p.discordId == tt.creatorDiscordId
                           ? ' (organizer)'
                           : '')),

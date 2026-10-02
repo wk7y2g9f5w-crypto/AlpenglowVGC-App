@@ -44,9 +44,9 @@ class _MatchPlayScoreScreenState extends State<MatchPlayScoreScreen> {
       _serverScore?.isCompleted == true && !widget.me.canManageScores;
 
   String get _side1Name =>
-      widget.teeTime.sides.isNotEmpty ? widget.teeTime.sides[0].displayName : 'Side 1';
+      widget.teeTime.sides.isNotEmpty ? widget.teeTime.sides[0].handleLabel : 'Side 1';
   String get _side2Name => widget.teeTime.sides.length > 1
-      ? widget.teeTime.sides[1].displayName
+      ? widget.teeTime.sides[1].handleLabel
       : 'Side 2';
 
   @override

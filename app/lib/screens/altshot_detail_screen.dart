@@ -240,10 +240,10 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
                       children: [
                         for (var i = 0;
                             i < registeredCount &&
-                                i < team.playerNames.length;
+                                i < team.handleNames.length;
                             i++)
                           Chip(
-                            label: Text(team.playerNames[i],
+                            label: Text(team.handleNames[i],
                                 style: const TextStyle(fontSize: 12)),
                             visualDensity: VisualDensity.compact,
                           ),
@@ -321,11 +321,11 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
                 if (team.playerNames.isEmpty)
                   const Text('No players yet.',
                       style: TextStyle(color: Colors.grey)),
-                for (var i = 0; i < team.playerNames.length; i++)
+                for (var i = 0; i < team.handleNames.length; i++)
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     dense: true,
-                    title: Text(team.playerNames[i]),
+                    title: Text(team.handleNames[i]),
                     trailing: locked
                         ? null
                         : Row(

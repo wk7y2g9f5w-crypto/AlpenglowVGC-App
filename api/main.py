@@ -589,6 +589,34 @@ def _player_json(p: dict) -> dict:
     }
 
 
+async def _player_with_handle(db_path, pid: str) -> dict:
+    """Structured player object with Golf+ handle — app-only enrichment.
+
+    display_name stays as composed by display_name_of (Discord surfaces use
+    it unchanged); the app prefers golfplus_handle via golferDisplayName().
+    """
+    p = await db.get_player(db_path, pid)
+    return {
+        "discord_id": pid,
+        "display_name": db.display_name_of(p, pid),
+        "golfplus_handle": p.get("golfplus_handle") if p else None,
+    }
+
+
+def _split_name_handle(name: str) -> tuple[str, str | None]:
+    """Split a display_name_of-composed name into (display_name, handle).
+
+    display_name_of appends " (Golf+: handle)" when a handle is set; some
+    responses only carry the composed string, so the API splits it back
+    apart here for the app. Kept in the API layer (never db.py) so Discord
+    behavior is untouched.
+    """
+    m = re.match(r"^(.*) \(Golf\+: (.+)\)$", (name or "").strip())
+    if m:
+        return m.group(1), m.group(2)
+    return (name or "").strip(), None
+
+
 def _tee_time_json(tt: dict, players: list[dict]) -> dict:
     return {
         "id": tt["id"],
@@ -1870,6 +1898,8 @@ async def list_requests(tee_time_id: int, user: CurrentUser) -> list[dict]:
             {
                 **_join_request_json(req),
                 "display_name": db.display_name_of(player, req["player_discord_id"]),
+                "golfplus_handle": player.get("golfplus_handle")
+                if player else None,
             }
         )
     return out
@@ -2217,6 +2247,7 @@ async def _casual_json(db_path, tt: dict) -> dict:
         players.append({
             "discord_id": pid,
             "display_name": db.display_name_of(p, pid),
+            "golfplus_handle": p.get("golfplus_handle") if p else None,
         })
     return {
         "id": tt["id"],
@@ -2663,12 +2694,36 @@ class AltShotScoreSubmit(BaseModel):
     holes: list[int] = []
 
 
+async def _enrich_altshot_team(t: dict | None) -> dict | None:
+    """Add structured per-member data (with Golf+ handles) for the app.
+
+    player_names/display_name stay as composed by display_name_of so
+    Discord surfaces are untouched; the app recomposes rosters from the
+    members array via golferDisplayName().
+    """
+    if t is None:
+        return None
+    t = dict(t)
+    t["members"] = [await _player_with_handle(DB_PATH, pid)
+                    for pid in t.get("member_discord_ids", [])]
+    return t
+
+
+async def _enrich_altshot_tt(tt: dict | None) -> dict | None:
+    if tt is None:
+        return None
+    tt = dict(tt)
+    tt["teams"] = [await _enrich_altshot_team(t)
+                   for t in tt.get("teams", [])]
+    return tt
+
+
 async def _altshot_or_404(tt_id: str) -> dict:
     tt = await db.get_altshot_tee_time(DB_PATH, tt_id)
     if tt is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Alt-shot tee time not found.")
-    return tt
+    return await _enrich_altshot_tt(tt)
 
 
 async def _altshot_team_or_404(tt_id: str, team_id: str) -> dict:
@@ -2693,7 +2748,7 @@ async def _altshot_team_guard(team: dict, user: CurrentUser) -> None:
 @app.get("/api/altshot-tee-times")
 async def list_altshot_tee_times(user: CurrentUser) -> dict:
     tts = await db.list_altshot_tee_times(DB_PATH)
-    return {"tee_times": tts}
+    return {"tee_times": [await _enrich_altshot_tt(tt) for tt in tts]}
 
 
 @app.post("/api/altshot-tee-times")
@@ -2745,7 +2800,8 @@ async def update_altshot_tee_time(tt_id: str, body: AltShotTeeTimeUpdate,
                 detail="Unknown course — pick one from the course list.")
         fields["pars"] = ",".join(str(x) for x in auto)
     try:
-        return await db.update_altshot_tee_time(DB_PATH, tt_id, fields)
+        return await _enrich_altshot_tt(
+            await db.update_altshot_tee_time(DB_PATH, tt_id, fields))
     except db.AltShotError as e:
         msg = str(e)
         if msg == "bad_team_size":
@@ -2775,10 +2831,10 @@ async def join_altshot_tee_time(tt_id: str, body: AltShotJoin,
                                 user: CurrentUser) -> dict:
     tt = await _altshot_or_404(tt_id)
     try:
-        return await db.join_altshot_tee_time(
+        return await _enrich_altshot_tt(await db.join_altshot_tee_time(
             DB_PATH, tt_id, user["discord_id"],
             extra_names=body.extra_names,
-            team_id=body.team_id)
+            team_id=body.team_id))
     except db.AltShotError as e:
         msg = str(e)
         if msg == "not_found":
@@ -2805,8 +2861,8 @@ async def switch_altshot_team(tt_id: str, body: AltShotSwitch,
     """Move to the other team of a 2-team tee time (before scoring)."""
     await _altshot_or_404(tt_id)
     try:
-        return await db.switch_altshot_team(
-            DB_PATH, tt_id, user["discord_id"], body.team_id)
+        return await _enrich_altshot_tt(await db.switch_altshot_team(
+            DB_PATH, tt_id, user["discord_id"], body.team_id))
     except db.AltShotError as e:
         msg = str(e)
         if msg == "not_found":
@@ -2823,8 +2879,8 @@ async def switch_altshot_team(tt_id: str, body: AltShotSwitch,
 @app.post("/api/altshot-tee-times/{tt_id}/leave")
 async def leave_altshot_tee_time(tt_id: str, user: CurrentUser) -> dict:
     await _altshot_or_404(tt_id)
-    return await db.leave_altshot_tee_time(DB_PATH, tt_id,
-                                           user["discord_id"])
+    return await _enrich_altshot_tt(await db.leave_altshot_tee_time(
+        DB_PATH, tt_id, user["discord_id"]))
 
 
 @app.patch("/api/altshot-tee-times/{tt_id}/teams/{team_id}")
@@ -2849,10 +2905,10 @@ async def update_altshot_team(tt_id: str, team_id: str,
                 detail="Only registered players can play 2-team alt-shot"
                        " rounds — no typed-in names.")
         try:
-            return await db.manage_altshot_team(
+            return await _enrich_altshot_tt(await db.manage_altshot_team(
                 DB_PATH, tt_id, team_id,
                 move_discord_id=body.move_discord_id,
-                remove_discord_id=body.remove_discord_id)
+                remove_discord_id=body.remove_discord_id))
         except db.AltShotError as e:
             msg = str(e)
             if msg == "not_found":
@@ -2988,6 +3044,21 @@ def _altshot_setup_or_422(team_size: int, tee_position: str,
     return tuple(out)  # type: ignore[return-value]
 
 
+def _enrich_altshot_record(r: dict) -> dict:
+    """Add structured per-player data (with Golf+ handles) to a record.
+
+    Records only carry display_name_of-composed strings (no team_id), so
+    the handle is split back out of the "Name (Golf+: handle)" suffix
+    here. player_names/team_display are kept for Discord compatibility.
+    """
+    players = []
+    for n in r.get("player_names", []):
+        disp, handle = _split_name_handle(n)
+        players.append({"discord_id": None, "display_name": disp,
+                        "golfplus_handle": handle})
+    return {**r, "players": players}
+
+
 @app.get("/api/altshot-records")
 async def altshot_records(user: CurrentUser, course: str, team_size: int,
                           tee_position: str = "back",
@@ -3002,7 +3073,7 @@ async def altshot_records(user: CurrentUser, course: str, team_size: int,
     return {"course": course.strip(), "team_size": team_size,
             "tee_position": tee, "pin_position": pin,
             "wind_strength": wind, "green_speed": green,
-            "records": records}
+            "records": [_enrich_altshot_record(r) for r in records]}
 
 
 @app.get("/api/altshot-records/summary")
@@ -3019,20 +3090,51 @@ async def altshot_records_summary(user: CurrentUser, team_size: int,
     records = await db.get_altshot_records_summary(
         DB_PATH, team_size, tee_position=tee, pin_position=pin,
         wind_strength=wind, green_speed=green)
+    out = {}
+    for course_name, r in records.items():
+        players = []
+        for part in (r.get("team_display") or "").split(" & "):
+            part = part.strip()
+            if not part:
+                continue
+            disp, handle = _split_name_handle(part)
+            players.append({"discord_id": None, "display_name": disp,
+                            "golfplus_handle": handle})
+        out[course_name] = {**r, "players": players}
     return {"team_size": team_size, "tee_position": tee,
             "pin_position": pin, "wind_strength": wind,
-            "green_speed": green, "records": records}
+            "green_speed": green, "records": out}
 
 
 # --------------------------------------------------------------------------
 # Match-play
 # --------------------------------------------------------------------------
+async def _enrich_matchplay_tt(tt: dict | None) -> dict | None:
+    """Add structured per-side member data (with Golf+ handles) for the app.
+
+    member_names/display_name stay as composed by display_name_of so
+    Discord surfaces are untouched; the app recomposes side labels from
+    the members array via golferDisplayName().
+    """
+    if tt is None:
+        return None
+    sides = []
+    for s in tt.get("sides", []):
+        s = dict(s)
+        s["members"] = [await _player_with_handle(DB_PATH, pid)
+                        for pid in s.get("member_discord_ids", [])]
+        sides.append(s)
+    tt = dict(tt)
+    tt["sides"] = sides
+    return tt
+
+
 async def _matchplay_or_404(tt_id: str) -> dict:
     tt = await db.get_matchplay_tee_time(DB_PATH, tt_id)
     if tt is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Match-play tee time not found.")
-    return tt
+    return await _enrich_matchplay_tt(tt)
 
 
 async def _matchplay_member_guard(tt: dict, user: CurrentUser) -> None:
@@ -3063,7 +3165,7 @@ async def _require_mod_admin(user: CurrentUser) -> None:
 @app.get("/api/matchplay/tee-times")
 async def list_matchplay_tee_times(user: CurrentUser) -> dict:
     tts = await db.list_matchplay_tee_times(DB_PATH)
-    return {"tee_times": tts}
+    return {"tee_times": [await _enrich_matchplay_tt(tt) for tt in tts]}
 
 
 @app.post("/api/matchplay/tee-times")
@@ -3121,7 +3223,8 @@ async def update_matchplay_tee_time(tt_id: str, body: MatchPlayTeeTimeUpdate,
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Unknown course — pick one from the course list.")
         fields["pars"] = ",".join(str(x) for x in auto)
-    return await db.update_matchplay_tee_time(DB_PATH, tt_id, fields)
+    return await _enrich_matchplay_tt(
+        await db.update_matchplay_tee_time(DB_PATH, tt_id, fields))
 
 
 @app.delete("/api/matchplay/tee-times/{tt_id}")
@@ -3140,8 +3243,8 @@ async def join_matchplay_tee_time(tt_id: str, body: MatchPlayJoin,
                                   user: CurrentUser) -> dict:
     await _matchplay_or_404(tt_id)
     try:
-        return await db.join_matchplay_tee_time(
-            DB_PATH, tt_id, user["discord_id"], body.side_number)
+        return await _enrich_matchplay_tt(await db.join_matchplay_tee_time(
+            DB_PATH, tt_id, user["discord_id"], body.side_number))
     except db.MatchPlayError as e:
         msg = str(e)
         if msg == "not_found":
@@ -3158,8 +3261,8 @@ async def join_matchplay_tee_time(tt_id: str, body: MatchPlayJoin,
 @app.post("/api/matchplay/tee-times/{tt_id}/leave")
 async def leave_matchplay_tee_time(tt_id: str, user: CurrentUser) -> dict:
     await _matchplay_or_404(tt_id)
-    return await db.leave_matchplay_tee_time(DB_PATH, tt_id,
-                                             user["discord_id"])
+    return await _enrich_matchplay_tt(await db.leave_matchplay_tee_time(
+        DB_PATH, tt_id, user["discord_id"]))
 
 
 @app.get("/api/matchplay/tee-times/{tt_id}/score")
@@ -3226,7 +3329,14 @@ async def matchplay_records(user: CurrentUser, format: str) -> dict:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unknown format '{format}'.")
     records = await db.get_matchplay_records(DB_PATH, fmt)
-    return {"format": fmt, "records": records}
+    out = []
+    for r in records:
+        p = await db.get_player(DB_PATH, r["discord_id"])
+        out.append({
+            **r,
+            "golfplus_handle": p.get("golfplus_handle") if p else None,
+        })
+    return {"format": fmt, "records": out}
 
 
 # --------------------------------------------------------------------------
@@ -3266,6 +3376,16 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
         ranked, pending = await lr._stroke_ranked(
             DB_PATH, t, include_in_progress=True)
 
+        # Golf+ handles for the app's handle-first display rule. Fetched
+        # here (api layer) rather than in leaderboard_render, which is
+        # shared with the Discord bot and must stay untouched.
+        handle_by_pid: dict[str, str | None] = {}
+        for c in list(ranked) + list(pending):
+            pid = c.get("player_discord_id")
+            if pid and pid not in handle_by_pid:
+                p = await db.get_player(DB_PATH, pid)
+                handle_by_pid[pid] = p.get("golfplus_handle") if p else None
+
         def _row(i: int, c: dict, verified: bool) -> dict:
             tp = c.get("to_par")
             if tp is None:
@@ -3277,6 +3397,8 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
                 "discord_id": c["player_discord_id"],
                 "display_name": c.get("name")
                 or db.display_name_of(None, c["player_discord_id"]),
+                "golfplus_handle": handle_by_pid.get(
+                    c["player_discord_id"]),
                 "total": c["total"],
                 "to_par": tp,
                 "to_par_display": sl.format_to_par(tp),
@@ -3347,6 +3469,8 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
                     "position": i,
                     "discord_id": pid,
                     "display_name": db.display_name_of(player, pid),
+                    "golfplus_handle": player.get("golfplus_handle")
+                    if player else None,
                     "wins": rec["w"],
                     "losses": rec["l"],
                     "ties": rec["t"],

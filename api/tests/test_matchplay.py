@@ -462,3 +462,10 @@ class MatchPlayApiTestCase(ApiTestCase):
         r = self.client.get(f"/api/matchplay/tee-times/{tt['id']}",
                             headers=self.h("1"))
         self.assertEqual(r.status_code, 404, r.text)
+
+
+# Unbind the imported base class so pytest does not collect ApiTestCase's whole
+# suite a second time under this module. Each duplicate suite burns another
+# ~50MB of temp DBs in /tmp's 512MB tmpfs and breaks full runs with
+# "database or disk is full".
+del ApiTestCase

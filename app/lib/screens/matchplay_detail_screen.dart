@@ -199,7 +199,7 @@ class _MatchPlayDetailScreenState extends State<MatchPlayDetailScreen> {
                     size: 20),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(side.displayName,
+                  child: Text(side.handleLabel,
                       style: const TextStyle(
                           fontWeight: FontWeight.bold, fontSize: 16)),
                 ),
@@ -212,9 +212,11 @@ class _MatchPlayDetailScreenState extends State<MatchPlayDetailScreen> {
               spacing: 6,
               runSpacing: 4,
               children: [
-                for (final name in side.memberNames)
+                for (final label in side.members.isNotEmpty
+                    ? side.members.map((m) => m.handleName)
+                    : side.memberNames)
                   Chip(
-                    label: Text(name,
+                    label: Text(label,
                         style: const TextStyle(fontSize: 12)),
                     visualDensity: VisualDensity.compact,
                   ),
