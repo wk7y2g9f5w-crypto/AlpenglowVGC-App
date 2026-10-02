@@ -7,6 +7,7 @@ import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:http/http.dart' as http;
 
 import '../services/auth.dart';
+import '../services/api_client.dart';
 import '../widgets/common.dart';
 
 /// Login screen: "Login with Discord" via the system browser.
@@ -182,6 +183,17 @@ class _LoginScreenState extends State<LoginScreen> {
                   )
                 else
                   _setupHint(),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: _busy
+                      ? null
+                      : () => Navigator.of(context).push(MaterialPageRoute(
+                            builder: (_) => EmailAuthScreen(
+                                auth: widget.auth,
+                                settings: widget.settings),
+                          )),
+                  child: const Text('Continue with email instead'),
+                ),
               ],
             ),
           ),
@@ -310,6 +322,158 @@ class _SetupSettingsPageState extends State<_SetupSettingsPage> {
             child: const Text('Save'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Email + password sign in / sign up, as an alternative to Discord OAuth.
+///
+/// Talks to POST /api/auth/login and POST /api/auth/signup. On success the
+/// returned JWT is stored exactly like the Discord token, so the rest of
+/// the app (and the API) treats it identically.
+class EmailAuthScreen extends StatefulWidget {
+  final AuthService auth;
+  final SettingsService settings;
+
+  const EmailAuthScreen(
+      {super.key, required this.auth, required this.settings});
+
+  @override
+  State<EmailAuthScreen> createState() => _EmailAuthScreenState();
+}
+
+class _EmailAuthScreenState extends State<EmailAuthScreen> {
+  bool _createAccount = false;
+  bool _busy = false;
+  bool _obscure = true;
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _name = TextEditingController();
+
+  @override
+  void dispose() {
+    _email.dispose();
+    _password.dispose();
+    _name.dispose();
+    super.dispose();
+  }
+
+  ApiClient get _api =>
+      ApiClient(baseUrl: widget.settings.baseUrl, token: '');
+
+  Future<void> _submit() async {
+    final email = _email.text.trim();
+    final password = _password.text;
+    if (email.isEmpty || password.isEmpty) {
+      showSnack(context, 'Enter your email and password.', error: true);
+      return;
+    }
+    if (_createAccount && password.length < 8) {
+      showSnack(context, 'Password must be at least 8 characters.',
+          error: true);
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final Map<String, dynamic> result;
+      if (_createAccount) {
+        result = await _api.localSignup(
+          email: email,
+          password: password,
+          displayName: _name.text.trim(),
+        );
+      } else {
+        result = await _api.localLogin(email: email, password: password);
+      }
+      final token = result['token']?.toString() ?? '';
+      if (token.isEmpty) throw Exception('No token returned.');
+      await widget.auth.saveToken(token);
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) {
+        final msg = e is ApiException ? friendlyApiMessage(e) : e.toString();
+        showSnack(context, msg, error: true);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+          title: Text(_createAccount ? 'Create account' : 'Sign in with email')),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            TextField(
+              controller: _email,
+              decoration: const InputDecoration(
+                labelText: 'Email',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.emailAddress,
+              autocorrect: false,
+              enableSuggestions: false,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _password,
+              decoration: InputDecoration(
+                labelText: 'Password',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                      _obscure ? Icons.visibility : Icons.visibility_off),
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                ),
+              ),
+              obscureText: _obscure,
+              enableSuggestions: false,
+              autocorrect: false,
+            ),
+            if (_createAccount) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _name,
+                decoration: const InputDecoration(
+                  labelText: 'Display name (optional)',
+                  hintText: 'Shown on leaderboards',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _busy ? null : _submit,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                child: _busy
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(_createAccount ? 'Create account' : 'Sign in'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: _busy
+                  ? null
+                  : () => setState(() => _createAccount = !_createAccount),
+              child: Text(_createAccount
+                  ? 'Already have an account? Sign in'
+                  : 'New here? Create an account'),
+            ),
+          ],
+        ),
       ),
     );
   }

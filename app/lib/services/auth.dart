@@ -56,8 +56,10 @@ class SettingsService extends ChangeNotifier {
   }
 }
 
-/// Auth state: Discord OAuth access token, stored in the platform secure
-/// store (Keychain on iOS, EncryptedSharedPreferences on Android).
+/// Auth state: the API auth token, stored in the platform secure store
+/// (Keychain on iOS, EncryptedSharedPreferences on Android). Either the
+/// Discord OAuth access token or a JWT from the local email+password login —
+/// the API accepts both as `Authorization: Bearer <token>`.
 class AuthService extends ChangeNotifier {
   static const _kToken = 'discord_access_token';
 

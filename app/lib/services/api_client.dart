@@ -53,7 +53,8 @@ String friendlyApiMessage(ApiException e) {
 
 /// Thin HTTP wrapper for the Alpenglow VGC backend.
 ///
-/// Every request sends `Authorization: Bearer <discord_access_token>`.
+/// Every request sends `Authorization: Bearer <token>` — either the Discord
+/// OAuth access token or a JWT from the local email login.
 /// [baseUrl] defaults to http://localhost:8420 and is configurable.
 class ApiClient {
   final String baseUrl;
@@ -403,6 +404,34 @@ class ApiClient {
     return (body as Map<String, dynamic>? ?? {});
   }
 
+  // --- Local email auth (public; no token needed) ------------------------------
+
+  /// Create an email+password account. Returns {token, player}.
+  Future<Map<String, dynamic>> localSignup({
+    required String email,
+    required String password,
+    required String displayName,
+  }) async {
+    final body = await _post('/api/auth/signup', {
+      'email': email,
+      'password': password,
+      'display_name': displayName,
+    });
+    return (body as Map<String, dynamic>? ?? {});
+  }
+
+  /// Email+password sign in. Returns {token, player}.
+  Future<Map<String, dynamic>> localLogin({
+    required String email,
+    required String password,
+  }) async {
+    final body = await _post('/api/auth/login', {
+      'email': email,
+      'password': password,
+    });
+    return (body as Map<String, dynamic>? ?? {});
+  }
+
   // --- Admin -----------------------------------------------------------------
 
   /// List all players with their crew roles (admin only).
@@ -427,6 +456,24 @@ class ApiClient {
       'action': action,
     });
     return (body as Map<String, dynamic>? ?? {});
+  }
+
+  /// Grant or revoke the admin flag on a local (email) account (admin only).
+  Future<Map<String, dynamic>> setLocalAdmin({
+    required String playerKey,
+    required bool isAdmin,
+  }) async {
+    final body = await _post('/api/admin/users/$playerKey/admin', {
+      'is_admin': isAdmin,
+    });
+    return (body as Map<String, dynamic>? ?? {});
+  }
+
+  /// Generate a one-time temporary password for a local account (admin only).
+  /// Returns the temp password string.
+  Future<String> resetLocalPassword({required String playerKey}) async {
+    final body = await _post('/api/admin/users/$playerKey/reset-password');
+    return (body as Map<String, dynamic>?)?['temp_password']?.toString() ?? '';
   }
 
   // --- Push notifications --------------------------------------------------

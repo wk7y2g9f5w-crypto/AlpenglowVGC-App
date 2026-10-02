@@ -62,7 +62,112 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
     }
   }
 
+  Future<void> _setLocalAdmin(CrewPlayer player, bool isAdmin) async {
+    try {
+      await _api.setLocalAdmin(
+          playerKey: player.discordId, isAdmin: isAdmin);
+      if (!mounted) return;
+      showSnack(context,
+          '${player.displayName} is ${isAdmin ? 'now' : 'no longer'} an admin.');
+      _load();
+    } catch (e) {
+      if (!mounted) return;
+      final msg = e is ApiException ? friendlyApiMessage(e) : e.toString();
+      showSnack(context, msg, error: true);
+    }
+  }
+
+  Future<void> _resetLocalPassword(CrewPlayer player) async {
+    try {
+      final temp = await _api.resetLocalPassword(playerKey: player.discordId);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Temporary password'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                  'Share this with ${player.displayName} — it is shown only once:'),
+              const SizedBox(height: 12),
+              SelectableText(temp,
+                  style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      fontFamily: 'monospace')),
+            ],
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      final msg = e is ApiException ? friendlyApiMessage(e) : e.toString();
+      showSnack(context, msg, error: true);
+    }
+  }
+
   Future<void> _openPlayerDialog(CrewPlayer player) async {
+    final isAdmin = player.hasRole('Admin');
+    // Each entry: (label, disabled, destructive, run-after-confirm).
+    final List<(String, bool, bool, Future<void> Function())> actions;
+    if (player.isLocal) {
+      actions = [
+        (
+          isAdmin ? 'Revoke admin' : 'Grant admin',
+          false,
+          isAdmin,
+          () => _setLocalAdmin(player, !isAdmin),
+        ),
+        (
+          'Reset password',
+          false,
+          false,
+          () => _resetLocalPassword(player),
+        ),
+      ];
+    } else {
+      actions = [
+        for (final spec in [
+          ('Mod', 'grant', 'Grant Mod'),
+          ('Mod', 'revoke', 'Revoke Mod'),
+          ('Tournament Director', 'grant', 'Grant Tournament Director'),
+          ('Tournament Director', 'revoke', 'Revoke Tournament Director'),
+        ])
+          (
+            spec.$3,
+            spec.$2 == 'grant'
+                ? player.hasRole(spec.$1)
+                : !player.hasRole(spec.$1),
+            spec.$2 == 'revoke',
+            () => _changeRole(player, spec.$1, spec.$2),
+          ),
+      ];
+    }
+    String detailFor(String label) {
+      if (label == 'Grant admin') {
+        return 'Make ${player.displayName} an admin?';
+      }
+      if (label == 'Revoke admin') {
+        return 'Remove admin from ${player.displayName}?';
+      }
+      if (label == 'Reset password') {
+        return 'Generate a new temporary password for ${player.displayName}? '
+            'Their current password stops working immediately.';
+      }
+      final m = RegExp(r'^(Grant|Revoke) (.*)$').firstMatch(label);
+      final verb = (m?.group(1) ?? '').toLowerCase();
+      final role = m?.group(2) ?? label;
+      return '$role ${verb == 'grant' ? 'for' : 'from'} ${player.displayName}?';
+    }
+
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -71,6 +176,11 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (player.isLocal &&
+                player.email != null &&
+                player.email!.isNotEmpty)
+              Text('Email: ${player.email}',
+                  style: const TextStyle(color: Colors.grey)),
             if (player.golfplusHandle != null &&
                 player.golfplusHandle!.isNotEmpty)
               Text('Golf+: ${player.golfplusHandle}',
@@ -84,30 +194,17 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
             onPressed: () => Navigator.of(ctx).pop(),
             child: const Text('Close'),
           ),
-          ...[
-            ('Mod', 'grant', 'Grant Mod'),
-            ('Mod', 'revoke', 'Revoke Mod'),
-            ('Tournament Director', 'grant', 'Grant Tournament Director'),
-            ('Tournament Director', 'revoke', 'Revoke Tournament Director'),
-          ].map((spec) {
-            final role = spec.$1;
-            final action = spec.$2;
-            final label = spec.$3;
-            final held = player.hasRole(role);
-            final disabled = action == 'grant' ? held : !held;
-            return TextButton(
-              onPressed: disabled
+          for (final a in actions)
+            TextButton(
+              onPressed: a.$2
                   ? null
                   : () async {
                       Navigator.of(ctx).pop();
                       final confirm = await showDialog<bool>(
                         context: context,
                         builder: (c2) => AlertDialog(
-                          title: Text(label),
-                          content: Text(
-                              '${label.replaceFirst(RegExp(r'^(Grant|Revoke) '), '')} '
-                              '${action == 'grant' ? 'for' : 'from'} '
-                              '${player.displayName}?'),
+                          title: Text(a.$1),
+                          content: Text(detailFor(a.$1)),
                           actions: [
                             TextButton(
                               onPressed: () => Navigator.of(c2).pop(false),
@@ -115,25 +212,23 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
                             ),
                             FilledButton(
                               onPressed: () => Navigator.of(c2).pop(true),
-                              style: FilledButton.styleFrom(
-                                  backgroundColor:
-                                      action == 'grant' ? null : Colors.red.shade700),
+                              style: a.$3
+                                  ? FilledButton.styleFrom(
+                                      backgroundColor:
+                                          Colors.red.shade700)
+                                  : null,
                               child: const Text('Confirm'),
                             ),
                           ],
                         ),
                       );
-                      if (confirm == true && mounted) {
-                        await _changeRole(player, role, action);
-                      }
+                      if (confirm == true && mounted) await a.$4();
                     },
-              child: Text(label,
+              child: Text(a.$1,
                   style: TextStyle(
-                      color: action == 'revoke'
-                          ? Colors.red.shade700
-                          : null)),
-            );
-          }),
+                      color:
+                          a.$1.startsWith('Revoke') ? Colors.red.shade700 : null)),
+            ),
         ],
       ),
     );
@@ -145,11 +240,16 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
         .map((r) => r.toString())
         .where((r) => highlighted.contains(r.toLowerCase()))
         .toList();
-    if (chips.isEmpty) return const SizedBox.shrink();
+    if (chips.isEmpty && !player.isLocal) return const SizedBox.shrink();
     return Wrap(
       spacing: 6,
       runSpacing: 4,
       children: [
+        if (player.isLocal)
+          const Chip(
+            label: Text('local', style: TextStyle(fontSize: 12)),
+            visualDensity: VisualDensity.compact,
+          ),
         for (final r in chips)
           Chip(
             label: Text(r, style: const TextStyle(fontSize: 12)),
@@ -195,6 +295,12 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            if (p.isLocal &&
+                                p.email != null &&
+                                p.email!.isNotEmpty)
+                              Text(p.email!,
+                                  style:
+                                      const TextStyle(color: Colors.grey)),
                             if (p.golfplusHandle != null &&
                                 p.golfplusHandle!.isNotEmpty)
                               Text('Golf+: ${p.golfplusHandle}'),

@@ -55,6 +55,17 @@ CREATE TABLE IF NOT EXISTS players(
   golfplus_handle TEXT,
   timezone TEXT
 );
+CREATE TABLE IF NOT EXISTS local_credentials(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  player_key TEXT UNIQUE NOT NULL,
+  display_name TEXT,
+  is_admin INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_local_credentials_key
+  ON local_credentials(player_key);
 CREATE TABLE IF NOT EXISTS registrations(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -1069,10 +1080,10 @@ async def delete_player_data(db_path, discord_id: str) -> dict:
     """Permanently erase one player's personal data (account deletion).
 
     Deletes every row where the user is the subject:
-      players, devices, notification_prefs, push_outbox, registrations,
-      team_members, tee_time_players, join_requests, scorecards,
-      season_points, casual_tee_time_players, altshot_team_members,
-      matchplay_side_members, matchplay_records.
+      players, local_credentials, devices, notification_prefs, push_outbox,
+      registrations, team_members, tee_time_players, join_requests,
+      scorecards, season_points, casual_tee_time_players,
+      altshot_team_members, matchplay_side_members, matchplay_records.
     altshot_teams.player1_discord_id is SET NULL (the column is nullable and
     the team row is shared with the other teammates).
 
@@ -1088,6 +1099,7 @@ async def delete_player_data(db_path, discord_id: str) -> dict:
     """
     tables = [
         ("players", "discord_id"),
+        ("local_credentials", "player_key"),
         ("devices", "discord_id"),
         ("notification_prefs", "discord_id"),
         ("push_outbox", "discord_id"),
@@ -1115,6 +1127,74 @@ async def delete_player_data(db_path, discord_id: str) -> dict:
     )
     deleted["altshot_teams.player1_discord_id_nulled"] = n
     return {"discord_id": discord_id, "deleted": deleted}
+
+
+# ------------------------------------------------------- local credentials
+# Email+password accounts (alternative to Discord OAuth). Each account owns a
+# synthetic identity "local:<32 hex>" stored as players.discord_id so every
+# scorecard / season-points / crew-list query works unchanged.
+
+
+async def create_local_user(db_path, email: str, password_hash: str,
+                            player_key: str, display_name: str) -> None:
+    """Insert local_credentials + matching players row, atomically.
+
+    Email pre-lowercased. Raises on duplicate email or player_key."""
+    async with aiosqlite.connect(db_path) as con:
+        await con.execute(
+            "INSERT INTO local_credentials (email, password_hash, player_key,"
+            " display_name, created_at) VALUES (?,?,?,?,?)",
+            (email, password_hash, player_key, display_name, utcnow_iso()),
+        )
+        await con.execute(
+            "INSERT INTO players (discord_id, display_name) VALUES (?, ?)",
+            (player_key, display_name),
+        )
+        await con.commit()
+
+
+async def get_local_credential_by_email(db_path, email: str) -> dict | None:
+    return await _fetchone(
+        db_path, "SELECT * FROM local_credentials WHERE email = ?",
+        (email.strip().lower(),),
+    )
+
+
+async def get_local_credential_by_key(db_path, player_key: str) -> dict | None:
+    return await _fetchone(
+        db_path, "SELECT * FROM local_credentials WHERE player_key = ?",
+        (player_key,),
+    )
+
+
+async def list_local_credentials(db_path) -> list[dict]:
+    """player_key, email, display_name, is_admin for all local accounts."""
+    return await _fetchall(
+        db_path,
+        "SELECT player_key, email, display_name, is_admin"
+        " FROM local_credentials",
+    )
+
+
+async def set_local_admin(db_path, player_key: str, is_admin: bool) -> bool:
+    """Grant/revoke the local admin flag. Returns False when unknown key."""
+    _, n = await _execute(
+        db_path,
+        "UPDATE local_credentials SET is_admin = ? WHERE player_key = ?",
+        (1 if is_admin else 0, player_key),
+    )
+    return n == 1
+
+
+async def set_local_password_hash(db_path, player_key: str,
+                                  password_hash: str) -> bool:
+    """Replace the stored bcrypt hash (password reset)."""
+    _, n = await _execute(
+        db_path,
+        "UPDATE local_credentials SET password_hash = ? WHERE player_key = ?",
+        (password_hash, player_key),
+    )
+    return n == 1
 
 
 # ------------------------------------------------------------- registrations

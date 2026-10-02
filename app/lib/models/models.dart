@@ -418,25 +418,34 @@ class CrewPlayer {
   final String displayName;
   final String? golfplusHandle;
   final List<String> roles;
+  final bool isLocal;
+  final String? email;
 
   CrewPlayer({
     required this.discordId,
     required this.displayName,
     this.golfplusHandle,
     List<String>? roles,
+    this.isLocal = false,
+    this.email,
   }) : roles = roles ?? [];
 
   bool hasRole(String role) =>
       roles.any((r) => r.toLowerCase() == role.toLowerCase());
 
-  factory CrewPlayer.fromJson(Map<String, dynamic> j) => CrewPlayer(
-        discordId: j['discord_id'].toString(),
-        displayName: (j['display_name'] ?? j['discord_id']).toString(),
-        golfplusHandle: j['golfplus_handle']?.toString(),
-        roles: (j['roles'] as List? ?? [])
-            .map((r) => r.toString())
-            .toList(growable: false),
-      );
+  factory CrewPlayer.fromJson(Map<String, dynamic> j) {
+    final id = j['discord_id'].toString();
+    return CrewPlayer(
+      discordId: id,
+      displayName: (j['display_name'] ?? j['discord_id']).toString(),
+      golfplusHandle: j['golfplus_handle']?.toString(),
+      roles: (j['roles'] as List? ?? [])
+          .map((r) => r.toString())
+          .toList(growable: false),
+      isLocal: (j['is_local'] == true) || id.startsWith('local:'),
+      email: j['email']?.toString(),
+    );
+  }
 }
 
 /// A Golf+ course with official hole-by-hole pars, from /api/courses.

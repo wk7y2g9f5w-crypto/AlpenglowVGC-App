@@ -14,16 +14,19 @@ own admin/mod/Tournament Director check — and granting/revoking the
 Mod and Tournament Director crew roles for the in-app crew management
 screen (Admin-role changes stay owner-managed in Discord itself).
 
-Auth: every request except /api/health and /privacy needs
-``Authorization: Bearer <discord_user_oauth_token>``. The token is validated
-per-request against Discord's /users/@me endpoint and is never stored or
-logged.
+Auth: every request except /api/health, /privacy, /api/auth/signup and
+/api/auth/login needs ``Authorization: Bearer <token>``. The token is either
+a Discord user OAuth token (validated per-request against Discord's
+/users/@me endpoint and never stored or logged) or a JWT issued by the
+local email+password login (``local:`` accounts, HS256, ``JWT_SECRET``).
 """
 
 import json
 import os
 import re
+import secrets
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import datetime as _dt
@@ -64,6 +67,8 @@ DB_PATH = (
 GUILD_ID = str(config.GUILD_ID)
 
 import httpx  # noqa: E402
+import bcrypt  # noqa: E402
+import jwt  # noqa: E402
 from fastapi import (Depends, FastAPI, HTTPException, Request, Response,
                      status)  # noqa: E402
 from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
@@ -104,9 +109,23 @@ async def fetch_discord_user(token: str) -> dict | None:
 
 
 async def get_current_user(request: Request) -> dict:
-    """Auth dependency: validate the bearer token, ensure the player row."""
+    """Auth dependency: local JWT first, then Discord OAuth token.
+
+    JWTs are verified locally (no network); anything else is validated
+    against Discord's /users/@me as before. Both paths return the same
+    player-dict shape, keyed by players.discord_id ("local:..." for local
+    accounts)."""
     auth = request.headers.get("Authorization", "")
     token = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
+    player_key = verify_local_jwt(token) if token else None
+    if player_key:
+        player = await db.get_player(DB_PATH, player_key)
+        if player is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account no longer exists",
+            )
+        return player
     info = await fetch_discord_user(token) if token else None
     if not info:
         raise HTTPException(
@@ -125,6 +144,120 @@ async def get_current_user(request: Request) -> dict:
 
 
 CurrentUser = Annotated[dict, Depends(get_current_user)]
+
+
+# --------------------------------------------------------------------------
+# Local email+password auth (alternative to Discord OAuth)
+# --------------------------------------------------------------------------
+# Local accounts own a synthetic identity "local:<32 hex>" stored as
+# players.discord_id, so every downstream query (scorecards, season points,
+# crew lists, ...) works unchanged. Auth is a JWT (HS256) sent as the same
+# `Authorization: Bearer <token>` header: the auth dependency tries JWT
+# verification first (no network), then falls back to Discord validation.
+#
+# JWT_SECRET must be set in the environment (Render dashboard). When it is
+# missing, the signup/login endpoints answer 503 and JWTs are never issued
+# or accepted — Discord OAuth keeps working untouched.
+LOCAL_KEY_PREFIX = "local:"
+JWT_EXPIRY_DAYS = 30
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _jwt_secret() -> str | None:
+    """Read at call time (not import time) so tests can set/unset it."""
+    return os.environ.get("JWT_SECRET") or None
+
+
+def _require_jwt_secret() -> str:
+    secret = _jwt_secret()
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email login is not configured on this server yet.",
+        )
+    return secret
+
+
+def _issue_jwt(player_key: str, email: str) -> str:
+    now = int(time.time())
+    payload = {
+        "sub": player_key,
+        "email": email,
+        "type": "local",
+        "iat": now,
+        "exp": now + JWT_EXPIRY_DAYS * 86400,
+    }
+    return jwt.encode(payload, _require_jwt_secret(), algorithm="HS256")
+
+
+def verify_local_jwt(token: str) -> str | None:
+    """Return the player_key when token is a valid local JWT, else None."""
+    secret = _jwt_secret()
+    if not secret or token.count(".") != 2:
+        return None
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        return None
+    if payload.get("type") != "local":
+        return None
+    sub = payload.get("sub")
+    if not isinstance(sub, str) or not sub.startswith(LOCAL_KEY_PREFIX):
+        return None
+    return sub
+
+
+# Login brute-force protection: in-memory per-email window. Resets on
+# process restart (documented limitation; the API runs as one instance).
+_LOGIN_FAILS: dict[str, list[float]] = {}
+_LOGIN_WINDOW_S = 10 * 60
+_LOGIN_MAX_FAILS = 10
+
+
+def _login_rate_limited(email: str) -> bool:
+    now = time.time()
+    fails = [t for t in _LOGIN_FAILS.get(email, []) if now - t < _LOGIN_WINDOW_S]
+    _LOGIN_FAILS[email] = fails
+    return len(fails) >= _LOGIN_MAX_FAILS
+
+
+def _record_login_failure(email: str) -> None:
+    _LOGIN_FAILS.setdefault(email, []).append(time.time())
+
+
+class LocalSignup(BaseModel):
+    email: str
+    password: str
+    display_name: str = ""
+
+    @field_validator("email")
+    @classmethod
+    def _email_ok(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not _EMAIL_RE.match(v):
+            raise ValueError("Enter a valid email address.")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def _password_ok(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters.")
+        return v
+
+    @field_validator("display_name")
+    @classmethod
+    def _name_ok(cls, v: str) -> str:
+        return v.strip()[:80]
+
+
+class LocalLogin(BaseModel):
+    email: str
+    password: str
+
+
+# NOTE: the /api/auth/* route handlers live just below `app = FastAPI(...)`
+# further down this file — decorators need the app object to exist.
 
 
 # --------------------------------------------------------------------------
@@ -211,7 +344,13 @@ async def fetch_crew_status(discord_id: str) -> bool | None:
     Returns True/False when Discord answered, None when the check could not
     be performed (no bot token configured, network/Discord failure). Single
     function so unit tests can monkeypatch it.
+
+    Local (email) accounts: only local admins count as crew; everyone else
+    is a regular player.
     """
+    if str(discord_id).startswith(LOCAL_KEY_PREFIX):
+        cred = await db.get_local_credential_by_key(DB_PATH, str(discord_id))
+        return bool(cred and cred["is_admin"])
     standing = await _fetch_guild_standing(discord_id)
     if standing is None:
         return None
@@ -227,7 +366,13 @@ async def fetch_admin_status(discord_id: str) -> bool | None:
     """Is this Discord user a full admin (owner / Manage Server / Admin)?
 
     Used for destructive actions like tournament delete.
+
+    Local (email) accounts never touch Discord: their admin flag lives in
+    local_credentials.is_admin instead.
     """
+    if str(discord_id).startswith(LOCAL_KEY_PREFIX):
+        cred = await db.get_local_credential_by_key(DB_PATH, str(discord_id))
+        return bool(cred and cred["is_admin"])
     standing = await _fetch_guild_standing(discord_id)
     if standing is None:
         return None
@@ -246,7 +391,12 @@ async def fetch_mod_admin_status(discord_id: str) -> bool | None:
 
     Used for AltShot scorecard manipulation: editing, deleting, or
     otherwise changing a submitted score.
+
+    Local (email) accounts: local admins pass, everyone else does not.
     """
+    if str(discord_id).startswith(LOCAL_KEY_PREFIX):
+        cred = await db.get_local_credential_by_key(DB_PATH, str(discord_id))
+        return bool(cred and cred["is_admin"])
     standing = await _fetch_guild_standing(discord_id)
     if standing is None:
         return None
@@ -834,6 +984,68 @@ async def coded_http_exception_handler(request: Request, exc: HTTPException):
                         content={"detail": exc.detail})
 
 
+# --------------------------------------------------------------------------
+# Local email+password auth routes (helpers/models defined near the top)
+# --------------------------------------------------------------------------
+@app.post("/api/auth/signup", status_code=status.HTTP_201_CREATED)
+async def local_signup(body: LocalSignup) -> dict:
+    """Create an email+password account. Returns a JWT on success."""
+    _require_jwt_secret()  # 503 when unconfigured
+    existing = await db.get_local_credential_by_email(DB_PATH, body.email)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "email_taken"},
+        )
+    name = body.display_name or body.email.split("@")[0][:80] or "Player"
+    player_key = LOCAL_KEY_PREFIX + secrets.token_hex(16)
+    pw_hash = bcrypt.hashpw(
+        body.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    await db.create_local_user(DB_PATH, body.email, pw_hash, player_key, name)
+    return {
+        "token": _issue_jwt(player_key, body.email),
+        "player": {
+            "discord_id": player_key,
+            "display_name": name,
+            "email": body.email,
+        },
+    }
+
+
+@app.post("/api/auth/login")
+async def local_login(body: LocalLogin) -> dict:
+    """Email+password login. Returns a JWT on success."""
+    _require_jwt_secret()  # 503 when unconfigured
+    email = body.email.strip().lower()
+    if _login_rate_limited(email):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts — try again in a few minutes.",
+        )
+    cred = await db.get_local_credential_by_email(DB_PATH, email)
+    # Always run a bcrypt check (dummy hash when unknown) so unknown and
+    # wrong-password emails take the same time.
+    dummy = bcrypt.hashpw(b"alpenglow-dummy", bcrypt.gensalt())
+    stored = cred["password_hash"].encode("utf-8") if cred else dummy
+    ok = bcrypt.checkpw(body.password.encode("utf-8"), stored) and cred
+    if not ok:
+        _record_login_failure(email)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+        )
+    _LOGIN_FAILS.pop(email, None)
+    player = await db.get_player(DB_PATH, cred["player_key"])
+    return {
+        "token": _issue_jwt(cred["player_key"], email),
+        "player": {
+            "discord_id": cred["player_key"],
+            "display_name": (player or {}).get("display_name") or email,
+            "email": email,
+        },
+    }
+
+
 @app.get("/api/health")
 async def health() -> dict:
     return {"ok": True}
@@ -868,6 +1080,10 @@ how it is used, and how you can delete it.</p>
   <li><strong>Discord identity.</strong> When you sign in with Discord, we
   receive your Discord user ID and username. Your sign-in token is validated
   per request and is never stored.</li>
+  <li><strong>Email accounts.</strong> If you create an account with an email
+  address instead of Discord, we store your email address and a bcrypt hash of
+  your password. We never store your actual password, and we never sell or
+  share your email address.</li>
   <li><strong>Player profile.</strong> Your display name, optional Golf+ handle,
   and optional timezone (used to show tee times in your local time).</li>
   <li><strong>Push notifications.</strong> Your device's APNs push token and
@@ -1460,17 +1676,27 @@ async def admin_list_players(user: AdminUser) -> dict:
         )
         if uid:
             member_crew_roles[uid] = names
-    return {
-        "players": [
-            {
-                "discord_id": p["discord_id"],
-                "display_name": p["display_name"],
-                "golfplus_handle": p["golfplus_handle"],
-                "roles": member_crew_roles.get(str(p["discord_id"]), []),
-            }
-            for p in players
-        ]
+    # Local (email) accounts resolve roles from the DB, not Discord.
+    local_by_key = {
+        c["player_key"]: c for c in await db.list_local_credentials(DB_PATH)
     }
+    players_out = []
+    for p in players:
+        pid = str(p["discord_id"])
+        local = local_by_key.get(pid)
+        if local is not None:
+            role_list = ["Admin"] if local["is_admin"] else []
+        else:
+            role_list = member_crew_roles.get(pid, [])
+        players_out.append({
+            "discord_id": pid,
+            "display_name": p["display_name"],
+            "golfplus_handle": p["golfplus_handle"],
+            "roles": role_list,
+            "is_local": local is not None,
+            "email": local["email"] if local else None,
+        })
+    return {"players": players_out}
 
 
 class CrewRoleChange(BaseModel):
@@ -1538,6 +1764,57 @@ async def change_crew_role(body: CrewRoleChange, user: AdminUser) -> dict:
         status_code=status.HTTP_502_BAD_GATEWAY,
         detail=f"Discord returned status {result}.",
     )
+
+
+def _require_local_key(player_key: str) -> str:
+    """Local (email) accounts only — Discord users are managed in Discord."""
+    if not player_key.startswith(LOCAL_KEY_PREFIX):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only local (email) accounts can be managed here.",
+        )
+    return player_key
+
+
+class LocalAdminChange(BaseModel):
+    is_admin: bool
+
+
+@app.post("/api/admin/users/{player_key}/admin")
+async def set_local_user_admin(player_key: str, body: LocalAdminChange,
+                               user: AdminUser) -> dict:
+    """Grant or revoke the admin flag on a local (email) account."""
+    _require_local_key(player_key)
+    cred = await db.get_local_credential_by_key(DB_PATH, player_key)
+    if cred is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Unknown local account.",
+        )
+    await db.set_local_admin(DB_PATH, player_key, body.is_admin)
+    return {"ok": True, "player_key": player_key,
+            "is_admin": body.is_admin}
+
+
+@app.post("/api/admin/users/{player_key}/reset-password")
+async def reset_local_user_password(player_key: str,
+                                    user: AdminUser) -> dict:
+    """Generate a one-time temporary password for a local account.
+
+    Returned exactly once — the admin reads it to the user out of band.
+    """
+    _require_local_key(player_key)
+    cred = await db.get_local_credential_by_key(DB_PATH, player_key)
+    if cred is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Unknown local account.",
+        )
+    temp = secrets.token_urlsafe(9)  # 12 chars
+    pw_hash = bcrypt.hashpw(
+        temp.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    await db.set_local_password_hash(DB_PATH, player_key, pw_hash)
+    return {"ok": True, "player_key": player_key, "temp_password": temp}
 
 
 @app.post("/api/tee-times/{tee_time_id}/request")
