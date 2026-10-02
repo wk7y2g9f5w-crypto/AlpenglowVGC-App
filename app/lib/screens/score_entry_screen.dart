@@ -339,11 +339,11 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
             : 'Submit scorecard?'),
         content: Text(
           _isSubmitted
-              ? 'This will update ${_player!.displayName}\'s submitted '
+              ? 'This will update ${golferDisplayName(_player!.displayName, _player!.golfplusHandle)}\'s submitted '
                   'scorecard for round $_roundNumber.'
               : 'All scores entered are final. After submitting, only crew '
                   '(admins, mods, tournament directors) can change them.\n\n'
-                  '${_player!.displayName} — round $_roundNumber: '
+                  '${golferDisplayName(_player!.displayName, _player!.golfplusHandle)} — round $_roundNumber: '
                   'total ${_total ?? '–'}'
                   '${toPar.isNotEmpty ? ' ($toPar)' : ''}'
                   '${_witnessCtrl.text.trim().isNotEmpty ? '\nWitness: ${_witnessCtrl.text.trim()}' : ''}',
@@ -429,7 +429,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   Widget _submittedBody() {
     final pars = _pars;
     final total = _scores.fold<int>(0, (a, s) => a + (s ?? 0));
-    final playerName = _player?.displayName ?? 'this player';
+    final playerName = golferDisplayName(
+        _player?.displayName ?? 'this player', _player?.golfplusHandle);
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -536,7 +537,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                       return Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: ChoiceChip(
-                          label: Text(p.displayName),
+                          label: Text(golferDisplayName(
+                              p.displayName, p.golfplusHandle)),
                           selected: selected,
                           onSelected: (_) => _pickPlayer(p),
                         ),

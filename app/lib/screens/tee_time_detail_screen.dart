@@ -287,10 +287,8 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
               ...tt.players.map((p) => ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.person),
-                    title: Text(p.displayName),
-                    subtitle: p.golfplusHandle != null
-                        ? Text('Golf+: ${p.golfplusHandle}')
-                        : null,
+                    title: Text(
+                        golferDisplayName(p.displayName, p.golfplusHandle)),
                     trailing: p.discordId == tt.createdBy
                         ? const Chip(
                             label:

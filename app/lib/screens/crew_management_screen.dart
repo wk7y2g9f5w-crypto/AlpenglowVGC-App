@@ -22,6 +22,10 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
 
+  /// Privacy: show Golf+ username only, never the real/display name.
+  static String _name(CrewPlayer p) =>
+      golferDisplayName(p.displayName, p.golfplusHandle);
+
   List<CrewPlayer>? _players;
   String? _error;
 
@@ -53,7 +57,7 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
           discordId: player.discordId, role: role, action: action);
       if (!mounted) return;
       showSnack(context,
-          '$role ${action == 'grant' ? 'granted to' : 'revoked from'} ${player.displayName}.');
+          '$role ${action == 'grant' ? 'granted to' : 'revoked from'} ${_name(player)}.');
       _load();
     } catch (e) {
       if (!mounted) return;
@@ -68,7 +72,7 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
           playerKey: player.discordId, isAdmin: isAdmin);
       if (!mounted) return;
       showSnack(context,
-          '${player.displayName} is ${isAdmin ? 'now' : 'no longer'} an admin.');
+          '${_name(player)} is ${isAdmin ? 'now' : 'no longer'} an admin.');
       _load();
     } catch (e) {
       if (!mounted) return;
@@ -90,7 +94,7 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                  'Share this with ${player.displayName} — it is shown only once:'),
+                  'Share this with ${_name(player)} — it is shown only once:'),
               const SizedBox(height: 12),
               SelectableText(temp,
                   style: const TextStyle(
@@ -153,25 +157,25 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
     }
     String detailFor(String label) {
       if (label == 'Grant admin') {
-        return 'Make ${player.displayName} an admin?';
+        return 'Make ${_name(player)} an admin?';
       }
       if (label == 'Revoke admin') {
-        return 'Remove admin from ${player.displayName}?';
+        return 'Remove admin from ${_name(player)}?';
       }
       if (label == 'Reset password') {
-        return 'Generate a new temporary password for ${player.displayName}? '
+        return 'Generate a new temporary password for ${_name(player)}? '
             'Their current password stops working immediately.';
       }
       final m = RegExp(r'^(Grant|Revoke) (.*)$').firstMatch(label);
       final verb = (m?.group(1) ?? '').toLowerCase();
       final role = m?.group(2) ?? label;
-      return '$role ${verb == 'grant' ? 'for' : 'from'} ${player.displayName}?';
+      return '$role ${verb == 'grant' ? 'for' : 'from'} ${_name(player)}?';
     }
 
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(player.displayName),
+        title: Text(_name(player)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -180,10 +184,6 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
                 player.email != null &&
                 player.email!.isNotEmpty)
               Text('Email: ${player.email}',
-                  style: const TextStyle(color: Colors.grey)),
-            if (player.golfplusHandle != null &&
-                player.golfplusHandle!.isNotEmpty)
-              Text('Golf+: ${player.golfplusHandle}',
                   style: const TextStyle(color: Colors.grey)),
             const SizedBox(height: 4),
             const Text('Choose an action — each asks for confirmation:'),
@@ -291,7 +291,7 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
                     itemBuilder: (ctx, i) {
                       final p = _players![i];
                       return ListTile(
-                        title: Text(p.displayName),
+                        title: Text(_name(p)),
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -301,9 +301,6 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
                               Text(p.email!,
                                   style:
                                       const TextStyle(color: Colors.grey)),
-                            if (p.golfplusHandle != null &&
-                                p.golfplusHandle!.isNotEmpty)
-                              Text('Golf+: ${p.golfplusHandle}'),
                             _roleChips(p),
                           ],
                         ),

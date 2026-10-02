@@ -46,6 +46,15 @@ String formatLocal(DateTime utc, {bool withTime = true}) {
       : DateFormat('MMM d, yyyy').format(local);
 }
 
+/// Privacy rule: when showing a player to other people, display ONLY their
+/// Golf+ username — never the real/display name. Falls back to displayName
+/// when no handle is set (there's nothing else to show). Only change *display*
+/// strings with this; never identity keys (discord_id / player_key).
+String golferDisplayName(String displayName, String? golfplusHandle) {
+  final handle = (golfplusHandle ?? '').trim();
+  return handle.isNotEmpty ? handle : displayName;
+}
+
 String formatDateRange(String? start, String? end) {
   if (start == null || start.isEmpty) return 'Dates TBD';
   if (end == null || end.isEmpty || end == start) return start;

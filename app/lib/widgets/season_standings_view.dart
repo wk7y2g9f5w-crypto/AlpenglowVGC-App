@@ -74,7 +74,6 @@ class _SeasonStandingsViewState extends State<SeasonStandingsView> {
               );
             }
             final e = s.entries[i - 1];
-            final handle = e.golfplusHandle;
             return ListTile(
               leading: CircleAvatar(
                 backgroundColor:
@@ -85,9 +84,7 @@ class _SeasonStandingsViewState extends State<SeasonStandingsView> {
                         fontWeight: FontWeight.bold)),
               ),
               title: Text(
-                handle != null && handle.isNotEmpty
-                    ? '${e.displayName} ($handle)'
-                    : e.displayName,
+                golferDisplayName(e.displayName, e.golfplusHandle),
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               subtitle: Text(
