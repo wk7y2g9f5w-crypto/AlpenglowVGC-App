@@ -455,6 +455,24 @@ def _json_list(raw) -> list:
 def utcnow_iso() -> str:    return datetime.now(timezone.utc).isoformat()
 
 
+# Grace window for "upcoming" tee-time lists: a tee time whose start is this
+# many minutes in the past still shows as upcoming, so a round created for
+# 3:30pm doesn't vanish from the list at 3:31pm while people are teeing off.
+# Deliberately NOT applied to get_reminder_due (push reminders must only
+# target future starts).
+_UPCOMING_GRACE_MINUTES = 10
+
+
+def upcoming_bound_iso() -> str:
+    """ISO-8601 lower bound for upcoming tee-time filters (now minus grace).
+
+    Same string format as utcnow_iso(), so lexicographic comparison stays
+    chronological (see get_reminder_due).
+    """
+    return (datetime.now(timezone.utc)
+            - timedelta(minutes=_UPCOMING_GRACE_MINUTES)).isoformat()
+
+
 async def init_db(db_path: str) -> None:
     async with aiosqlite.connect(db_path) as con:
         await con.executescript(SCHEMA)
@@ -2838,7 +2856,7 @@ async def list_casual_tee_times(db_path, upcoming_only: bool = True,
             db_path,
             "SELECT * FROM casual_tee_times WHERE starts_at >= ?"
             " ORDER BY starts_at ASC LIMIT ?",
-            (utcnow_iso(), limit),
+            (upcoming_bound_iso(), limit),
         )
     else:
         rows = await _fetchall(
@@ -3231,7 +3249,7 @@ async def list_altshot_tee_times(db_path, upcoming_only: bool = True,
             "SELECT * FROM altshot_tee_times WHERE starts_at >= ?"
             " AND casual_tee_time_id IS NULL"
             " ORDER BY starts_at ASC LIMIT ?",
-            (utcnow_iso(), limit),
+            (upcoming_bound_iso(), limit),
         )
     else:
         rows = await _fetchall(
@@ -3981,7 +3999,7 @@ async def list_matchplay_tee_times(db_path, upcoming_only: bool = True,
             "SELECT * FROM matchplay_tee_times WHERE starts_at >= ?"
             " AND casual_tee_time_id IS NULL"
             " ORDER BY starts_at ASC LIMIT ?",
-            (utcnow_iso(), limit),
+            (upcoming_bound_iso(), limit),
         )
     else:
         rows = await _fetchall(
