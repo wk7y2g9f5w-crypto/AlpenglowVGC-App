@@ -66,6 +66,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _openSupport() async {
+    const supportUrl = 'https://alpenglow-vgc.onrender.com/support';
+    try {
+      final ok = await launchUrl(Uri.parse(supportUrl),
+          mode: LaunchMode.externalApplication);
+      if (!ok && mounted) {
+        showSnack(context, 'Could not open the support page.',
+            error: true);
+      }
+    } catch (_) {
+      if (mounted) {
+        showSnack(context, 'Could not open the support page.',
+            error: true);
+      }
+    }
+  }
+
   /// Two-step delete-account flow: the user must type "delete" before the red
   /// Delete button enables (copied from the End-season dialog in
   /// new_season_screen.dart). On success the server-side record is removed
@@ -212,6 +229,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: const Text('Privacy Policy'),
             trailing: const Icon(Icons.open_in_new),
             onTap: _openPrivacyPolicy,
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.help_outline),
+            title: const Text('Support'),
+            trailing: const Icon(Icons.open_in_new),
+            onTap: _openSupport,
           ),
           if (_isAdmin)
             ListTile(

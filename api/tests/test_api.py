@@ -2649,6 +2649,15 @@ class AppStorePrepApiTestCase(ApiTestCase):
         self.assertIn("2026-10-02", r.text)
         self.assertIn("Delete Account", r.text)
 
+    # -- support page -------------------------------------------------
+    def test_support_public_no_auth(self):
+        r = self.client.get("/support")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("text/html", r.headers["content-type"])
+        self.assertIn("Alpenglow VGC", r.text)
+        self.assertIn("Alpenglowvgc@outlook.com", r.text)
+        self.assertIn("Delete Account", r.text)
+
     # -- account deletion ---------------------------------------------
     def test_delete_me_unauthorized(self):
         r = self.client.delete("/api/players/me")

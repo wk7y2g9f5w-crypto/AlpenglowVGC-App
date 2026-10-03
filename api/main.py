@@ -14,7 +14,7 @@ own admin/mod/Tournament Director check — and granting/revoking the
 Mod and Tournament Director crew roles for the in-app crew management
 screen (Admin-role changes stay owner-managed in Discord itself).
 
-Auth: every request except /api/health, /privacy, /api/auth/signup and
+Auth: every request except /api/health, /privacy, /support, /api/auth/signup and
 /api/auth/login needs ``Authorization: Bearer <token>``. The token is either
 a Discord user OAuth token (validated per-request against Discord's
 /users/@me endpoint and never stored or logged) or a JWT issued by the
@@ -1156,6 +1156,58 @@ Discord server.</p>
 async def privacy_policy() -> Response:
     """Public static privacy policy page, linked from the app's Settings."""
     return Response(content=PRIVACY_POLICY_HTML, media_type="text/html")
+
+
+# --------------------------------------------------------------------------
+# Support page (public; the app links it from Settings; used as the
+# App Store support URL)
+# --------------------------------------------------------------------------
+SUPPORT_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alpenglow VGC &mdash; Support</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 40em;
+         margin: 2em auto; padding: 0 1.2em; line-height: 1.6; color: #222; }
+  h1 { font-size: 1.5em; } h2 { font-size: 1.15em; margin-top: 1.8em; }
+  .meta { color: #666; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<h1>Alpenglow VGC &mdash; Support</h1>
+<p class="meta">The companion app for the Alpenglow VGC golf community.</p>
+
+<h2>Contact us</h2>
+<p>Email: <a href="mailto:Alpenglowvgc@outlook.com">Alpenglowvgc@outlook.com</a></p>
+
+<h2>Frequently asked questions</h2>
+
+<h2>How do I join?</h2>
+<p>Create an account in the app with Discord or with an email address, then set
+your Golf+ username in your profile.</p>
+
+<h2>My Golf+ username</h2>
+<p>Your Golf+ username must match your Golf+ username <strong>exactly</strong>.
+Set it in your profile. Rounds submitted under a mismatched username may be
+voided.</p>
+
+<h2>How do I delete my account?</h2>
+<p>In the app, go to <strong>Settings &rarr; Delete Account</strong> and type
+"delete" to confirm. This permanently removes your account data.</p>
+
+<h2>Something wrong with a score or tournament?</h2>
+<p>Contact a crew admin in the Alpenglow VGC Discord server, or email
+<a href="mailto:Alpenglowvgc@outlook.com">Alpenglowvgc@outlook.com</a>.</p>
+</body>
+</html>"""
+
+
+@app.get("/support", include_in_schema=False)
+async def support_page() -> Response:
+    """Public static support page, linked from the app's Settings."""
+    return Response(content=SUPPORT_HTML, media_type="text/html")
 
 
 # --------------------------------------------------------------------------
