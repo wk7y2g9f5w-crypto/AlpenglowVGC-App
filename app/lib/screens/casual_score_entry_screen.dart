@@ -8,6 +8,7 @@ import '../services/auth.dart';
 import '../widgets/common.dart';
 import '../widgets/score_badge.dart';
 import '../widgets/shot_tracker.dart';
+import 'shot_review_screen.dart';
 
 /// Score entry for a casual stroke / best-ball round.
 ///
@@ -263,6 +264,13 @@ class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
             onPressed: () => Navigator.of(ctx).pop(false),
             child: const Text('Keep editing'),
           ),
+          // Opens above the dialog; the dialog is still here when the
+          // review closes.
+          if (_cardId != null)
+            TextButton(
+              onPressed: () => _openShotReview(),
+              child: const Text('Review shots'),
+            ),
           ElevatedButton(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Submit'),
@@ -315,11 +323,36 @@ class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
     );
   }
 
+  /// Read-only review of every hole's tracked shots, loaded fresh from
+  /// the server — for checking the maps before submitting.
+  Future<void> _openShotReview() async {
+    final cardId = _cardId;
+    if (cardId == null) return;
+    await showShotReview(
+      context: context,
+      api: _api,
+      cardId: cardId,
+      courseName: widget.teeTime.course,
+      pars: _pars ?? List.filled(_holeCount, 4),
+      strokes: List.of(_scores),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-          title: Text('Enter scores — ${widget.teeTime.formatLabel}')),
+          title: Text('Enter scores — ${widget.teeTime.formatLabel}'),
+          actions: [
+            // Quiet entry to the shot-map review. Only once the scorecard
+            // exists server-side (same gate as shot tracking).
+            if (_cardId != null)
+              IconButton(
+                icon: const Icon(Icons.map_outlined),
+                tooltip: 'Review tracked shots',
+                onPressed: _openShotReview,
+              ),
+          ]),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _locked

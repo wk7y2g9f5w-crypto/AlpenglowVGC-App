@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/models.dart';
@@ -64,6 +66,11 @@ class _ShotTrackerSheet extends StatefulWidget {
 class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
   late final HoleMapGeometry _geometry;
   List<Shot> _shots = [];
+
+  /// Snapshot of what the server has (set on load and after each
+  /// successful save). Compared against [_shots] so closing the sheet
+  /// can never silently discard tracked work.
+  List<Shot> _savedShots = [];
   bool _loading = true;
   bool _saving = false;
   String? _loadError;
@@ -110,6 +117,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
       if (mounted) {
         setState(() {
           _shots = shots;
+          _savedShots = List.of(shots);
           _loading = false;
         });
       }
@@ -284,28 +292,71 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     }
   }
 
-  Future<void> _save() async {
-    if (_saving) return;
+  /// True when the on-screen shots differ from what the server has.
+  bool get _dirty {
+    if (_shots.length != _savedShots.length) return true;
+    for (var i = 0; i < _shots.length; i++) {
+      if (_shots[i] != _savedShots[i]) return true;
+    }
+    return false;
+  }
+
+  /// PUT the current shots. Returns true on success. Never pops — the
+  /// caller decides what happens next.
+  Future<bool> _persist() async {
+    if (_saving) return false;
     setState(() => _saving = true);
     try {
       await widget.api.putHoleShots(
           widget.cardId, widget.holeNumber, _shots);
-      if (mounted) {
-        Navigator.of(context).pop(true);
-        showSnack(context,
-            'Hole ${widget.holeNumber}: ${_shots.length} shot${_shots.length == 1 ? '' : 's'} saved.');
-      }
+      _savedShots = List.of(_shots);
+      if (mounted) setState(() => _saving = false);
+      return true;
     } on ApiException catch (e) {
       if (mounted) {
         showSnack(context, friendlyApiMessage(e), error: true);
         setState(() => _saving = false);
       }
+      return false;
     } catch (e) {
       if (mounted) {
         showSnack(context, 'Save failed: $e', error: true);
         setState(() => _saving = false);
       }
+      return false;
     }
+  }
+
+  Future<void> _save() async {
+    if (await _persist() && mounted) {
+      Navigator.of(context).pop(true);
+      showSnack(context,
+          'Hole ${widget.holeNumber}: ${_shots.length} shot${_shots.length == 1 ? '' : 's'} saved.');
+    }
+  }
+
+  /// Close button: unsaved work is flushed first so it is never silently
+  /// lost. If the save fails the sheet stays open so the player can
+  /// retry instead of losing shots.
+  Future<void> _close() async {
+    if (_dirty) {
+      final ok = await _persist();
+      if (!ok || !mounted) return;
+    }
+    if (mounted) Navigator.of(context).pop(false);
+  }
+
+  @override
+  void dispose() {
+    // Backstop for dismiss paths that bypass the close button
+    // (drag-to-dismiss, system back): fire-and-forget the pending shots
+    // so they are never silently lost.
+    if (_dirty && !_saving) {
+      unawaited(widget.api
+          .putHoleShots(widget.cardId, widget.holeNumber, _shots)
+          .then((_) {}, onError: (_) {}));
+    }
+    super.dispose();
   }
 
   @override
@@ -359,13 +410,14 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                 IconButton(
                   icon: const Icon(Icons.close),
                   tooltip: 'Close',
-                  onPressed: () => Navigator.of(context).pop(false),
+                  onPressed: _saving ? null : _close,
                 ),
               ],
             ),
             const Text(
               'Tap the map to place each shot\u2019s landing spot. '
-              'Drag a placed shot to move it.',
+              'Drag a placed shot to move it. '
+              'Shots save automatically when you close.',
               style: TextStyle(color: Colors.grey, fontSize: 13),
             ),
             const SizedBox(height: 8),

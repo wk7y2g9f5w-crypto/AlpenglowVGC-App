@@ -371,6 +371,21 @@ class Shot {
         lie: lie ?? this.lie,
         holed: holed ?? this.holed,
       );
+
+  /// Value equality on the tracked content. `seq` is deliberately excluded:
+  /// the server assigns it on read, so two shots differing only in seq are
+  /// the same tracked shot. Used for dirty-tracking in the shot tracker.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Shot &&
+          x == other.x &&
+          y == other.y &&
+          lie == other.lie &&
+          holed == other.holed;
+
+  @override
+  int get hashCode => Object.hash(x, y, lie, holed);
 }
 
 /// Honest shot-tracking stats for one player, from
