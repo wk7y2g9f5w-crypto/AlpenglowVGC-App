@@ -5,6 +5,7 @@ import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../services/timezones.dart';
 import '../widgets/common.dart';
+import '../widgets/shot_stats_view.dart';
 
 /// Profile: timezone picker, Golf+ handle, my stats, my registrations.
 class ProfileScreen extends StatefulWidget {
@@ -22,6 +23,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _tzCtrl = TextEditingController();
   final _handleCtrl = TextEditingController();
   bool _saving = false;
+
+  /// Local copy of the stats-privacy toggle; seeded from me.statsPrivate
+  /// on each load. Null until the first load completes.
+  bool? _statsPrivate;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -47,6 +52,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } on ApiException {
       // Stats are nice-to-have.
     }
+    PlayerShotStats? shotStats;
+    try {
+      shotStats = await _api.getPlayerStats('me');
+    } catch (_) {
+      // Shot stats are nice-to-have.
+    }
     List<Tournament> mine = [];
     try {
       final all = await _api.getTournaments();
@@ -54,10 +65,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } on ApiException {
       // Registrations are nice-to-have.
     }
-    return _ProfileData(me: me, stats: stats, registrations: mine);
+    return _ProfileData(
+        me: me, stats: stats, shotStats: shotStats, registrations: mine);
   }
 
   Future<void> _refresh() async {
+    // Re-seed the privacy toggle from the server on refresh.
+    _statsPrivate = null;
     final f = _load();
     setState(() => _future = f);
     await f.then((d) {
@@ -90,6 +104,31 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (mounted) showSnack(context, 'Save failed: $e', error: true);
     } finally {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _toggleStatsPrivate(bool value) async {
+    final previous = _statsPrivate ?? false;
+    setState(() => _statsPrivate = value);
+    try {
+      await _api.updateMe(statsPrivate: value);
+      if (mounted) {
+        showSnack(
+            context,
+            value
+                ? 'Your shot stats are now private — only you can see them.'
+                : 'Your shot stats are now visible to other players.');
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() => _statsPrivate = previous);
+        showSnack(context, friendlyApiMessage(e), error: true);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _statsPrivate = previous);
+        showSnack(context, 'Save failed: $e', error: true);
+      }
     }
   }
 
@@ -162,6 +201,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           if (_handleCtrl.text.isEmpty && data.me.golfplusHandle != null) {
             _handleCtrl.text = data.me.golfplusHandle!;
           }
+          _statsPrivate ??= data.me.statsPrivate;
           final tzText = _tzCtrl.text;
           return ListView(
             padding: const EdgeInsets.all(16),
@@ -284,6 +324,32 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         '${t.course ?? ''} · ${formatDateRange(t.startDate, t.endDate)}'),
                     trailing: StatusChip(status: t.status),
                   )),
+              const SizedBox(height: 24),
+              const Text('Shot stats',
+                  style:
+                      TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              const Text(
+                'Built only from holes where you tracked shots — '
+                'nothing here changes how you enter scores.',
+                style: TextStyle(color: Colors.grey, fontSize: 13),
+              ),
+              const SizedBox(height: 8),
+              if (data.shotStats != null)
+                ShotStatsView(stats: data.shotStats!)
+              else
+                const Text(
+                    'No shot data yet — shot tracking is optional and '
+                    'lives on each hole in score entry.',
+                    style: TextStyle(color: Colors.grey)),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Make my stats private'),
+                subtitle: const Text(
+                    'Only you can see your shot stats and handicap.'),
+                value: _statsPrivate ?? false,
+                onChanged: _toggleStatsPrivate,
+              ),
             ],
           );
         },
@@ -346,7 +412,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
 class _ProfileData {
   final PlayerMe me;
   final Map<String, dynamic> stats;
+  final PlayerShotStats? shotStats;
   final List<Tournament> registrations;
   _ProfileData(
-      {required this.me, required this.stats, required this.registrations});
+      {required this.me,
+      required this.stats,
+      this.shotStats,
+      required this.registrations});
 }

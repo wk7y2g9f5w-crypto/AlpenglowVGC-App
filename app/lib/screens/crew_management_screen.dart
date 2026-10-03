@@ -4,6 +4,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import 'player_stats_screen.dart';
 
 /// Admin-only crew management: list all players, see their crew roles, and
 /// grant/revoke the Mod and Tournament Director roles behind confirmations.
@@ -193,6 +194,23 @@ class _CrewManagementScreenState extends State<CrewManagementScreen> {
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
             child: const Text('Close'),
+          ),
+          // Read-only peek at the player's shot stats; honors their
+          // privacy toggle inside PlayerStatsScreen.
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => PlayerStatsScreen(
+                    api: _api,
+                    playerKey: player.discordId,
+                    displayName: _name(player),
+                  ),
+                ),
+              );
+            },
+            child: const Text('View stats'),
           ),
           for (final a in actions)
             TextButton(

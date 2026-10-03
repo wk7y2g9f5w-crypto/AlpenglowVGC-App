@@ -286,6 +286,7 @@ class TeeTimeRequest {
 }
 
 class Scorecard {
+  final int? id;
   final String playerDiscordId;
   final List<int?> scores;
   final int? total;
@@ -297,6 +298,7 @@ class Scorecard {
   final String? witnessName;
 
   Scorecard({
+    this.id,
     required this.playerDiscordId,
     required this.scores,
     this.total,
@@ -312,6 +314,7 @@ class Scorecard {
   bool get isLive => status == 'in_progress';
 
   factory Scorecard.fromJson(Map<String, dynamic> j) => Scorecard(
+        id: (j['id'] as num?)?.toInt(),
         playerDiscordId: j['player_discord_id'].toString(),
         scores: ((j['scores'] as List?) ?? [])
             .map((e) => e == null ? null : (e as num).toInt())
@@ -324,6 +327,118 @@ class Scorecard {
         roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
         witnessName: j['witness_name']?.toString(),
       );
+}
+
+/// One tracked golf shot: a landing spot on the hole schematic plus the lie
+/// it came to rest in. [seq] is 1-based and assigned by the server;
+/// [holed] may only be true on the final shot of the hole.
+class Shot {
+  final int? seq;
+  final double x;
+  final double y;
+  final String lie;
+  final bool holed;
+
+  const Shot({
+    this.seq,
+    required this.x,
+    required this.y,
+    required this.lie,
+    this.holed = false,
+  });
+
+  factory Shot.fromJson(Map<String, dynamic> j) => Shot(
+        seq: (j['seq'] as num?)?.toInt(),
+        x: (j['x'] as num).toDouble(),
+        y: (j['y'] as num).toDouble(),
+        lie: (j['lie'] ?? 'rough').toString(),
+        holed: j['holed'] == true,
+      );
+
+  /// Payload for PUT /api/scorecards/{id}/holes/{hole}/shots — the server
+  /// assigns seq on read.
+  Map<String, dynamic> toJson() => {
+        'x': x,
+        'y': y,
+        'lie': lie,
+        'holed': holed,
+      };
+
+  Shot copyWith({String? lie, bool? holed}) => Shot(
+        seq: seq,
+        x: x,
+        y: y,
+        lie: lie ?? this.lie,
+        holed: holed ?? this.holed,
+      );
+}
+
+/// Honest shot-tracking stats for one player, from
+/// GET /api/players/{key}/stats. Percentages are 0–100 (1 decimal), or null
+/// when there is no data behind them; [handicapIndex] is null with fewer
+/// than 3 completed rounds.
+class PlayerShotStats {
+  final String playerDiscordId;
+  final String displayName;
+  final String? golfplusHandle;
+  final int roundsTracked;
+  final int roundsFullyTracked;
+  final double? fairwaysHitPct;
+  final double? girPct;
+  final double? puttsPerRound;
+  final double? puttsPerGir;
+  final double? upDownPct;
+  final double? sandSavePct;
+  final double? handicapIndex;
+
+  const PlayerShotStats({
+    required this.playerDiscordId,
+    required this.displayName,
+    this.golfplusHandle,
+    this.roundsTracked = 0,
+    this.roundsFullyTracked = 0,
+    this.fairwaysHitPct,
+    this.girPct,
+    this.puttsPerRound,
+    this.puttsPerGir,
+    this.upDownPct,
+    this.sandSavePct,
+    this.handicapIndex,
+  });
+
+  static double? _num(Map<String, dynamic> j, String key) {
+    final v = j[key];
+    return v == null ? null : (v as num).toDouble();
+  }
+
+  factory PlayerShotStats.fromJson(Map<String, dynamic> j) {
+    final p = (j['player'] as Map<String, dynamic>?) ?? const {};
+    return PlayerShotStats(
+      playerDiscordId: (p['discord_id'] ?? j['discord_id'] ?? '').toString(),
+      displayName:
+          (p['display_name'] ?? j['display_name'] ?? '?').toString(),
+      golfplusHandle: p['golfplus_handle']?.toString(),
+      roundsTracked: (j['rounds_tracked'] as num?)?.toInt() ?? 0,
+      roundsFullyTracked: (j['rounds_fully_tracked'] as num?)?.toInt() ?? 0,
+      fairwaysHitPct: _num(j, 'fairways_hit_pct'),
+      girPct: _num(j, 'gir_pct'),
+      puttsPerRound: _num(j, 'putts_per_round'),
+      puttsPerGir: _num(j, 'putts_per_gir'),
+      upDownPct: _num(j, 'up_down_pct'),
+      sandSavePct: _num(j, 'sand_save_pct'),
+      handicapIndex: _num(j, 'handicap_index'),
+    );
+  }
+
+  /// Handle-first display rule for showing this player to others.
+  String get handleName => golferDisplayName(displayName, golfplusHandle);
+
+  /// True when the player has tracked at least one hole of shot data.
+  bool get hasAnyData =>
+      roundsTracked > 0 ||
+      fairwaysHitPct != null ||
+      girPct != null ||
+      handicapIndex != null;
 }
 
 class LeaderboardEntry {
@@ -426,6 +541,7 @@ class PlayerMe {
   final bool isCrew;
   final bool isAdmin;
   final bool canManageScores;
+  final bool statsPrivate;
 
   PlayerMe({
     required this.discordId,
@@ -435,6 +551,7 @@ class PlayerMe {
     this.isCrew = false,
     this.isAdmin = false,
     this.canManageScores = false,
+    this.statsPrivate = false,
   });
 
   factory PlayerMe.fromJson(Map<String, dynamic> j) => PlayerMe(
@@ -445,6 +562,7 @@ class PlayerMe {
         isCrew: j['is_crew'] == true,
         isAdmin: j['is_admin'] == true,
         canManageScores: j['can_manage_scores'] == true,
+        statsPrivate: j['stats_private'] == true,
       );
 }
 

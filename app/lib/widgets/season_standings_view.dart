@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/models.dart';
 import '../services/api_client.dart';
+import '../screens/player_stats_screen.dart';
 import 'common.dart';
 
 /// Season points standings list, shared by the tournament detail
@@ -92,6 +93,16 @@ class _SeasonStandingsViewState extends State<SeasonStandingsView> {
               trailing: Text('${e.totalPoints} pts',
                   style: const TextStyle(
                       fontWeight: FontWeight.bold, fontSize: 16)),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => PlayerStatsScreen(
+                    api: widget.api,
+                    playerKey: e.discordId,
+                    displayName: golferDisplayName(
+                        e.displayName, e.golfplusHandle),
+                  ),
+                ),
+              ),
             );
           },
         );

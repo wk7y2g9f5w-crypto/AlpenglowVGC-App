@@ -17,6 +17,17 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+/// Thrown when a player's shot stats are private to everyone but them.
+/// Maps the backend's 403 {"code": "stats_private"}.
+class StatsPrivateException implements Exception {
+  final String playerKey;
+
+  StatsPrivateException(this.playerKey);
+
+  @override
+  String toString() => 'Stats are private';
+}
+
 /// Friendly message mapping for known backend error codes.
 String friendlyApiMessage(ApiException e) {
   switch (e.code) {
@@ -311,6 +322,29 @@ class ApiClient {
         (body as Map<String, dynamic>)['card'] as Map<String, dynamic>);
   }
 
+  // --- Shot-by-shot tracking (opt-in) --------------------------------------
+
+  /// Shots tracked on one hole of a scorecard, in seq order.
+  Future<List<Shot>> getHoleShots(int cardId, int hole) async {
+    final body =
+        await _get('/api/scorecards/$cardId/holes/$hole/shots');
+    final list = (body as Map<String, dynamic>?)?['shots'] as List? ?? [];
+    return list
+        .map((e) => Shot.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Replace the tracked shots for one hole (empty list clears them).
+  /// Returns the saved shot count.
+  Future<int> putHoleShots(
+      int cardId, int hole, List<Shot> shots) async {
+    final body = await _put('/api/scorecards/$cardId/holes/$hole/shots', {
+      'shots': shots.map((s) => s.toJson()).toList(),
+    });
+    return ((body as Map<String, dynamic>?)?['shots'] as num?)?.toInt() ??
+        shots.length;
+  }
+
   /// Patch one round's Golf+ settings and/or date window (crew).
   Future<Tournament> editRound(String tournamentId, int roundNumber,
       Map<String, dynamic> fields) async {
@@ -385,16 +419,33 @@ class ApiClient {
     return PlayerMe.fromJson(body as Map<String, dynamic>);
   }
 
-  Future<void> updateMe({String? timezone, String? golfplusHandle}) async {
+  Future<void> updateMe(
+      {String? timezone, String? golfplusHandle, bool? statsPrivate}) async {
     final payload = <String, dynamic>{};
     if (timezone != null) payload['timezone'] = timezone;
     if (golfplusHandle != null) payload['golfplus_handle'] = golfplusHandle;
+    if (statsPrivate != null) payload['stats_private'] = statsPrivate;
     await _patch('/api/players/me', payload);
   }
 
   Future<Map<String, dynamic>> getMyStats() async {
     final body = await _get('/api/players/me/stats');
     return (body as Map<String, dynamic>? ?? {});
+  }
+
+  /// Shot-tracking stats + WHS-lite handicap for any player. [key] is a
+  /// discord id, a `local:<hex>` key, or "me". Throws [StatsPrivateException]
+  /// when the player's stats are private to everyone but them.
+  Future<PlayerShotStats> getPlayerStats(String key) async {
+    try {
+      final body = await _get('/api/players/$key/stats');
+      return PlayerShotStats.fromJson(body as Map<String, dynamic>);
+    } on ApiException catch (e) {
+      if (e.statusCode == 403 && e.code == 'stats_private') {
+        throw StatsPrivateException(key);
+      }
+      rethrow;
+    }
   }
 
   /// Permanently delete the caller's own player record (auth required).

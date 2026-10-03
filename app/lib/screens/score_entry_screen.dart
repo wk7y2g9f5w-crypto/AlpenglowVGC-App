@@ -7,6 +7,7 @@ import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
 import '../widgets/score_badge.dart';
+import '../widgets/shot_tracker.dart';
 
 /// Native score entry screen mirroring the Discord bot's tap-to-enter UI.
 ///
@@ -44,9 +45,12 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   String? _existingStatus;
   String? _witnessName;
   bool _isCrew = false;
+
+  /// Scorecard id from the server (now included in card responses) — the
+  /// key for the shots endpoints. Null until the card exists server-side.
+  int? _cardId;
   final _witnessCtrl = TextEditingController();
-  int _loadSeq = 0;
-  Timer? _saveTimer;
+  int _loadSeq = 0;  Timer? _saveTimer;
   bool _saving = false;
   bool _saveFailed = false;
 
@@ -125,6 +129,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           _existingStatus = card.status;
           _witnessName = card.witnessName;
           _witnessCtrl.text = card.witnessName ?? '';
+          _cardId = card.id;
           _hole = 0;
           final match = widget.teeTime.players
               .where((p) => p.discordId == card.playerDiscordId);
@@ -136,6 +141,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           _existingStatus = null;
           _witnessName = null;
           _witnessCtrl.clear();
+          _cardId = null;
           _hole = 0;
         });
       }
@@ -147,6 +153,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           _existingStatus = null;
           _witnessName = null;
           _witnessCtrl.clear();
+          _cardId = null;
           _hole = 0;
         });
       }
@@ -281,6 +288,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         _saving = false;
         // First live save flips a blank card to in_progress.
         _existingStatus ??= card.status;
+        // And gives us the scorecard id for the shots endpoints.
+        _cardId ??= card.id;
       });
     } catch (_) {
       if (mounted) {
@@ -372,7 +381,10 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         complete: true,
       );
       if (mounted) {
-        setState(() => _existingStatus = card.status);
+        setState(() {
+          _existingStatus = card.status;
+          _cardId ??= card.id;
+        });
         showSnack(context,
             'Round $_roundNumber scorecard submitted.');
         Navigator.of(context).pop();
@@ -384,6 +396,24 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
+  }
+
+  /// Opt-in shot tracking for the current hole. Only available once the
+  /// scorecard exists server-side (live or submitted); until then the
+  /// button stays quietly disabled — tracking is never required or nagged.
+  Future<void> _openShotTracker() async {
+    final cardId = _cardId;
+    if (cardId == null) return;
+    final pars = _pars;
+    await showShotTracker(
+      context: context,
+      api: _api,
+      cardId: cardId,
+      courseName: widget.tournament.course ?? '',
+      holeNumber: _hole + 1,
+      par: pars != null ? pars[_hole] : 4,
+      strokes: _scores[_hole],
+    );
   }
 
   @override
@@ -630,9 +660,40 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
             padding: const EdgeInsets.all(16),
             child: Column(
               children: [
-                Text('Hole ${_hole + 1}${par != null ? ' · Par $par' : ''}',
-                    style: const TextStyle(
-                        fontSize: 22, fontWeight: FontWeight.bold)),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                        'Hole ${_hole + 1}${par != null ? ' · Par $par' : ''}',
+                        style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 2),
+                    // Quiet opt-in shot tracking: a small muted button, no
+                    // badges or prompts anywhere. Disabled (with a hint)
+                    // until the scorecard exists server-side.
+                    Tooltip(
+                      message: _cardId == null
+                          ? 'Enter a score to enable shot tracking'
+                          : 'Track shots for this hole (optional)',
+                      child: TextButton.icon(
+                        onPressed:
+                            _cardId == null ? null : _openShotTracker,
+                        icon: const Icon(Icons.timeline, size: 15),
+                        label: const Text('Track shots',
+                            style: TextStyle(fontSize: 12)),
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.grey.shade600,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8),
+                          minimumSize: Size.zero,
+                          tapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 4),
                 // Live-save status: scores hit the leaderboard as entered.
                 if (_saving)
