@@ -671,5 +671,93 @@ class TestDeletePlayerData(TempDbTest):
         self.assertIsNotNone(await db.get_tee_time(self.db_path, tt_id))
 
 
+OLD_PLAYERS_DDL = """
+CREATE TABLE players(
+  discord_id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  golfplus_handle TEXT,
+  timezone TEXT
+);
+"""
+
+
+class TestHoleShots(TempDbTest):
+    async def _card(self, uid="p1"):
+        await db.upsert_player(self.db_path, uid, "Player")
+        tid = await db.create_tournament(
+            self.db_path, "g1", "Cup", "stroke", 18, "Course",
+            ",".join(["4"] * 18), None, uid)
+        return await db._execute(
+            self.db_path,
+            "INSERT INTO scorecards (tournament_id, player_discord_id,"
+            " holes_json, total, status, submitted_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (tid, uid, "[4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]", 72,
+             "verified", "2026-10-02T00:00:00"))
+
+    async def test_set_get_replace(self):
+        cid = (await self._card())[0]
+        n = await db.set_hole_shots(self.db_path, cid, 1, [
+            {"x": 0.5, "y": 0.9, "lie": "fairway", "holed": False},
+            {"x": 0.5, "y": 0.1, "lie": "green", "holed": True},
+        ])
+        self.assertEqual(n, 2)
+        shots = await db.get_hole_shots(self.db_path, cid, 1)
+        self.assertEqual([s["seq"] for s in shots], [1, 2])
+        self.assertEqual(shots[0]["lie"], "fairway")
+        self.assertEqual(shots[1]["holed"], 1)
+        # Replace wholesale.
+        await db.set_hole_shots(self.db_path, cid, 1, [
+            {"x": 0.1, "y": 0.1, "lie": "rough", "holed": False}])
+        shots = await db.get_hole_shots(self.db_path, cid, 1)
+        self.assertEqual(len(shots), 1)
+        self.assertEqual(shots[0]["lie"], "rough")
+        # Other holes untouched; empty hole returns [].
+        self.assertEqual(await db.get_hole_shots(self.db_path, cid, 2), [])
+
+    async def test_get_shots_for_scorecards_groups(self):
+        c1 = (await self._card("p1"))[0]
+        c2 = (await self._card("p2"))[0]
+        await db.set_hole_shots(self.db_path, c1, 1, [
+            {"x": 0.5, "y": 0.5, "lie": "fairway", "holed": False}])
+        await db.set_hole_shots(self.db_path, c2, 9, [
+            {"x": 0.2, "y": 0.2, "lie": "sand", "holed": False}])
+        grouped = await db.get_shots_for_scorecards(self.db_path, [c1, c2])
+        self.assertEqual(set(grouped), {c1, c2})
+        self.assertEqual(list(grouped[c1]), [1])
+        self.assertEqual(list(grouped[c2]), [9])
+        self.assertEqual(await db.get_shots_for_scorecards(self.db_path, []),
+                         {})
+
+    async def test_stats_private_round_trip(self):
+        await db.upsert_player(self.db_path, "p1", "Player")
+        row = await db.get_player(self.db_path, "p1")
+        self.assertEqual(row["stats_private"], 0)
+        await db.set_stats_private(self.db_path, "p1", True)
+        row = await db.get_player(self.db_path, "p1")
+        self.assertEqual(row["stats_private"], 1)
+
+    async def test_old_db_gets_stats_private(self):
+        legacy = os.path.join(self.tmp.name, "legacy.db")
+        async with aiosqlite.connect(legacy) as con:
+            await con.executescript(OLD_PLAYERS_DDL)
+            await con.execute(
+                "INSERT INTO players (discord_id, display_name)"
+                " VALUES (?,?)", ("p1", "Old Player"))
+            await con.commit()
+        await db.init_db(legacy)  # must migrate, not break
+        row = await db.get_player(legacy, "p1")
+        self.assertEqual(row["display_name"], "Old Player")
+        self.assertEqual(row["stats_private"], 0)
+
+    async def test_delete_player_data_removes_shots(self):
+        cid = (await self._card("p1"))[0]
+        await db.set_hole_shots(self.db_path, cid, 1, [
+            {"x": 0.5, "y": 0.5, "lie": "fairway", "holed": False}])
+        await db.delete_player_data(self.db_path, "p1")
+        self.assertEqual(
+            await db.get_hole_shots(self.db_path, cid, 1), [])
+
+
 if __name__ == "__main__":
     unittest.main()

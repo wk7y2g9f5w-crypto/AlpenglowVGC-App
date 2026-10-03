@@ -124,6 +124,22 @@ CREATE TABLE IF NOT EXISTS scorecards(
   submitted_by TEXT,
   witness_name TEXT
 );
+-- Shot-by-shot tracking (optional): where each shot landed on the hole,
+-- as normalized 0..1 coordinates on the hole schematic. lie is where the
+-- shot finished: tee, fairway, rough, sand, green. The final shot of a hole
+-- carries holed=1. Replaced wholesale per hole by set_hole_shots.
+CREATE TABLE IF NOT EXISTS hole_shots(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scorecard_id INTEGER NOT NULL REFERENCES scorecards(id) ON DELETE CASCADE,
+  hole_number INTEGER NOT NULL CHECK(hole_number BETWEEN 1 AND 18),
+  seq INTEGER NOT NULL CHECK(seq >= 1),
+  x REAL NOT NULL CHECK(x >= 0 AND x <= 1),
+  y REAL NOT NULL CHECK(y >= 0 AND y <= 1),
+  lie TEXT NOT NULL CHECK(lie IN ('tee','fairway','rough','sand','green')),
+  holed INTEGER NOT NULL DEFAULT 0 CHECK(holed IN (0,1)),
+  UNIQUE(scorecard_id, hole_number, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_hole_shots_card ON hole_shots(scorecard_id);
 CREATE TABLE IF NOT EXISTS matches(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -450,7 +466,7 @@ async def _migrate(db_path: str) -> None:
       copied into the new shape — all rows are preserved).
     - Rebuilds the scorecards table when its status CHECK predates
       'in_progress' (live hole-by-hole entry), same copy-preserve pattern.
-    - Adds players.golfplus_handle / timezone when missing.
+    - Adds players.golfplus_handle / timezone / stats_private when missing.
     - Adds scorecards.submitted_by when missing.
     New tables (join_requests, side_quests) are handled by the idempotent
     CREATE TABLE IF NOT EXISTS in SCHEMA.
@@ -480,6 +496,12 @@ async def _migrate(db_path: str) -> None:
             await con.commit()
         if "timezone" not in player_cols:
             await con.execute("ALTER TABLE players ADD COLUMN timezone TEXT")
+            await con.commit()
+        if "stats_private" not in player_cols:
+            await con.execute(
+                "ALTER TABLE players ADD COLUMN stats_private INTEGER"
+                " NOT NULL DEFAULT 0"
+            )
             await con.commit()
 
         cur = await con.execute("PRAGMA table_info(scorecards)")
@@ -1083,7 +1105,8 @@ async def delete_player_data(db_path, discord_id: str) -> dict:
       players, local_credentials, devices, notification_prefs, push_outbox,
       registrations, team_members, tee_time_players, join_requests,
       scorecards, season_points, casual_tee_time_players,
-      altshot_team_members, matchplay_side_members, matchplay_records.
+      altshot_team_members, matchplay_side_members, matchplay_records,
+      hole_shots (via the deleted scorecards).
     altshot_teams.player1_discord_id is SET NULL (the column is nullable and
     the team row is shared with the other teammates).
 
@@ -1115,6 +1138,15 @@ async def delete_player_data(db_path, discord_id: str) -> dict:
         ("matchplay_records", "discord_id"),
     ]
     deleted: dict[str, int] = {}
+    # hole_shots belong to the player's scorecards (no player key of its
+    # own) — remove them BEFORE the scorecards rows disappear below.
+    _, n = await _execute(
+        db_path,
+        "DELETE FROM hole_shots WHERE scorecard_id IN"
+        " (SELECT id FROM scorecards WHERE player_discord_id = ?)",
+        (discord_id,),
+    )
+    deleted["hole_shots"] = n
     for table, col in tables:
         _, n = await _execute(
             db_path, f"DELETE FROM {table} WHERE {col} = ?", (discord_id,))
@@ -2155,6 +2187,71 @@ async def get_scorecard(db_path, card_id) -> dict | None:
                            (card_id,))
 
 
+# ------------------------------------------------------------ hole shots
+LIES = ("tee", "fairway", "rough", "sand", "green")
+
+
+async def set_hole_shots(db_path, scorecard_id: int, hole_number: int,
+                         shots: list[dict]) -> int:
+    """Replace one hole's tracked shots wholesale.
+
+    Each shot: {x, y, lie, holed}. seq is implied by list order (1-based).
+    Returns the number of shots stored.
+    """
+    async with aiosqlite.connect(db_path) as con:
+        await con.execute(
+            "DELETE FROM hole_shots WHERE scorecard_id = ? AND hole_number = ?",
+            (scorecard_id, hole_number),
+        )
+        for i, s in enumerate(shots, start=1):
+            await con.execute(
+                "INSERT INTO hole_shots"
+                " (scorecard_id, hole_number, seq, x, y, lie, holed)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (scorecard_id, hole_number, i,
+                 float(s["x"]), float(s["y"]), s["lie"],
+                 1 if s.get("holed") else 0),
+            )
+        await con.commit()
+    return len(shots)
+
+
+async def get_hole_shots(db_path, scorecard_id: int,
+                         hole_number: int) -> list[dict]:
+    return await _fetchall(
+        db_path,
+        "SELECT seq, x, y, lie, holed FROM hole_shots"
+        " WHERE scorecard_id = ? AND hole_number = ? ORDER BY seq ASC",
+        (scorecard_id, hole_number),
+    )
+
+
+async def get_shots_for_scorecards(db_path,
+                                  card_ids: list[int]) -> dict[int, dict]:
+    """{scorecard_id: {hole_number: [shot, ...]}} for the given cards."""
+    if not card_ids:
+        return {}
+    placeholders = ",".join("?" for _ in card_ids)
+    rows = await _fetchall(
+        db_path,
+        "SELECT scorecard_id, hole_number, seq, x, y, lie, holed"
+        f" FROM hole_shots WHERE scorecard_id IN ({placeholders})"
+        " ORDER BY scorecard_id, hole_number, seq",
+        tuple(card_ids),
+    )
+    out: dict[int, dict] = {}
+    for r in rows:
+        out.setdefault(r["scorecard_id"], {}).setdefault(
+            r["hole_number"], []).append(r)
+    return out
+
+
+async def set_stats_private(db_path, discord_id: str, value: bool) -> None:
+    await _execute(db_path,
+                   "UPDATE players SET stats_private = ? WHERE discord_id = ?",
+                   (1 if value else 0, discord_id))
+
+
 async def get_scorecards(db_path, tournament_id, status=None) -> list[dict]:
     sql = "SELECT * FROM scorecards WHERE tournament_id = ?"
     params: list = [tournament_id]
@@ -2245,6 +2342,26 @@ async def get_player_verified_cards(db_path, guild_id,
         db_path,
         "SELECT s.holes_json, t.pars, t.holes FROM scorecards s"
         " JOIN tournaments t ON t.id = s.tournament_id"
+        " WHERE t.guild_id = ? AND s.player_discord_id = ?"
+        " AND s.team_id IS NULL AND s.status = 'verified'"
+        " ORDER BY s.submitted_at ASC",
+        (guild_id, player_discord_id),
+    )
+
+
+async def get_player_stat_cards(db_path, guild_id,
+                               player_discord_id) -> list[dict]:
+    """Verified individual scorecards for shot stats + handicap.
+
+    Same universe as get_player_verified_cards, but also returns the card
+    id, total, and submitted_at so shot rows can be joined and handicap
+    differentials ordered. Team cards excluded; only 'verified' (completed)
+    cards.
+    """
+    return await _fetchall(
+        db_path,
+        "SELECT s.id, s.holes_json, s.total, s.submitted_at, t.pars, t.holes"
+        " FROM scorecards s JOIN tournaments t ON t.id = s.tournament_id"
         " WHERE t.guild_id = ? AND s.player_discord_id = ?"
         " AND s.team_id IS NULL AND s.status = 'verified'"
         " ORDER BY s.submitted_at ASC",

@@ -634,6 +634,7 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
     pars = _parse_pars(pars_csv)
     thru = sum(1 for s in scores if s is not None)
     return {
+        "id": card["id"],
         "player_discord_id": card["player_discord_id"],
         "round_number": card.get("round_number") or 1,
         "scores": scores,
@@ -823,6 +824,7 @@ class ScorecardSubmit(BaseModel):
 class PlayerUpdate(BaseModel):
     timezone: str | None = None
     golfplus_handle: str | None = None
+    stats_private: bool | None = None
 
 
 class RoundCreate(BaseModel):
@@ -2163,6 +2165,115 @@ async def put_scorecard(
         DB_PATH, "scorecard_submitted", {"tournament_id": t["id"]}
     )
     return {"card": _card_json(card, t.get("pars"))}
+
+
+# --------------------------------------------------------------------------
+# Shot-by-shot tracking (optional stat tracking on scorecards)
+# --------------------------------------------------------------------------
+class ShotInput(BaseModel):
+    x: float
+    y: float
+    lie: str
+    holed: bool = False
+
+    @field_validator("x", "y")
+    @classmethod
+    def _coord_ok(cls, v: float) -> float:
+        if not 0 <= v <= 1:
+            raise ValueError("coordinate must be between 0 and 1")
+        return v
+
+    @field_validator("lie")
+    @classmethod
+    def _lie_ok(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in db.LIES:
+            raise ValueError(f"lie must be one of {', '.join(db.LIES)}")
+        return v
+
+
+class HoleShotsSubmit(BaseModel):
+    shots: list[ShotInput] = Field(default_factory=list, max_length=15)
+
+
+async def _shot_card_or_404(card_id: int) -> dict:
+    card = await db.get_scorecard(DB_PATH, card_id)
+    if card is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "scorecard_not_found"},
+        )
+    return card
+
+
+async def _require_shot_access(card: dict, user: CurrentUser) -> None:
+    """Shot data is visible/editable by the card owner and crew only."""
+    if card.get("player_discord_id") == user["discord_id"]:
+        return
+    crew = await fetch_crew_status(user["discord_id"])
+    if crew is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify crew status — try again shortly.",
+        )
+    if not crew:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "not_card_owner"},
+        )
+
+
+@app.put("/api/scorecards/{card_id}/holes/{hole}/shots")
+async def put_hole_shots(
+    card_id: int, hole: int, body: HoleShotsSubmit, user: CurrentUser
+) -> dict:
+    card = await _shot_card_or_404(card_id)
+    await _require_shot_access(card, user)
+    t = await db.get_tournament(DB_PATH, card["tournament_id"])
+    hole_count = t["holes"] if t else 18
+    if not 1 <= hole <= hole_count:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"hole must be between 1 and {hole_count}",
+        )
+    holed_at = [i for i, s in enumerate(body.shots) if s.holed]
+    if len(holed_at) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="only one shot per hole can be marked holed",
+        )
+    if holed_at and holed_at[0] != len(body.shots) - 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="the holed shot must be the last shot of the hole",
+        )
+    n = await db.set_hole_shots(
+        DB_PATH, card_id, hole, [s.model_dump() for s in body.shots]
+    )
+    return {"scorecard_id": card_id, "hole": hole, "shots": n}
+
+
+@app.get("/api/scorecards/{card_id}/holes/{hole}/shots")
+async def get_hole_shots(
+    card_id: int, hole: int, user: CurrentUser
+) -> dict:
+    card = await _shot_card_or_404(card_id)
+    await _require_shot_access(card, user)
+    shots = await db.get_hole_shots(DB_PATH, card_id, hole)
+    return {
+        "scorecard_id": card_id,
+        "hole": hole,
+        "shots": [
+            {
+                "seq": s["seq"],
+                "x": s["x"],
+                "y": s["y"],
+                "lie": s["lie"],
+                "holed": bool(s["holed"]),
+            }
+            for s in shots
+        ],
+    }
 
 
 # --------------------------------------------------------------------------
@@ -3616,6 +3727,7 @@ def _profile_json(row: dict, is_crew: bool = False,
         "display_name": row["display_name"],
         "golfplus_handle": row.get("golfplus_handle"),
         "timezone": row.get("timezone"),
+        "stats_private": bool(row.get("stats_private")),
         "is_crew": is_crew,
         "is_admin": is_admin,
         "can_manage_scores": can_manage_scores,
@@ -3648,6 +3760,8 @@ async def update_me(body: PlayerUpdate, user: CurrentUser) -> dict:
         handle = body.golfplus_handle.strip()
         # Empty string -> NULL (unlink), like the bot's /unlink_golfplus.
         await db.set_golfplus_handle(DB_PATH, pid, handle or None)
+    if body.stats_private is not None:
+        await db.set_stats_private(DB_PATH, pid, body.stats_private)
     return _profile_json(await db.get_player(DB_PATH, pid))
 
 
@@ -3750,6 +3864,141 @@ async def my_stats(user: CurrentUser) -> dict:
         "match_record": {"wins": rec["w"], "losses": rec["l"], "ties": rec["t"]},
         "confirmed_matches": len(matches),
     }
+
+
+def _pct(num: int, den: int) -> float | None:
+    return round(100 * num / den, 1) if den else None
+
+
+def _compute_shot_stats(cards: list[dict],
+                        shots_by_card: dict[int, dict]) -> dict:
+    """Honest stat aggregation from shot tracking — no strokes-gained math.
+
+    cards: verified individual 18-hole scorecards. Only holes carrying shot
+    data contribute to shot stats; putts_per_round uses only rounds whose
+    18 holes all carry shot data (a partial round would undercount putts).
+    Handicap differentials need no shot data, so every completed 18-hole
+    round counts toward the index.
+    """
+    rounds_tracked = 0
+    rounds_fully_tracked = 0
+    fir_num = fir_den = 0
+    gir_num = gir_den = 0
+    putts_total = 0
+    putts_gir = 0
+    gir_holes = 0
+    up_num = up_den = 0
+    sand_num = sand_den = 0
+    differentials: list[tuple[str, int]] = []
+    for c in cards:
+        try:
+            holes = json.loads(c["holes_json"])
+        except (ValueError, TypeError):
+            continue
+        if not holes or len(holes) != 18 or any(s is None for s in holes):
+            continue
+        pars = _parse_pars(c.get("pars"))
+        if not pars or len(pars) != 18:
+            continue
+        differentials.append(
+            (c.get("submitted_at") or "", sum(holes) - sum(pars)))
+        card_shots = shots_by_card.get(c["id"], {})
+        if not card_shots:
+            continue
+        rounds_tracked += 1
+        full = all(card_shots.get(h) for h in range(1, 19))
+        if full:
+            rounds_fully_tracked += 1
+        round_putts = 0
+        for i in range(18):
+            hs = card_shots.get(i + 1)
+            if not hs:
+                continue
+            par = pars[i]
+            score = holes[i]
+            green_seq = next(
+                (s["seq"] for s in hs if s["lie"] == "green" or s["holed"]),
+                None,
+            )
+            gir = green_seq is not None and green_seq <= par - 2
+            if par >= 4:
+                fir_den += 1
+                if hs[0]["lie"] == "fairway":
+                    fir_num += 1
+            gir_den += 1
+            if gir:
+                gir_num += 1
+            putts = sum(
+                1 for j in range(1, len(hs)) if hs[j - 1]["lie"] == "green"
+            )
+            round_putts += putts
+            if gir:
+                gir_holes += 1
+                putts_gir += putts
+            else:
+                up_den += 1
+                if score <= par:
+                    up_num += 1
+            if any(s["lie"] == "sand" for s in hs) and not gir:
+                sand_den += 1
+                if score <= par:
+                    sand_num += 1
+        if full:
+            putts_total += round_putts
+    handicap_index = None
+    if len(differentials) >= 3:
+        last20 = sorted(differentials, key=lambda d: d[0], reverse=True)[:20]
+        best = sorted(d for _, d in last20)[:8]
+        handicap_index = round(sum(best) / len(best) * 0.96, 1)
+    return {
+        "rounds_tracked": rounds_tracked,
+        "rounds_fully_tracked": rounds_fully_tracked,
+        "fairways_hit_pct": _pct(fir_num, fir_den),
+        "gir_pct": _pct(gir_num, gir_den),
+        "putts_per_round": (
+            round(putts_total / rounds_fully_tracked, 1)
+            if rounds_fully_tracked else None
+        ),
+        "putts_per_gir": (
+            round(putts_gir / gir_holes, 2) if gir_holes else None
+        ),
+        "up_down_pct": _pct(up_num, up_den),
+        "sand_save_pct": _pct(sand_num, sand_den),
+        "handicap_index": handicap_index,
+    }
+
+
+@app.get("/api/players/{key}/stats")
+async def player_stats(key: str, user: CurrentUser) -> dict:
+    """Shot-tracking stats + handicap for any player.
+
+    Respects the player's privacy toggle: anyone except the owner gets a
+    403 (code stats_private) when stats are private. Registered after
+    /api/players/me/stats so "me" still hits that route; key == "me" is
+    also accepted here for convenience.
+    """
+    target_key = user["discord_id"] if key == "me" else key
+    player = await db.get_player(DB_PATH, target_key)
+    if player is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "player_not_found"},
+        )
+    if target_key != user["discord_id"] and player.get("stats_private"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "stats_private"},
+        )
+    cards = await db.get_player_stat_cards(DB_PATH, GUILD_ID, target_key)
+    shots_by_card = await db.get_shots_for_scorecards(
+        DB_PATH, [c["id"] for c in cards])
+    stats = _compute_shot_stats(cards, shots_by_card)
+    stats["player"] = {
+        "discord_id": player["discord_id"],
+        "display_name": player["display_name"],
+        "golfplus_handle": player.get("golfplus_handle"),
+    }
+    return stats
 
 
 # --------------------------------------------------------------------------
