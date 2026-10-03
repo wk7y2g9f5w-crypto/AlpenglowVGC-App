@@ -22,3 +22,7 @@ bot/*.db
 bot/*.log
 bot/*.pid
 bot/seed/*.db
+
+# Realistic hole-map pipeline intermediates (derived OSM vectors — never commit).
+# Only rendered images + pipeline code + generated manifest are committed.
+tools/hole-maps/data/
