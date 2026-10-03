@@ -5,10 +5,19 @@ import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
 import '../widgets/course_art.dart';
+import 'altshot_detail_screen.dart';
 import 'casual_form_screen.dart';
+import 'casual_score_entry_screen.dart';
+import 'matchplay_detail_screen.dart';
 
 /// Detail for one casual tee time: settings, player list, join/leave,
 /// and creator-or-crew edit/delete.
+///
+/// The format drives the lower half of the screen:
+/// - stroke / best_ball: leaderboard + "Enter scores" (per-player
+///   scorecards, same as tournament cards but self-attested).
+/// - match_play / alt_shot: a button into the linked game, which lives
+///   entirely in the existing Match Play / Alt-Shot engines.
 class CasualDetailScreen extends StatefulWidget {
   final AuthService auth;
   final SettingsService settings;
@@ -39,7 +48,15 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
   Future<_Detail> _load() async {
     final tt = await _api.getCasualTeeTime(widget.teeTimeId);
     final me = await _api.getMe();
-    return _Detail(tt: tt, me: me);
+    Map<String, dynamic>? leaderboard;
+    if (tt.usesScorecards) {
+      try {
+        leaderboard = await _api.getCasualLeaderboard(tt.id);
+      } on ApiException {
+        leaderboard = null;
+      }
+    }
+    return _Detail(tt: tt, me: me, leaderboard: leaderboard);
   }
 
   Future<void> _refresh() async {
@@ -50,10 +67,14 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
 
   Future<void> _joinLeave(_Detail d, bool join) async {
     try {
-      final tt = join
-          ? await _api.joinCasualTeeTime(d.tt.id)
-          : await _api.leaveCasualTeeTime(d.tt.id);
-      if (mounted) setState(() => _future = Future.value(_Detail(tt: tt, me: d.me)));
+      if (join) {
+        await _api.joinCasualTeeTime(d.tt.id);
+      } else {
+        await _api.leaveCasualTeeTime(d.tt.id);
+      }
+      if (mounted) {
+        setState(() => _future = _load());
+      }
     } on ApiException catch (e) {
       if (mounted) showSnack(context, e.message, error: true);
     }
@@ -82,6 +103,147 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
     } on ApiException catch (e) {
       if (mounted) showSnack(context, e.message, error: true);
     }
+  }
+
+  /// Leaderboard + score entry for stroke / best-ball casual rounds.
+  Widget _scorecardSection(_Detail d, bool inIt) {
+    final lb = d.leaderboard;
+    final players = (lb?['players'] as List?) ?? [];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text('Leaderboard',
+                style: Theme.of(context).textTheme.titleSmall),
+            const Spacer(),
+            if (inIt)
+              ElevatedButton.icon(
+                onPressed: () async {
+                  final saved =
+                      await Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => CasualScoreEntryScreen(
+                      auth: widget.auth,
+                      settings: widget.settings,
+                      teeTime: d.tt,
+                    ),
+                  ));
+                  if (saved == true) _refresh();
+                },
+                icon: const Icon(Icons.scoreboard, size: 18),
+                label: const Text('Enter scores'),
+              ),
+          ],
+        ),
+        if (!inIt)
+          const Padding(
+            padding: EdgeInsets.only(top: 4),
+            child: Text('Join the round to enter your scores.',
+                style: TextStyle(fontSize: 12, color: Colors.grey)),
+          ),
+        const SizedBox(height: 8),
+        if (players.isEmpty)
+          const Text('No scores yet.',
+              style: TextStyle(color: Colors.grey)),
+        for (var i = 0; i < players.length; i++)
+          _leaderboardRow(i + 1, players[i] as Map<String, dynamic>),
+        if (d.tt.format == 'best_ball' && lb?['best_ball'] != null)
+          _bestBallRow(lb!['best_ball'] as Map<String, dynamic>),
+      ],
+    );
+  }
+
+  Widget _leaderboardRow(int rank, Map<String, dynamic> p) {
+    final name = golferDisplayName(
+        (p['display_name'] ?? '').toString(),
+        p['golfplus_handle']?.toString());
+    final status = (p['status'] ?? '').toString();
+    final toPar = (p['to_par'] as num?)?.toInt();
+    final toParLabel = toPar == null
+        ? ''
+        : toPar == 0
+            ? 'E'
+            : toPar > 0
+                ? '+$toPar'
+                : '$toPar';
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      leading: Text('$rank',
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+      title: Text(name),
+      subtitle: status == 'in_progress'
+          ? const Text('Live', style: TextStyle(color: Colors.green))
+          : null,
+      trailing: Text(
+        '${p['total']}  $toParLabel',
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+      ),
+    );
+  }
+
+  /// Best-ball-per-hole across ALL players on the round (v1: no formal
+  /// teams for casual best ball).
+  Widget _bestBallRow(Map<String, dynamic> bb) {
+    final total = (bb['total'] as num?)?.toInt() ?? 0;
+    final thru = (bb['thru'] as num?)?.toInt() ?? 0;
+    return Card(
+      color: Theme.of(context).colorScheme.primaryContainer,
+      child: ListTile(
+        dense: true,
+        leading: const Icon(Icons.star),
+        title: const Text('Best ball (whole group)',
+            style: TextStyle(fontWeight: FontWeight.bold)),
+        trailing: Text('$total · thru $thru',
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+      ),
+    );
+  }
+
+  /// Entry point into the linked match-play / alt-shot game for casual
+  /// rounds in those formats. Scoring happens entirely there.
+  Widget _linkedGameSection(_Detail d) {
+    final tt = d.tt;
+    final isMp = tt.isMatchPlay;
+    final gameId = isMp ? tt.matchplayTeeTimeId : tt.altshotTeeTimeId;
+    if (gameId == null) {
+      return const Text('Linked game not found.',
+          style: TextStyle(color: Colors.grey));
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(tt.formatLabel,
+            style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 4),
+        Text(
+          isMp
+              ? 'This round is played as match play — open the linked game to manage sides and score holes.'
+              : 'This round is played as alt-shot — open the linked game to manage teams and score holes.',
+          style: const TextStyle(color: Colors.grey, fontSize: 13),
+        ),
+        const SizedBox(height: 12),
+        ElevatedButton.icon(
+          onPressed: () {
+            Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => isMp
+                  ? MatchPlayDetailScreen(
+                      auth: widget.auth,
+                      settings: widget.settings,
+                      teeTimeId: gameId,
+                    )
+                  : AltShotDetailScreen(
+                      auth: widget.auth,
+                      settings: widget.settings,
+                      teeTimeId: gameId,
+                    ),
+            ));
+          },
+          icon: const Icon(Icons.open_in_new, size: 18),
+          label: Text('Open ${tt.formatLabel} game'),
+        ),
+      ],
+    );
   }
 
   @override
@@ -117,6 +279,14 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
                   const SizedBox(height: 8),
                   Text(tt.settingsSummary,
                       style: const TextStyle(color: Colors.white70)),
+                  const SizedBox(height: 8),
+                  Chip(
+                    label: Text(tt.formatLabel),
+                    visualDensity: VisualDensity.compact,
+                    backgroundColor: Colors.white24,
+                    labelStyle: const TextStyle(color: Colors.white),
+                    side: BorderSide.none,
+                  ),
                   if (tt.notes.isNotEmpty) ...[
                     const SizedBox(height: 12),
                     Text(tt.notes,
@@ -147,6 +317,15 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
                           ? ' (organizer)'
                           : '')),
                 ),
+              if (tt.usesScorecards) ...[
+                const SizedBox(height: 16),
+                const Divider(),
+                _scorecardSection(d, inIt),
+              ] else ...[
+                const SizedBox(height: 16),
+                const Divider(),
+                _linkedGameSection(d),
+              ],
               if (canEdit) ...[
                 const SizedBox(height: 16),
                 const Divider(),
@@ -192,6 +371,7 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
 class _Detail {
   final CasualTeeTime tt;
   final PlayerMe me;
+  final Map<String, dynamic>? leaderboard;
 
-  _Detail({required this.tt, required this.me});
+  _Detail({required this.tt, required this.me, this.leaderboard});
 }

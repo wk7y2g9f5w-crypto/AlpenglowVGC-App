@@ -2280,6 +2280,47 @@ async def get_hole_shots(
 # Casual tee times — ad-hoc rounds outside tournaments. No membership
 # limits: a player may join any number of casual tee times.
 # --------------------------------------------------------------------------
+class CasualMatchPlayCreate(BaseModel):
+    """Match-play setup for a casual round (mirrors the Match Play tab)."""
+    format: str = "single"  # single (1v1) | bestball
+    team_size: int = 1  # 1 for single, 2-4 for bestball
+
+    @field_validator("format")
+    @classmethod
+    def _fmt(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("single", "bestball"):
+            raise ValueError("format must be 'single' or 'bestball'")
+        return v
+
+    @field_validator("team_size")
+    @classmethod
+    def _ts(cls, v: int) -> int:
+        if not 1 <= v <= 4:
+            raise ValueError("team_size must be 1-4")
+        return v
+
+
+class CasualAltShotCreate(BaseModel):
+    """Alt-shot setup for a casual round (mirrors the Alt-Shot tab)."""
+    max_teams: int = 2  # 1 or 2
+    team_size: int = 2  # 2-4
+
+    @field_validator("max_teams")
+    @classmethod
+    def _mt(cls, v: int) -> int:
+        if v not in (1, 2):
+            raise ValueError("max_teams must be 1 or 2")
+        return v
+
+    @field_validator("team_size")
+    @classmethod
+    def _ts(cls, v: int) -> int:
+        if v not in (2, 3, 4):
+            raise ValueError("team_size must be 2, 3, or 4")
+        return v
+
+
 class CasualTeeTimeCreate(BaseModel):
     label: str
     course: str
@@ -2290,6 +2331,9 @@ class CasualTeeTimeCreate(BaseModel):
     starts_at: str = ""  # ISO-8601
     max_players: int = 4
     notes: str = ""
+    format: str = "stroke"  # stroke | best_ball | match_play | alt_shot
+    matchplay: CasualMatchPlayCreate | None = None
+    altshot: CasualAltShotCreate | None = None
 
     @field_validator("label", "course")
     @classmethod
@@ -2338,6 +2382,16 @@ class CasualTeeTimeCreate(BaseModel):
             raise ValueError("max_players must be 1-8")
         return v
 
+    @field_validator("format")
+    @classmethod
+    def _fmt(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("stroke", "best_ball", "match_play", "alt_shot"):
+            raise ValueError(
+                "format must be 'stroke', 'best_ball',"
+                " 'match_play', or 'alt_shot'")
+        return v
+
 
 class CasualTeeTimeUpdate(BaseModel):
     label: str | None = None
@@ -2373,6 +2427,9 @@ async def _casual_json(db_path, tt: dict) -> dict:
         "starts_at": tt["starts_at"],
         "max_players": tt["max_players"],
         "notes": tt["notes"],
+        "format": tt.get("format") or "stroke",
+        "matchplay_tee_time_id": tt.get("matchplay_tee_time_id"),
+        "altshot_tee_time_id": tt.get("altshot_tee_time_id"),
         "created_at": tt["created_at"],
         "players": players,
     }
@@ -2403,13 +2460,68 @@ async def create_casual_tee_time(body: CasualTeeTimeCreate,
             detail="Unknown course — pick one from the course list.",
         )
     pars = ",".join(str(x) for x in auto)
-    tt_id = await db.create_casual_tee_time(
-        DB_PATH, user["discord_id"], body.label.strip(), body.course.strip(),
-        pars, tee_position=body.tee_position, pin_position=body.pin_position,
-        wind_strength=body.wind_strength, green_speed=body.green_speed,
-        starts_at=body.starts_at.strip(), max_players=body.max_players,
-        notes=body.notes.strip(),
-    )
+    try:
+        tt_id = await db.create_casual_tee_time(
+            DB_PATH, user["discord_id"], body.label.strip(),
+            body.course.strip(), pars, tee_position=body.tee_position,
+            pin_position=body.pin_position, wind_strength=body.wind_strength,
+            green_speed=body.green_speed, starts_at=body.starts_at.strip(),
+            max_players=body.max_players, notes=body.notes.strip(),
+            format=body.format,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="format must be 'stroke', 'best_ball',"
+                   " 'match_play', or 'alt_shot'.")
+    # Match-play / alt-shot casual rounds spin up a linked game in the
+    # existing engines; the linked game lives in the Casual tab (its
+    # back-reference keeps it out of the dedicated tabs' lists).
+    if body.format == "match_play":
+        mp = body.matchplay or CasualMatchPlayCreate()
+        if mp.format == "bestball" and mp.team_size < 2:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="team_size must be 2-4 for best-ball match play.")
+        try:
+            mp_id = await db.create_matchplay_tee_time(
+                DB_PATH, user["discord_id"], body.label.strip(),
+                body.course.strip(), pars, tee_position=body.tee_position,
+                pin_position=body.pin_position,
+                wind_strength=body.wind_strength,
+                green_speed=body.green_speed,
+                starts_at=body.starts_at.strip(),
+                format=mp.format,
+                team_size=mp.team_size if mp.format == "bestball" else 1,
+                notes=body.notes.strip(), casual_tee_time_id=tt_id,
+            )
+        except db.MatchPlayError as e:
+            await db.delete_casual_tee_time(DB_PATH, tt_id)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e))
+        await db.update_casual_tee_time(
+            DB_PATH, tt_id, {"matchplay_tee_time_id": mp_id})
+    elif body.format == "alt_shot":
+        alt = body.altshot or CasualAltShotCreate()
+        try:
+            alt_id = await db.create_altshot_tee_time(
+                DB_PATH, user["discord_id"], body.label.strip(),
+                body.course.strip(), pars, tee_position=body.tee_position,
+                pin_position=body.pin_position,
+                wind_strength=body.wind_strength,
+                green_speed=body.green_speed,
+                starts_at=body.starts_at.strip(), max_teams=alt.max_teams,
+                team_size=alt.team_size, notes=body.notes.strip(),
+                casual_tee_time_id=tt_id,
+            )
+        except db.AltShotError as e:
+            await db.delete_casual_tee_time(DB_PATH, tt_id)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e))
+        await db.update_casual_tee_time(
+            DB_PATH, tt_id, {"altshot_tee_time_id": alt_id})
     tt = await _casual_or_404(tt_id)
     return await _casual_json(DB_PATH, tt)
 
@@ -2428,6 +2540,11 @@ async def update_casual_tee_time(tt_id: str, body: CasualTeeTimeUpdate,
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="Only the creator or crew can edit this.")
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    # The format is fixed at creation — changing it would orphan linked
+    # games and scorecards. Delete and recreate the round instead.
+    fields.pop("format", None)
+    fields.pop("matchplay", None)
+    fields.pop("altshot", None)
     if "course" in fields:
         auto = gc.course_pars(fields["course"].strip(), 18)
         if not auto:
@@ -2468,6 +2585,165 @@ async def leave_casual_tee_time(tt_id: str, user: CurrentUser) -> dict:
     await _casual_or_404(tt_id)
     await db.leave_casual_tee_time(DB_PATH, tt_id, user["discord_id"])
     return await _casual_json(DB_PATH, await _casual_or_404(tt_id))
+
+
+class CasualScorecardSubmit(BaseModel):
+    player_discord_id: str
+    scores: list[int | None]
+    complete: bool = False
+    witness_name: str | None = None
+
+
+def _casual_card_json(card: dict, pars_csv: str | None) -> dict:
+    return _card_json(card, pars_csv)
+
+
+async def _casual_score_format_or_422(tt: dict) -> str:
+    fmt = tt.get("format") or "stroke"
+    if fmt not in ("stroke", "best_ball"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "wrong_format",
+                    "message": "Scorecards are only for stroke and best-ball"
+                               " casual rounds — match-play and alt-shot"
+                               " rounds use their linked game."},
+        )
+    return fmt
+
+
+@app.get("/api/casual-tee-times/{tt_id}/scorecards")
+async def list_casual_scorecards(tt_id: str, user: CurrentUser) -> dict:
+    tt = await _casual_or_404(tt_id)
+    await _casual_score_format_or_422(tt)
+    cards = await db.get_casual_scorecards(DB_PATH, tt["id"])
+    return {"scorecards": [_casual_card_json(c, tt.get("pars")) for c in cards]}
+
+
+@app.get("/api/casual-tee-times/{tt_id}/scorecard")
+async def get_casual_scorecard(
+    tt_id: str, user: CurrentUser,
+    player_discord_id: str | None = None,
+) -> dict:
+    tt = await _casual_or_404(tt_id)
+    await _casual_score_format_or_422(tt)
+    target_id = player_discord_id or user["discord_id"]
+    if player_discord_id is not None:
+        players = await db.list_casual_tee_time_players(DB_PATH, tt["id"])
+        if target_id not in players:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "player_not_in_tee_time"},
+            )
+    card = await db.find_casual_scorecard(DB_PATH, tt["id"], target_id)
+    if not card:
+        return {"card": None}
+    return {"card": _casual_card_json(card, tt.get("pars"))}
+
+
+@app.put("/api/casual-tee-times/{tt_id}/scorecard")
+async def put_casual_scorecard(
+    tt_id: str, body: CasualScorecardSubmit, user: CurrentUser,
+) -> dict:
+    tt = await _casual_or_404(tt_id)
+    await _casual_score_format_or_422(tt)
+    # Gate 1: the caller must be in this casual round.
+    players = await db.list_casual_tee_time_players(DB_PATH, tt["id"])
+    if user["discord_id"] not in players:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "not_in_tee_time"},
+        )
+    # Gate 2: the card owner must be in the same round.
+    if body.player_discord_id not in players:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "player_not_in_tee_time"},
+        )
+    # Gate 3: one score per hole (nulls allowed for live partial saves);
+    # a final submission needs every hole.
+    if len(body.scores) != 18:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Expected 18 hole scores but got"
+                   f" {len(body.scores)}.",
+        )
+    if body.complete and any(s is None for s in body.scores):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "scorecard_incomplete",
+                "message": "Every hole needs a score before the card can be"
+                           " submitted.",
+            },
+        )
+    # Casual cards are self-attested: completing one marks it verified
+    # directly (no verifier needed), like a 2+ player tournament card.
+    status_value = "verified" if body.complete else "in_progress"
+    card_id = await db.upsert_scorecard(
+        DB_PATH, None, body.player_discord_id, None, None, body.scores,
+        status_value, submitted_by=user["discord_id"], round_number=1,
+        witness_name=body.witness_name,
+        casual_tee_time_id=tt["id"],
+    )
+    card = await db.get_scorecard(DB_PATH, card_id)
+    return {"card": _casual_card_json(card, tt.get("pars"))}
+
+
+@app.get("/api/casual-tee-times/{tt_id}/leaderboard")
+async def casual_leaderboard(tt_id: str, user: CurrentUser) -> dict:
+    tt = await _casual_or_404(tt_id)
+    fmt = await _casual_score_format_or_422(tt)
+    pars = _parse_pars(tt.get("pars")) or [4] * 18
+    cards = await db.get_casual_scorecards(DB_PATH, tt["id"])
+    # Latest card per player (a re-submit replaces the old one, but be
+    # safe against duplicates).
+    latest: dict[str, dict] = {}
+    for c in cards:
+        pid = c.get("player_discord_id")
+        if pid and (pid not in latest
+                    or c["submitted_at"] >= latest[pid]["submitted_at"]):
+            latest[pid] = c
+
+    async def _entry(pid: str, c: dict) -> dict:
+        scores = json.loads(c["holes_json"])
+        p = await db.get_player(DB_PATH, pid)
+        return {
+            "player_discord_id": pid,
+            "display_name": db.display_name_of(p, pid),
+            "golfplus_handle": p.get("golfplus_handle") if p else None,
+            "scores": scores,
+            "total": c["total"],
+            "thru": sum(1 for s in scores if s is not None),
+            "to_par": sl.to_par(c["total"], pars),
+            "status": c["status"],
+        }
+
+    players = []
+    for pid, c in latest.items():
+        players.append(await _entry(pid, c))
+    # Verified cards first (by total), then live cards (by total).
+    players.sort(key=lambda e: (0 if e["status"] == "verified" else 1,
+                                e["total"]))
+    body: dict = {
+        "tee_time_id": tt["id"],
+        "format": fmt,
+        "players": players,
+    }
+    if fmt == "best_ball":
+        # v1: best ball across ALL players on the casual round (no formal
+        # teams) — per-hole minimum over each player's latest card.
+        best = []
+        for h in range(18):
+            hole_scores = [p["scores"][h] for p in players
+                           if h < len(p["scores"])
+                           and p["scores"][h] is not None]
+            best.append(min(hole_scores) if hole_scores else None)
+        body["best_ball"] = {
+            "holes": best,
+            "total": sum(s for s in best if s is not None),
+            "thru": sum(1 for s in best if s is not None),
+        }
+    return body
 
 
 # --------------------------------------------------------------------------

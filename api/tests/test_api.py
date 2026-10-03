@@ -71,11 +71,15 @@ def run(coro):
 
 class ApiTestCase(unittest.TestCase):
     def setUp(self):
-        # Fresh DB per test.
+        # Fresh DB per test, deleted afterwards: /tmp is a 512MB tmpfs and
+        # the suite creates one DB per test, which used to fill it up
+        # ("database or disk is full") on full runs.
         fd, self.db_path = tempfile.mkstemp(suffix=".db")
         import os
 
         os.close(fd)
+        self.addCleanup(
+            lambda: os.path.exists(self.db_path) and os.remove(self.db_path))
         run(db.init_db(self.db_path))
         main.DB_PATH = self.db_path
         main.GUILD_ID = GUILD

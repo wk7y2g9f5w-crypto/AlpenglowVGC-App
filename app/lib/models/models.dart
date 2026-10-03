@@ -633,6 +633,10 @@ class CasualTeeTime {
   final String startsAt;
   final int maxPlayers;
   final String notes;
+  final String format; // stroke | best_ball | match_play | alt_shot
+  final String? matchplayTeeTimeId;
+  final String? altshotTeeTimeId;
+  final List<int>? pars;
   final List<CasualPlayer> players;
 
   CasualTeeTime({
@@ -647,6 +651,10 @@ class CasualTeeTime {
     required this.startsAt,
     required this.maxPlayers,
     required this.notes,
+    this.format = 'stroke',
+    this.matchplayTeeTimeId,
+    this.altshotTeeTimeId,
+    this.pars,
     required this.players,
   });
 
@@ -662,6 +670,14 @@ class CasualTeeTime {
         startsAt: (j['starts_at'] ?? '').toString(),
         maxPlayers: (j['max_players'] as num?)?.toInt() ?? 4,
         notes: (j['notes'] ?? '').toString(),
+        format: (j['format'] ?? 'stroke').toString(),
+        matchplayTeeTimeId: j['matchplay_tee_time_id']?.toString(),
+        altshotTeeTimeId: j['altshot_tee_time_id']?.toString(),
+        pars: (j['pars'] as String?)
+            ?.split(',')
+            .map((e) => int.tryParse(e.trim()))
+            .whereType<int>()
+            .toList(),
         players: ((j['players'] as List?) ?? [])
             .map((e) => CasualPlayer.fromJson(e as Map<String, dynamic>))
             .toList(),
@@ -671,6 +687,23 @@ class CasualTeeTime {
       players.any((p) => p.discordId == discordId);
 
   bool get isFull => players.length >= maxPlayers;
+
+  bool get isMatchPlay => format == 'match_play';
+  bool get isAltShot => format == 'alt_shot';
+  bool get usesScorecards => format == 'stroke' || format == 'best_ball';
+
+  String get formatLabel {
+    switch (format) {
+      case 'best_ball':
+        return 'Best Ball';
+      case 'match_play':
+        return 'Match Play';
+      case 'alt_shot':
+        return 'Alt-Shot';
+      default:
+        return 'Stroke';
+    }
+  }
 
   String get settingsSummary {
     final parts = <String>[

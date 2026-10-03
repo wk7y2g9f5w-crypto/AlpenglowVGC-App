@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS boards(
 );
 CREATE TABLE IF NOT EXISTS scorecards(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE,
+  casual_tee_time_id TEXT REFERENCES casual_tee_times(id) ON DELETE CASCADE,
   round_number INTEGER NOT NULL DEFAULT 1 CHECK(round_number BETWEEN 1 AND 5),
   player_discord_id TEXT,
   team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
@@ -122,7 +123,8 @@ CREATE TABLE IF NOT EXISTS scorecards(
   submitted_at TEXT NOT NULL,
   verified_by TEXT,
   submitted_by TEXT,
-  witness_name TEXT
+  witness_name TEXT,
+  CHECK((tournament_id IS NULL) != (casual_tee_time_id IS NULL))
 );
 -- Shot-by-shot tracking (optional): where each shot landed on the hole,
 -- as normalized 0..1 coordinates on the hole schematic. lie is where the
@@ -282,6 +284,10 @@ CREATE TABLE IF NOT EXISTS casual_tee_times(
   starts_at TEXT NOT NULL,
   max_players INTEGER NOT NULL DEFAULT 4,
   notes TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT 'stroke'
+    CHECK(format IN ('stroke','best_ball','match_play','alt_shot')),
+  matchplay_tee_time_id TEXT,
+  altshot_tee_time_id TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS casual_tee_time_players(
@@ -319,6 +325,7 @@ CREATE TABLE IF NOT EXISTS altshot_tee_times(
   max_teams INTEGER NOT NULL DEFAULT 2,
   team_size INTEGER,
   notes TEXT NOT NULL DEFAULT '',
+  casual_tee_time_id TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS altshot_teams(
@@ -376,6 +383,7 @@ CREATE TABLE IF NOT EXISTS matchplay_tee_times(
   format TEXT NOT NULL DEFAULT 'single',
   team_size INTEGER NOT NULL DEFAULT 1,
   notes TEXT NOT NULL DEFAULT '',
+  casual_tee_time_id TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS matchplay_sides(
@@ -466,6 +474,14 @@ async def _migrate(db_path: str) -> None:
       copied into the new shape — all rows are preserved).
     - Rebuilds the scorecards table when its status CHECK predates
       'in_progress' (live hole-by-hole entry), same copy-preserve pattern.
+    - Rebuilds the scorecards table when casual_tee_time_id is missing:
+      tournament_id becomes nullable and exactly one of tournament_id /
+      casual_tee_time_id must be set (CHECK).
+    - Adds casual_tee_times.format / matchplay_tee_time_id /
+      altshot_tee_time_id when missing (casual formats).
+    - Adds matchplay_tee_times.casual_tee_time_id and
+      altshot_tee_times.casual_tee_time_id when missing (back-references so
+      linked games stay out of the dedicated tabs).
     - Adds players.golfplus_handle / timezone / stats_private when missing.
     - Adds scorecards.submitted_by when missing.
     New tables (join_requests, side_quests) are handled by the idempotent
@@ -672,6 +688,96 @@ async def _migrate(db_path: str) -> None:
             )
             await con.execute("DROP TABLE scorecards")
             await con.execute("ALTER TABLE scorecards_new RENAME TO scorecards")
+            await con.commit()
+
+        # Casual formats: scorecards gain casual_tee_time_id and tournament_id
+        # becomes nullable (exactly one of the two is set — enforced by the
+        # new CHECK). Rebuild with the new shape, preserving every row.
+        cur = await con.execute("PRAGMA table_info(scorecards)")
+        card_cols2 = [r[1] for r in await cur.fetchall()]
+        if "casual_tee_time_id" not in card_cols2:
+            await con.execute(
+                """CREATE TABLE scorecards_new(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  tournament_id INTEGER REFERENCES tournaments(id)
+                    ON DELETE CASCADE,
+                  casual_tee_time_id TEXT REFERENCES casual_tee_times(id)
+                    ON DELETE CASCADE,
+                  round_number INTEGER NOT NULL DEFAULT 1
+                    CHECK(round_number BETWEEN 1 AND 5),
+                  player_discord_id TEXT,
+                  team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+                  tee_time_id INTEGER REFERENCES tee_times(id)
+                    ON DELETE SET NULL,
+                  holes_json TEXT NOT NULL,
+                  total INTEGER NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','verified','in_progress')),
+                  submitted_at TEXT NOT NULL,
+                  verified_by TEXT,
+                  submitted_by TEXT,
+                  witness_name TEXT,
+                  CHECK((tournament_id IS NULL)
+                        != (casual_tee_time_id IS NULL))
+                )"""
+            )
+            await con.execute(
+                """INSERT INTO scorecards_new
+                  (id, tournament_id, casual_tee_time_id, round_number,
+                   player_discord_id, team_id, tee_time_id, holes_json, total,
+                   status, submitted_at, verified_by, submitted_by,
+                   witness_name)
+                SELECT id, tournament_id, NULL, round_number,
+                   player_discord_id, team_id, tee_time_id, holes_json, total,
+                   status, submitted_at, verified_by, submitted_by,
+                   witness_name
+                FROM scorecards"""
+            )
+            await con.execute("DROP TABLE scorecards")
+            await con.execute("ALTER TABLE scorecards_new RENAME TO scorecards")
+            await con.commit()
+
+        # Casual scorecards index: create (or ensure) once the column exists,
+        # whether via the fresh schema or the rebuild above.
+        await con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scorecards_casual"
+            " ON scorecards(casual_tee_time_id)")
+        await con.commit()
+
+        # Casual formats on casual_tee_times: format + links to the existing
+        # match-play / alt-shot engines.
+        cur = await con.execute("PRAGMA table_info(casual_tee_times)")
+        ctt_cols = [r[1] for r in await cur.fetchall()]
+        if "format" not in ctt_cols:
+            await con.execute(
+                "ALTER TABLE casual_tee_times ADD COLUMN format TEXT"
+                " NOT NULL DEFAULT 'stroke'")
+            await con.commit()
+        if "matchplay_tee_time_id" not in ctt_cols:
+            await con.execute(
+                "ALTER TABLE casual_tee_times"
+                " ADD COLUMN matchplay_tee_time_id TEXT")
+            await con.commit()
+        if "altshot_tee_time_id" not in ctt_cols:
+            await con.execute(
+                "ALTER TABLE casual_tee_times ADD COLUMN altshot_tee_time_id TEXT")
+            await con.commit()
+
+        # Back-references so linked games stay out of the dedicated tabs'
+        # lists (they live in the Casual tab instead).
+        cur = await con.execute("PRAGMA table_info(matchplay_tee_times)")
+        mp_cols = [r[1] for r in await cur.fetchall()]
+        if "casual_tee_time_id" not in mp_cols:
+            await con.execute(
+                "ALTER TABLE matchplay_tee_times"
+                " ADD COLUMN casual_tee_time_id TEXT")
+            await con.commit()
+        cur = await con.execute("PRAGMA table_info(altshot_tee_times)")
+        as_cols = [r[1] for r in await cur.fetchall()]
+        if "casual_tee_time_id" not in as_cols:
+            await con.execute(
+                "ALTER TABLE altshot_tee_times"
+                " ADD COLUMN casual_tee_time_id TEXT")
             await con.commit()
 
 
@@ -1985,46 +2091,57 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
                            scores: list[int | None], status: str,
                            submitted_by: str | None = None,
                            round_number: int = 1,
-                           witness_name: str | None = None) -> int:
+                           witness_name: str | None = None,
+                           casual_tee_time_id: str | None = None) -> int:
     """Insert or update a scorecard. scores may contain None for holes not
     yet played (live entry); total covers entered holes only.
 
     Card identity: best_ball matches per member (player + team); shared team
     formats (alt_shot/scramble) match per team; stroke matches per player.
+    Casual cards pass casual_tee_time_id (tournament_id must be None then);
+    casual cards are always per-player (team_id None, round 1).
     """
     holes_json = json.dumps(scores)
     total = sum(s for s in scores if s is not None)
     now = utcnow_iso()
     round_number = max(1, min(5, int(round_number or 1)))
     witness_name = (witness_name or "").strip()[:80] or None
+    if casual_tee_time_id is not None:
+        scope_where = "tournament_id IS NULL AND casual_tee_time_id = ?"
+        scope_params: tuple = (casual_tee_time_id,)
+    else:
+        scope_where = "tournament_id = ? AND casual_tee_time_id IS NULL"
+        scope_params = (tournament_id,)
     if team_id is not None and player_id is not None:
         # best_ball: each member has their own card.
         existing = await _fetchone(
             db_path,
-            "SELECT id FROM scorecards WHERE tournament_id = ?"
+            "SELECT id FROM scorecards WHERE " + scope_where +
             " AND player_discord_id = ? AND team_id = ?"
             " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
             " AND round_number = ?"
             " ORDER BY submitted_at DESC LIMIT 1",
-            (tournament_id, player_id, team_id, tee_time_id, round_number),
+            scope_params + (player_id, team_id, tee_time_id, round_number),
         )
     elif team_id is not None:
         existing = await _fetchone(
             db_path,
-            "SELECT id FROM scorecards WHERE tournament_id = ? AND team_id = ?"
+            "SELECT id FROM scorecards WHERE " + scope_where +
+            " AND team_id = ?"
             " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
             " AND round_number = ?"
             " ORDER BY submitted_at DESC LIMIT 1",
-            (tournament_id, team_id, tee_time_id, round_number),
+            scope_params + (team_id, tee_time_id, round_number),
         )
     else:
         existing = await _fetchone(
             db_path,
-            "SELECT id FROM scorecards WHERE tournament_id = ? AND player_discord_id = ?"
+            "SELECT id FROM scorecards WHERE " + scope_where +
+            " AND player_discord_id = ?"
             " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
             " AND team_id IS NULL AND round_number = ?"
             " ORDER BY submitted_at DESC LIMIT 1",
-            (tournament_id, player_id, tee_time_id, round_number),
+            scope_params + (player_id, tee_time_id, round_number),
         )
     if existing:
         await _execute(
@@ -2038,12 +2155,14 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
         return existing["id"]
     lastrowid, _ = await _execute(
         db_path,
-        "INSERT INTO scorecards (tournament_id, round_number, player_discord_id,"
+        "INSERT INTO scorecards (tournament_id, casual_tee_time_id,"
+        " round_number, player_discord_id,"
         " team_id, tee_time_id, holes_json, total, status, submitted_at,"
         " submitted_by, witness_name)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (tournament_id, round_number, player_id, team_id, tee_time_id,
-         holes_json, total, status, now, submitted_by, witness_name),
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tournament_id, casual_tee_time_id, round_number, player_id, team_id,
+         tee_time_id, holes_json, total, status, now, submitted_by,
+         witness_name),
     )
     return lastrowid
 
@@ -2262,6 +2381,31 @@ async def get_scorecards(db_path, tournament_id, status=None) -> list[dict]:
     return await _fetchall(db_path, sql, tuple(params))
 
 
+async def get_casual_scorecards(db_path, casual_tee_time_id,
+                               status=None) -> list[dict]:
+    """Scorecards for one casual tee time (stroke / best-ball formats)."""
+    sql = ("SELECT * FROM scorecards WHERE tournament_id IS NULL"
+           " AND casual_tee_time_id = ?")
+    params: list = [casual_tee_time_id]
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY submitted_at ASC"
+    return await _fetchall(db_path, sql, tuple(params))
+
+
+async def find_casual_scorecard(db_path, casual_tee_time_id,
+                               player_discord_id) -> dict | None:
+    """Latest card for a player on a casual tee time (any status)."""
+    return await _fetchone(
+        db_path,
+        "SELECT * FROM scorecards WHERE tournament_id IS NULL"
+        " AND casual_tee_time_id = ? AND player_discord_id = ?"
+        " AND team_id IS NULL ORDER BY submitted_at DESC LIMIT 1",
+        (casual_tee_time_id, player_discord_id),
+    )
+
+
 async def get_latest_player_card(db_path, tournament_id, discord_id,
                                  round_number: int | None = None) -> dict | None:
     """Latest card for a player in a tournament (optionally one round).
@@ -2333,19 +2477,25 @@ async def delete_player_cards(db_path, tournament_id, discord_id) -> int:
 
 async def get_player_verified_cards(db_path, guild_id,
                                     player_discord_id) -> list[dict]:
-    """Verified individual scorecards for a player across a guild's tournaments.
+    """Verified individual scorecards for a player across a guild's tournaments
+    and casual rounds.
 
     Returns [{"holes_json", "pars", "holes"}]; team cards are excluded so
     personal stats stay personal.
     """
     return await _fetchall(
         db_path,
-        "SELECT s.holes_json, t.pars, t.holes FROM scorecards s"
+        "SELECT s.holes_json, t.pars, t.holes, s.submitted_at FROM scorecards s"
         " JOIN tournaments t ON t.id = s.tournament_id"
         " WHERE t.guild_id = ? AND s.player_discord_id = ?"
         " AND s.team_id IS NULL AND s.status = 'verified'"
-        " ORDER BY s.submitted_at ASC",
-        (guild_id, player_discord_id),
+        " UNION ALL"
+        " SELECT s.holes_json, c.pars, 18, s.submitted_at FROM scorecards s"
+        " JOIN casual_tee_times c ON c.id = s.casual_tee_time_id"
+        " WHERE s.player_discord_id = ?"
+        " AND s.team_id IS NULL AND s.status = 'verified'"
+        " ORDER BY submitted_at ASC",
+        (guild_id, player_discord_id, player_discord_id),
     )
 
 
@@ -2356,7 +2506,8 @@ async def get_player_stat_cards(db_path, guild_id,
     Same universe as get_player_verified_cards, but also returns the card
     id, total, and submitted_at so shot rows can be joined and handicap
     differentials ordered. Team cards excluded; only 'verified' (completed)
-    cards.
+    cards. Casual stroke/best-ball cards are included (their pars come from
+    the casual tee time).
     """
     return await _fetchall(
         db_path,
@@ -2364,8 +2515,14 @@ async def get_player_stat_cards(db_path, guild_id,
         " FROM scorecards s JOIN tournaments t ON t.id = s.tournament_id"
         " WHERE t.guild_id = ? AND s.player_discord_id = ?"
         " AND s.team_id IS NULL AND s.status = 'verified'"
-        " ORDER BY s.submitted_at ASC",
-        (guild_id, player_discord_id),
+        " UNION ALL"
+        " SELECT s.id, s.holes_json, s.total, s.submitted_at, c.pars, 18"
+        " FROM scorecards s JOIN casual_tee_times c"
+        " ON c.id = s.casual_tee_time_id"
+        " WHERE s.player_discord_id = ?"
+        " AND s.team_id IS NULL AND s.status = 'verified'"
+        " ORDER BY submitted_at ASC",
+        (guild_id, player_discord_id, player_discord_id),
     )
 
 
@@ -2646,18 +2803,24 @@ async def create_casual_tee_time(
     tee_position: str = "middle", pin_position: str = "white",
     wind_strength: str = "moderate", green_speed: str = "medium",
     starts_at: str = "", max_players: int = 4, notes: str = "",
+    format: str = "stroke", matchplay_tee_time_id: str | None = None,
+    altshot_tee_time_id: str | None = None,
 ) -> str:
     import uuid
+    if format not in ("stroke", "best_ball", "match_play", "alt_shot"):
+        raise ValueError(f"bad casual format: {format}")
     tt_id = uuid.uuid4().hex[:12]
     await _execute(
         db_path,
         "INSERT INTO casual_tee_times (id, creator_discord_id, label, course,"
         " pars, tee_position, pin_position, wind_strength, green_speed,"
-        " starts_at, max_players, notes, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " starts_at, max_players, notes, format, matchplay_tee_time_id,"
+        " altshot_tee_time_id, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tt_id, creator_discord_id, label, course, pars, tee_position,
          pin_position, wind_strength, green_speed, starts_at, max_players,
-         notes, utcnow_iso()),
+         notes, format, matchplay_tee_time_id, altshot_tee_time_id,
+         utcnow_iso()),
     )
     await _execute(
         db_path,
@@ -2745,7 +2908,8 @@ async def update_casual_tee_time(db_path, tt_id: str,
                                  fields: dict) -> bool:
     allowed = {"label", "course", "pars", "tee_position", "pin_position",
                "wind_strength", "green_speed", "starts_at", "max_players",
-               "notes"}
+               "notes", "format", "matchplay_tee_time_id",
+               "altshot_tee_time_id"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
         return False
@@ -2759,11 +2923,23 @@ async def update_casual_tee_time(db_path, tt_id: str,
 
 
 async def delete_casual_tee_time(db_path, tt_id: str) -> None:
+    tt = await get_casual_tee_time(db_path, tt_id)
     await _execute(db_path,
                    "DELETE FROM casual_tee_time_players WHERE tee_time_id = ?",
                    (tt_id,))
+    # Casual scorecards (and their hole_shots via ON DELETE CASCADE).
+    await _execute(db_path,
+                   "DELETE FROM scorecards WHERE casual_tee_time_id = ?",
+                   (tt_id,))
     await _execute(db_path, "DELETE FROM casual_tee_times WHERE id = ?",
                    (tt_id,))
+    # Linked match-play / alt-shot games live and die with the casual round.
+    if tt:
+        if tt.get("matchplay_tee_time_id"):
+            await delete_matchplay_tee_time(
+                db_path, tt["matchplay_tee_time_id"])
+        if tt.get("altshot_tee_time_id"):
+            await delete_altshot_tee_time(db_path, tt["altshot_tee_time_id"])
 
 
 # ------------------------------------------------------------------- alt-shot records
@@ -2924,7 +3100,7 @@ async def create_altshot_tee_time(
     tee_position: str = "middle", pin_position: str = "white",
     wind_strength: str = "moderate", green_speed: str = "medium",
     starts_at: str = "", max_teams: int = 2, team_size: int = 2,
-    notes: str = "",
+    notes: str = "", casual_tee_time_id: str | None = None,
     # No team names in alt-shot: teams are identified by their players.
 ) -> str:
     import uuid
@@ -2937,11 +3113,11 @@ async def create_altshot_tee_time(
         db_path,
         "INSERT INTO altshot_tee_times (id, creator_discord_id, label, course,"
         " pars, tee_position, pin_position, wind_strength, green_speed,"
-        " starts_at, max_teams, team_size, notes, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " starts_at, max_teams, team_size, notes, casual_tee_time_id,"
+        " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tt_id, creator_discord_id, label, course, pars, tee_position,
          pin_position, wind_strength, green_speed, starts_at, max_teams,
-         team_size, notes, utcnow_iso()),
+         team_size, notes, casual_tee_time_id, utcnow_iso()),
     )
     # Team 1 is created right away with the creator as the first roster
     # member. A 2-team tee time also pre-creates team 2 (empty — players
@@ -3042,6 +3218,7 @@ async def _altshot_tee_time_json(db_path, row: dict) -> dict:
         "team_size": row.get("team_size"),
         "notes": row["notes"],
         "created_at": row["created_at"],
+        "casual_tee_time_id": row.get("casual_tee_time_id"),
         "teams": [await _altshot_team_json(db_path, t, row) for t in teams],
     }
 
@@ -3052,13 +3229,15 @@ async def list_altshot_tee_times(db_path, upcoming_only: bool = True,
         rows = await _fetchall(
             db_path,
             "SELECT * FROM altshot_tee_times WHERE starts_at >= ?"
+            " AND casual_tee_time_id IS NULL"
             " ORDER BY starts_at ASC LIMIT ?",
             (utcnow_iso(), limit),
         )
     else:
         rows = await _fetchall(
             db_path,
-            "SELECT * FROM altshot_tee_times ORDER BY starts_at DESC LIMIT ?",
+            "SELECT * FROM altshot_tee_times WHERE casual_tee_time_id IS NULL"
+            " ORDER BY starts_at DESC LIMIT ?",
             (limit,),
         )
     return [await _altshot_tee_time_json(db_path, r) for r in rows]
@@ -3737,6 +3916,7 @@ async def _matchplay_tee_time_json(db_path, row: dict) -> dict:
         "side_cap": cap,
         "notes": row["notes"],
         "created_at": row["created_at"],
+        "casual_tee_time_id": row.get("casual_tee_time_id"),
         "sides": side_jsons,
         "both_full": all(s["size"] >= cap for s in side_jsons)
         and len(side_jsons) == 2,
@@ -3749,7 +3929,7 @@ async def create_matchplay_tee_time(
     tee_position: str = "back", pin_position: str = "black",
     wind_strength: str = "moderate", green_speed: str = "pro",
     starts_at: str = "", format: str = "single", team_size: int = 1,
-    notes: str = "",
+    notes: str = "", casual_tee_time_id: str | None = None,
 ) -> str:
     import uuid
     if format not in ("single", "bestball"):
@@ -3768,11 +3948,11 @@ async def create_matchplay_tee_time(
         db_path,
         "INSERT INTO matchplay_tee_times (id, creator_discord_id, label,"
         " course, pars, tee_position, pin_position, wind_strength,"
-        " green_speed, starts_at, format, team_size, notes, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " green_speed, starts_at, format, team_size, notes, casual_tee_time_id,"
+        " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tt_id, creator_discord_id, label, course, pars, tee_position,
          pin_position, wind_strength, green_speed, starts_at, format,
-         team_size, notes, utcnow_iso()),
+         team_size, notes, casual_tee_time_id, utcnow_iso()),
     )
     for n, side_id in ((1, side1_id), (2, side2_id)):
         await _execute(
@@ -3799,14 +3979,15 @@ async def list_matchplay_tee_times(db_path, upcoming_only: bool = True,
         rows = await _fetchall(
             db_path,
             "SELECT * FROM matchplay_tee_times WHERE starts_at >= ?"
+            " AND casual_tee_time_id IS NULL"
             " ORDER BY starts_at ASC LIMIT ?",
             (utcnow_iso(), limit),
         )
     else:
         rows = await _fetchall(
             db_path,
-            "SELECT * FROM matchplay_tee_times ORDER BY starts_at DESC"
-            " LIMIT ?",
+            "SELECT * FROM matchplay_tee_times WHERE casual_tee_time_id IS NULL"
+            " ORDER BY starts_at DESC LIMIT ?",
             (limit,),
         )
     return [await _matchplay_tee_time_json(db_path, r) for r in rows]

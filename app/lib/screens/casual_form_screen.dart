@@ -44,8 +44,15 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
   String _greenSpeed = 'pro';
   DateTime? _when;
   int _maxPlayers = 4;
+  String _format = 'stroke'; // stroke | best_ball | match_play | alt_shot
+  String _mpFormat = 'single'; // single | bestball
+  int _mpTeamSize = 2; // per side, for bestball
+  int _asMaxTeams = 2;
+  int _asTeamSize = 2;
   bool _saving = false;
   bool _loading = true;
+
+  bool get _isNew => widget.existing == null;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -61,6 +68,7 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
     _wind = e?.windStrength ?? 'moderate';
     _greenSpeed = e?.greenSpeed ?? 'pro';
     _maxPlayers = e?.maxPlayers ?? 4;
+    _format = e?.format ?? 'stroke';
     if (e != null && e.startsAt.isNotEmpty) {
       try {
         _when = DateTime.parse(e.startsAt).toLocal();
@@ -136,6 +144,17 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
         'starts_at': _when?.toUtc().toIso8601String() ?? '',
         'max_players': _maxPlayers,
         'notes': _notes.text.trim(),
+        'format': _format,
+        if (_isNew && _format == 'match_play')
+          'matchplay': {
+            'format': _mpFormat,
+            'team_size': _mpFormat == 'bestball' ? _mpTeamSize : 1,
+          },
+        if (_isNew && _format == 'alt_shot')
+          'altshot': {
+            'max_teams': _asMaxTeams,
+            'team_size': _asTeamSize,
+          },
       };
       if (widget.existing == null) {
         await _api.createCasualTeeTime(payload);
@@ -202,6 +221,130 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
                       .toList(),
                   onChanged: (v) => setState(() => _course = v),
                 ),
+                const SizedBox(height: 12),
+                if (_isNew) ...[
+                  DropdownButtonFormField<String>(
+                    initialValue: _format,
+                    decoration: const InputDecoration(
+                      labelText: 'Format',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                          value: 'stroke', child: Text('Stroke Play')),
+                      DropdownMenuItem(
+                          value: 'best_ball', child: Text('Best Ball')),
+                      DropdownMenuItem(
+                          value: 'match_play', child: Text('Match Play')),
+                      DropdownMenuItem(
+                          value: 'alt_shot', child: Text('Alt-Shot')),
+                    ],
+                    onChanged: (v) {
+                      if (v != null) setState(() => _format = v);
+                    },
+                  ),
+                  if (_format == 'match_play') ...[
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<String>(
+                      initialValue: _mpFormat,
+                      decoration: const InputDecoration(
+                        labelText: 'Match-play format',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                            value: 'single', child: Text('1v1 Matchplay')),
+                        DropdownMenuItem(
+                            value: 'bestball', child: Text('Best Ball')),
+                      ],
+                      onChanged: (v) {
+                        if (v != null) setState(() => _mpFormat = v);
+                      },
+                    ),
+                    if (_mpFormat == 'bestball') ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          const Text('Players per side'),
+                          const Spacer(),
+                          IconButton(
+                            icon: const Icon(Icons.remove),
+                            onPressed: _mpTeamSize > 2
+                                ? () => setState(() => _mpTeamSize--)
+                                : null,
+                          ),
+                          Text('$_mpTeamSize',
+                              style:
+                                  Theme.of(context).textTheme.titleMedium),
+                          IconButton(
+                            icon: const Icon(Icons.add),
+                            onPressed: _mpTeamSize < 4
+                                ? () => setState(() => _mpTeamSize++)
+                                : null,
+                          ),
+                        ],
+                      ),
+                      const Text(
+                        'Each side fields one ball per hole; the better ball wins the hole.',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                    ],
+                  ],
+                  if (_format == 'alt_shot') ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        const Text('Teams'),
+                        const Spacer(),
+                        IconButton(
+                          icon: const Icon(Icons.remove),
+                          onPressed: _asMaxTeams > 1
+                              ? () => setState(() => _asMaxTeams--)
+                              : null,
+                        ),
+                        Text('$_asMaxTeams',
+                            style: Theme.of(context).textTheme.titleMedium),
+                        IconButton(
+                          icon: const Icon(Icons.add),
+                          onPressed: _asMaxTeams < 2
+                              ? () => setState(() => _asMaxTeams++)
+                              : null,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        const Text('Players per team'),
+                        const Spacer(),
+                        IconButton(
+                          icon: const Icon(Icons.remove),
+                          onPressed: _asTeamSize > 2
+                              ? () => setState(() => _asTeamSize--)
+                              : null,
+                        ),
+                        Text('$_asTeamSize',
+                            style: Theme.of(context).textTheme.titleMedium),
+                        IconButton(
+                          icon: const Icon(Icons.add),
+                          onPressed: _asTeamSize < 4
+                              ? () => setState(() => _asTeamSize++)
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ],
+                ] else ...[
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Chip(
+                      label: Text(widget.existing!.formatLabel),
+                      avatar: const Icon(Icons.lock, size: 16),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 Row(
                   children: [

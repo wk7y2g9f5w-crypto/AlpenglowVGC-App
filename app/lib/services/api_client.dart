@@ -602,6 +602,47 @@ class ApiClient {
     return CasualTeeTime.fromJson(body as Map<String, dynamic>);
   }
 
+  /// Casual scorecards (stroke / best-ball formats only).
+  Future<List<Scorecard>> getCasualScorecards(String id) async {
+    final body = await _get('/api/casual-tee-times/$id/scorecards');
+    final list = (body as Map<String, dynamic>)['scorecards'] as List? ?? [];
+    return list
+        .map((e) => Scorecard.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<Scorecard?> getCasualScorecard(String id,
+      {String? playerDiscordId}) async {
+    var path = '/api/casual-tee-times/$id/scorecard';
+    if (playerDiscordId != null) {
+      path += '?player_discord_id=${Uri.encodeComponent(playerDiscordId)}';
+    }
+    final body = await _get(path);
+    final card = (body as Map<String, dynamic>)['card'];
+    return card == null
+        ? null
+        : Scorecard.fromJson(card as Map<String, dynamic>);
+  }
+
+  Future<Scorecard> submitCasualScorecard(
+      String id, String playerDiscordId, List<int?> scores,
+      {bool complete = false, String? witnessName}) async {
+    final body = await _put('/api/casual-tee-times/$id/scorecard', {
+      'player_discord_id': playerDiscordId,
+      'scores': scores,
+      'complete': complete,
+      if (witnessName != null && witnessName.isNotEmpty)
+        'witness_name': witnessName,
+    });
+    return Scorecard.fromJson(
+        (body as Map<String, dynamic>)['card'] as Map<String, dynamic>);
+  }
+
+  Future<Map<String, dynamic>> getCasualLeaderboard(String id) async {
+    final body = await _get('/api/casual-tee-times/$id/leaderboard');
+    return body as Map<String, dynamic>;
+  }
+
   // ------------------------------------------------------------- alt-shot
   Future<List<AltShotTeeTime>> listAltShotTeeTimes() async {
     final body = await _get('/api/altshot-tee-times');
