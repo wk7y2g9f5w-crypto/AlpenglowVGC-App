@@ -364,10 +364,10 @@ class Shot {
         'holed': holed,
       };
 
-  Shot copyWith({String? lie, bool? holed}) => Shot(
+  Shot copyWith({double? x, double? y, String? lie, bool? holed}) => Shot(
         seq: seq,
-        x: x,
-        y: y,
+        x: x ?? this.x,
+        y: y ?? this.y,
         lie: lie ?? this.lie,
         holed: holed ?? this.holed,
       );

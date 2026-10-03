@@ -9,9 +9,10 @@ import 'hole_map.dart';
 ///
 /// Purely additive: nothing here prompts, badges, or requires anything —
 /// the sheet only exists while the player has it open. Tap the map to
-/// place each shot's landing spot; the lie is suggested from the map
-/// geometry with manual override chips. Saving never blocks on a
-/// shot-count vs strokes mismatch — it shows a gentle inline warning.
+/// place each shot's landing spot, or drag a placed shot to fine-tune it;
+/// the lie is suggested from the map geometry with manual override chips.
+/// Saving never blocks on a shot-count vs strokes mismatch — it shows a
+/// gentle inline warning.
 Future<bool> showShotTracker({
   required BuildContext context,
   required ApiClient api,
@@ -67,6 +68,24 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
   bool _saving = false;
   String? _loadError;
 
+  /// Key on the HoleMap so taps/drags are measured in the map's own
+  /// rendered coordinate space. (The old code divided the tap's local
+  /// position by the LayoutBuilder constraints — but maxHeight is
+  /// unbounded inside the scroll view, so every tap's y collapsed to 0
+  /// and shots always landed on the top edge.)
+  final GlobalKey _mapKey = GlobalKey();
+
+  /// Index of the shot currently being dragged, or null.
+  int? _dragIndex;
+
+  /// A press starting within this many logical pixels of a placed shot
+  /// drags that shot instead of adding a new one.
+  static const double _touchSlopPx = 24.0;
+
+  /// While dragging, the stored point is lifted this many pixels above
+  /// the fingertip so the marker stays visible under the finger.
+  static const double _dragLiftPx = 32.0;
+
   bool get _finished => _shots.any((s) => s.holed);
 
   @override
@@ -121,6 +140,95 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     setState(() {
       _shots = [..._shots, Shot(x: x, y: y, lie: lie)];
     });
+  }
+
+  /// The map's own RenderBox, or null if it isn't laid out yet.
+  RenderBox? _mapBox() {
+    final obj = _mapKey.currentContext?.findRenderObject();
+    if (obj is RenderBox && obj.hasSize && obj.size.width > 0 && obj.size.height > 0) {
+      return obj;
+    }
+    return null;
+  }
+
+  /// Convert a global pointer position to 0..1 map coordinates using the
+  /// map's actual rendered size. The painter draws the 0..1 geometry
+  /// across the full canvas with no letterboxing, so this is the exact
+  /// inverse of the paint transform.
+  Offset? _toMapCoords(Offset globalPosition) {
+    final box = _mapBox();
+    if (box == null) return null;
+    final local = box.globalToLocal(globalPosition);
+    return Offset(
+      (local.dx / box.size.width).clamp(0.0, 1.0),
+      (local.dy / box.size.height).clamp(0.0, 1.0),
+    );
+  }
+
+  /// Index of the placed shot nearest to a global pointer position, when
+  /// within touch slop — otherwise null.
+  int? _shotNear(Offset globalPosition) {
+    final box = _mapBox();
+    if (box == null || _shots.isEmpty) return null;
+    final local = box.globalToLocal(globalPosition);
+    int? best;
+    var bestDist = _touchSlopPx;
+    for (var i = 0; i < _shots.length; i++) {
+      final p = Offset(
+          _shots[i].x * box.size.width, _shots[i].y * box.size.height);
+      final d = (p - local).distance;
+      if (d <= bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  /// Tap (finger lifted without moving): add a shot, unless the tap
+  /// landed on an existing shot.
+  void _onTapUp(TapUpDetails d) {
+    if (_loading || _finished) return;
+    if (_shotNear(d.globalPosition) != null) return;
+    final coords = _toMapCoords(d.globalPosition);
+    if (coords == null) return;
+    _addShot(coords.dx, coords.dy);
+  }
+
+  /// Press down: if it starts on a placed shot, that shot becomes the
+  /// drag target (this also freezes sheet scrolling for the gesture).
+  void _onPanDown(DragDownDetails d) {
+    if (_loading || _finished) return;
+    final idx = _shotNear(d.globalPosition);
+    if (idx != null) {
+      setState(() => _dragIndex = idx);
+    }
+  }
+
+  /// Drag move: reposition the dragged shot, lifted above the fingertip
+  /// so the marker stays visible. The lie is re-suggested from the new
+  /// spot, matching placement behavior.
+  void _moveDraggedShot(Offset globalPosition) {
+    final idx = _dragIndex;
+    if (idx == null || idx >= _shots.length) return;
+    final box = _mapBox();
+    if (box == null) return;
+    final local = box.globalToLocal(globalPosition);
+    final x = (local.dx / box.size.width).clamp(0.0, 1.0);
+    final y = ((local.dy - _dragLiftPx) / box.size.height).clamp(0.0, 1.0);
+    setState(() {
+      _shots = [
+        ..._shots.sublist(0, idx),
+        _shots[idx].copyWith(x: x, y: y, lie: _geometry.lieAt(x, y)),
+        ..._shots.sublist(idx + 1),
+      ];
+    });
+  }
+
+  void _endDrag() {
+    if (_dragIndex != null) {
+      setState(() => _dragIndex = null);
+    }
   }
 
   void _setLastLie(String lie) {
@@ -214,6 +322,11 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
       expand: false,
       builder: (ctx, scrollCtrl) => SingleChildScrollView(
         controller: scrollCtrl,
+        // Freeze sheet scrolling while a shot is being dragged so the
+        // drag gesture isn't stolen by the scroll view.
+        physics: _dragIndex != null
+            ? const NeverScrollableScrollPhysics()
+            : null,
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -251,7 +364,8 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
               ],
             ),
             const Text(
-              'Tap the map to place each shot\u2019s landing spot.',
+              'Tap the map to place each shot\u2019s landing spot. '
+              'Drag a placed shot to move it.',
               style: TextStyle(color: Colors.grey, fontSize: 13),
             ),
             const SizedBox(height: 8),
@@ -279,18 +393,21 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                 ),
               )
             else
-              LayoutBuilder(
-                builder: (ctx, constraints) => GestureDetector(
-                  onTapDown: (d) => _addShot(
-                    d.localPosition.dx / constraints.maxWidth,
-                    d.localPosition.dy / constraints.maxHeight,
-                  ),
-                  child: AspectRatio(
-                    aspectRatio: 3 / 4,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: HoleMap(
-                          geometry: _geometry, shots: _shots),
+              GestureDetector(
+                onTapUp: _onTapUp,
+                onPanDown: _onPanDown,
+                onPanUpdate: (d) => _moveDraggedShot(d.globalPosition),
+                onPanEnd: (_) => _endDrag(),
+                onPanCancel: _endDrag,
+                child: AspectRatio(
+                  aspectRatio: 3 / 4,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: HoleMap(
+                      key: _mapKey,
+                      geometry: _geometry,
+                      shots: _shots,
+                      activeIndex: _dragIndex,
                     ),
                   ),
                 ),

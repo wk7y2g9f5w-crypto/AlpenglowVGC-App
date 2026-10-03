@@ -200,7 +200,13 @@ class HoleMapPainter extends CustomPainter {
   final HoleMapGeometry geometry;
   final List<Shot> shots;
 
-  HoleMapPainter({required this.geometry, required this.shots});
+  /// Index of the shot currently being dragged, if any. It is drawn with
+  /// a highlight ring so the player can see it while their finger is on
+  /// the map.
+  final int? activeIndex;
+
+  HoleMapPainter(
+      {required this.geometry, required this.shots, this.activeIndex});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -296,7 +302,19 @@ class HoleMapPainter extends CustomPainter {
     for (var i = 0; i < shots.length; i++) {
       final s = shots[i];
       final c = Offset(s.x * size.width, s.y * size.height);
+      final active = i == activeIndex;
       final fill = s.holed ? Colors.amber.shade700 : Colors.white;
+      if (active) {
+        // Highlight ring around the dragged shot.
+        canvas.drawCircle(
+          c,
+          r + 6,
+          Paint()
+            ..color = Colors.amber.shade600
+            ..strokeWidth = 3
+            ..style = PaintingStyle.stroke,
+        );
+      }
       canvas.drawCircle(c, r, Paint()..color = fill);
       canvas.drawCircle(
         c,
@@ -323,7 +341,9 @@ class HoleMapPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant HoleMapPainter oldDelegate) =>
-      oldDelegate.geometry != geometry || oldDelegate.shots != shots;
+      oldDelegate.geometry != geometry ||
+      oldDelegate.shots != shots ||
+      oldDelegate.activeIndex != activeIndex;
 }
 
 /// Hole schematic map. The parent must constrain the size (AspectRatio
@@ -332,12 +352,20 @@ class HoleMap extends StatelessWidget {
   final HoleMapGeometry geometry;
   final List<Shot> shots;
 
-  const HoleMap({super.key, required this.geometry, this.shots = const []});
+  /// Index of the shot being dragged, drawn with a highlight ring.
+  final int? activeIndex;
+
+  const HoleMap(
+      {super.key,
+      required this.geometry,
+      this.shots = const [],
+      this.activeIndex});
 
   @override
   Widget build(BuildContext context) {
     return CustomPaint(
-      painter: HoleMapPainter(geometry: geometry, shots: shots),
+      painter: HoleMapPainter(
+          geometry: geometry, shots: shots, activeIndex: activeIndex),
     );
   }
 }
