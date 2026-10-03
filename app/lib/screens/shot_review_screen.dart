@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../services/api_client.dart';
 import '../widgets/hole_map.dart';
+import '../widgets/hole_map_image.dart';
+import '../widgets/hole_map_manifest.dart';
 
 /// Full-screen, read-only review of a scorecard's tracked shots.
 ///
@@ -56,6 +58,11 @@ class _ShotReviewScreenState extends State<_ShotReviewScreen> {
   String? _loadError;
   Map<int, List<Shot>> _byHole = {};
   List<int> _holes = [];
+
+  /// Realistic rendered maps for holes that have one (see
+  /// [holeMapManifest]); holes missing here fall back to the procedural
+  /// schematic.
+  final Map<int, HoleMapImage> _images = {};
   late final PageController _pages;
   int _page = 0;
 
@@ -86,10 +93,31 @@ class _ShotReviewScreenState extends State<_ShotReviewScreen> {
       for (var i = 0; i < holes.length; i++) {
         if (results[i].isNotEmpty) byHole[holes[i]] = results[i];
       }
+      // Load realistic maps for the tracked holes. Missing or corrupt
+      // assets resolve to null and those holes keep the procedural map.
+      final courseMaps = holeMapManifest[widget.courseName];
+      final images = <int, HoleMapImage>{};
+      if (courseMaps != null) {
+        final loaded = await Future.wait(
+          byHole.keys.map((h) async {
+            final asset = courseMaps[h];
+            if (asset == null) return null;
+            return HoleMapImage.load(asset);
+          }),
+        );
+        var i = 0;
+        for (final h in byHole.keys) {
+          final img = loaded[i++];
+          if (img != null) images[h] = img;
+        }
+      }
       if (mounted) {
         setState(() {
           _byHole = byHole;
           _holes = byHole.keys.toList()..sort();
+          _images
+            ..clear()
+            ..addAll(images);
           _page = 0;
           _loading = false;
         });
@@ -259,9 +287,20 @@ class _ShotReviewScreenState extends State<_ShotReviewScreen> {
             aspectRatio: 3 / 4,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
-              child: HoleMap(geometry: geometry, shots: shots),
+              child: _images[hole] != null
+                  ? HoleMap.imaged(image: _images[hole]!, shots: shots)
+                  : HoleMap(geometry: geometry, shots: shots),
             ),
           ),
+          if (_images[hole] != null)
+            const Padding(
+              padding: EdgeInsets.only(top: 4),
+              child: Text(
+                '© OpenStreetMap contributors',
+                textAlign: TextAlign.right,
+                style: TextStyle(fontSize: 10, color: Colors.grey),
+              ),
+            ),
           const SizedBox(height: 12),
           ...shots.asMap().entries.map((e) {
             final i = e.key;

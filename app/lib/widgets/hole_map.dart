@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../models/models.dart';
+import 'hole_map_image.dart';
 
 /// Stylized, procedurally drawn hole schematic for shot tracking.
 ///
@@ -253,90 +254,12 @@ class HoleMapPainter extends CustomPainter {
       ),
       Paint()..color = const Color(0xFF3FA34D),
     );
-    final pinP = px(geometry.pin);
-    canvas.drawLine(
-      pinP + Offset(0, -size.height * 0.035),
-      pinP,
-      Paint()
-        ..color = Colors.white
-        ..strokeWidth = max(1.5, size.width * 0.004),
-    );
-    canvas.drawCircle(pinP, max(2.5, size.width * 0.008),
-        Paint()..color = Colors.red.shade700);
+    _paintPin(canvas, size, px(geometry.pin));
 
     // Tee box marker.
-    final t = px(geometry.tee);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromCenter(
-          center: t,
-          width: size.width * 0.055,
-          height: size.height * 0.02,
-        ),
-        const Radius.circular(4),
-      ),
-      Paint()..color = Colors.white70,
-    );
+    _paintTeeBox(canvas, size, px(geometry.tee));
 
-    _paintShots(canvas, size, px);
-  }
-
-  void _paintShots(
-      Canvas canvas, Size size, Offset Function(Offset) px) {
-    if (shots.isEmpty) return;
-    final r = max(9.0, size.width * 0.032);
-
-    // Trail: tee -> shot 1 -> shot 2 -> ...
-    final trail = Path()..moveTo(px(geometry.tee).dx, px(geometry.tee).dy);
-    for (final s in shots) {
-      trail.lineTo(s.x * size.width, s.y * size.height);
-    }
-    canvas.drawPath(
-      trail,
-      Paint()
-        ..color = Colors.white.withValues(alpha: 0.75)
-        ..strokeWidth = max(1.5, size.width * 0.005)
-        ..style = PaintingStyle.stroke,
-    );
-
-    for (var i = 0; i < shots.length; i++) {
-      final s = shots[i];
-      final c = Offset(s.x * size.width, s.y * size.height);
-      final active = i == activeIndex;
-      final fill = s.holed ? Colors.amber.shade700 : Colors.white;
-      if (active) {
-        // Highlight ring around the dragged shot.
-        canvas.drawCircle(
-          c,
-          r + 6,
-          Paint()
-            ..color = Colors.amber.shade600
-            ..strokeWidth = 3
-            ..style = PaintingStyle.stroke,
-        );
-      }
-      canvas.drawCircle(c, r, Paint()..color = fill);
-      canvas.drawCircle(
-        c,
-        r,
-        Paint()
-          ..color = Colors.black87
-          ..strokeWidth = 1.5
-          ..style = PaintingStyle.stroke,
-      );
-      final tp = TextPainter(
-        text: TextSpan(
-          text: s.holed ? '✓' : '${i + 1}',
-          style: TextStyle(
-            color: s.holed ? Colors.white : Colors.black87,
-            fontSize: r * 1.05,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
-    }
+    _paintShots(canvas, size, px(geometry.tee), shots, activeIndex);
   }
 
   @override
@@ -346,26 +269,179 @@ class HoleMapPainter extends CustomPainter {
       oldDelegate.activeIndex != activeIndex;
 }
 
-/// Hole schematic map. The parent must constrain the size (AspectRatio
-/// works well); map taps are handled by the caller.
+/// Pin marker: white stick with a red cup dot. [pinPx] is already in
+/// pixel coordinates. Shared by the procedural and image painters.
+void _paintPin(Canvas canvas, Size size, Offset pinPx) {
+  canvas.drawLine(
+    pinPx + Offset(0, -size.height * 0.035),
+    pinPx,
+    Paint()
+      ..color = Colors.white
+      ..strokeWidth = max(1.5, size.width * 0.004),
+  );
+  canvas.drawCircle(pinPx, max(2.5, size.width * 0.008),
+      Paint()..color = Colors.red.shade700);
+}
+
+/// Tee-box marker: small rounded white rectangle. [teePx] is in pixel
+/// coordinates. Shared by the procedural and image painters.
+void _paintTeeBox(Canvas canvas, Size size, Offset teePx) {
+  canvas.drawRRect(
+    RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: teePx,
+        width: size.width * 0.055,
+        height: size.height * 0.02,
+      ),
+      const Radius.circular(4),
+    ),
+    Paint()..color = Colors.white70,
+  );
+}
+
+/// Shot trail (tee -> shot 1 -> shot 2 -> ...) plus numbered shot
+/// markers. Shared by the procedural and image painters; [teePx] is the
+/// trail start in pixel coordinates.
+void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
+    int? activeIndex) {
+  if (shots.isEmpty) return;
+  final r = max(9.0, size.width * 0.032);
+
+  // Trail: tee -> shot 1 -> shot 2 -> ...
+  final trail = Path()..moveTo(teePx.dx, teePx.dy);
+  for (final s in shots) {
+    trail.lineTo(s.x * size.width, s.y * size.height);
+  }
+  canvas.drawPath(
+    trail,
+    Paint()
+      ..color = Colors.white.withValues(alpha: 0.75)
+      ..strokeWidth = max(1.5, size.width * 0.005)
+      ..style = PaintingStyle.stroke,
+  );
+
+  for (var i = 0; i < shots.length; i++) {
+    final s = shots[i];
+    final c = Offset(s.x * size.width, s.y * size.height);
+    final active = i == activeIndex;
+    final fill = s.holed ? Colors.amber.shade700 : Colors.white;
+    if (active) {
+      // Highlight ring around the dragged shot.
+      canvas.drawCircle(
+        c,
+        r + 6,
+        Paint()
+          ..color = Colors.amber.shade600
+          ..strokeWidth = 3
+          ..style = PaintingStyle.stroke,
+      );
+    }
+    canvas.drawCircle(c, r, Paint()..color = fill);
+    canvas.drawCircle(
+      c,
+      r,
+      Paint()
+        ..color = Colors.black87
+        ..strokeWidth = 1.5
+        ..style = PaintingStyle.stroke,
+    );
+    final tp = TextPainter(
+      text: TextSpan(
+        text: s.holed ? '✓' : '${i + 1}',
+        style: TextStyle(
+          color: s.holed ? Colors.white : Colors.black87,
+          fontSize: r * 1.05,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
+  }
+}
+
+/// Paints a realistic rendered hole image plus numbered shot markers
+/// with a connecting trail from the tee. The image is drawn full-bleed
+/// in the 0..1 coordinate space, identical to the procedural path; pin
+/// and tee markers are drawn at runtime from the manifest's normalized
+/// tee/pin (crisp at any size), never baked into the image.
+class HoleMapImagePainter extends CustomPainter {
+  final HoleMapImage image;
+  final List<Shot> shots;
+
+  /// Index of the shot currently being dragged, if any. It is drawn with
+  /// a highlight ring so the player can see it while their finger is on
+  /// the map.
+  final int? activeIndex;
+
+  HoleMapImagePainter(
+      {required this.image, required this.shots, this.activeIndex});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    Offset px(Offset o) => Offset(o.dx * size.width, o.dy * size.height);
+
+    // Rendered map, full-bleed across the 3:4 viewport.
+    final src = Rect.fromLTWH(
+        0, 0, image.map.width.toDouble(), image.map.height.toDouble());
+    canvas.drawImageRect(image.map, src, Offset.zero & size, Paint());
+
+    // Pin + tee markers, drawn at runtime from the manifest positions.
+    _paintPin(canvas, size, px(image.pin));
+    _paintTeeBox(canvas, size, px(image.tee));
+
+    _paintShots(canvas, size, px(image.tee), shots, activeIndex);
+  }
+
+  @override
+  bool shouldRepaint(covariant HoleMapImagePainter oldDelegate) =>
+      oldDelegate.image != image ||
+      oldDelegate.shots != shots ||
+      oldDelegate.activeIndex != activeIndex;
+}
+
+/// Hole map: either the procedural schematic ([HoleMap]) or a realistic
+/// rendered image ([HoleMap.imaged]). The parent must constrain the size
+/// (AspectRatio works well); map taps are handled by the caller. Both
+/// modes share the 0..1 coordinate space, so shot storage is identical.
 class HoleMap extends StatelessWidget {
-  final HoleMapGeometry geometry;
+  final HoleMapGeometry? geometry;
+  final HoleMapImage? image;
   final List<Shot> shots;
 
   /// Index of the shot being dragged, drawn with a highlight ring.
   final int? activeIndex;
 
+  /// Procedural schematic mode. Always available; also the fallback when
+  /// no rendered image exists (or its assets fail to load).
   const HoleMap(
       {super.key,
       required this.geometry,
       this.shots = const [],
-      this.activeIndex});
+      this.activeIndex})
+      : image = null;
+
+  /// Realistic rendered-image mode. Tee/pin markers come from the image
+  /// itself (manifest tee/pin, drawn at runtime).
+  const HoleMap.imaged(
+      {super.key,
+      required this.image,
+      this.shots = const [],
+      this.activeIndex})
+      : geometry = null;
 
   @override
   Widget build(BuildContext context) {
+    final img = image;
+    if (img != null) {
+      return CustomPaint(
+        painter: HoleMapImagePainter(
+            image: img, shots: shots, activeIndex: activeIndex),
+      );
+    }
     return CustomPaint(
       painter: HoleMapPainter(
-          geometry: geometry, shots: shots, activeIndex: activeIndex),
+          geometry: geometry!, shots: shots, activeIndex: activeIndex),
     );
   }
 }

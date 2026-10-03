@@ -6,6 +6,8 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import 'common.dart';
 import 'hole_map.dart';
+import 'hole_map_image.dart';
+import 'hole_map_manifest.dart';
 
 /// Opt-in shot-by-shot tracking for one hole, as a tall bottom sheet.
 ///
@@ -65,6 +67,11 @@ class _ShotTrackerSheet extends StatefulWidget {
 
 class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
   late final HoleMapGeometry _geometry;
+
+  /// Realistic rendered map when one exists for this hole (see
+  /// [holeMapManifest]); null means the procedural schematic is used.
+  HoleMapImage? _holeImage;
+
   List<Shot> _shots = [];
 
   /// Snapshot of what the server has (set on load and after each
@@ -103,6 +110,17 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
       holeNumber: widget.holeNumber,
       par: widget.par,
     );
+    // Load the realistic map when the manifest has one. A missing or
+    // corrupt asset resolves to null and the procedural schematic stays.
+    final asset =
+        holeMapManifest[widget.courseName]?[widget.holeNumber];
+    if (asset != null) {
+      HoleMapImage.load(asset).then((img) {
+        if (img != null && mounted) {
+          setState(() => _holeImage = img);
+        }
+      });
+    }
     _load();
   }
 
@@ -142,12 +160,20 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     if (_loading || _finished) return;
     x = x.clamp(0.0, 1.0);
     y = y.clamp(0.0, 1.0);
-    final lie = _shots.isEmpty && _geometry.isNearTee(x, y)
-        ? 'tee'
-        : _geometry.lieAt(x, y);
+    final lie = _suggestLie(x, y, firstShot: _shots.isEmpty);
     setState(() {
       _shots = [..._shots, Shot(x: x, y: y, lie: lie)];
     });
+  }
+
+  /// Suggested lie for a map coordinate. In image mode the lie comes
+  /// from the mask (whose tee color yields 'tee'); in procedural mode a
+  /// first shot near the tee marker suggests 'tee'.
+  String _suggestLie(double x, double y, {bool firstShot = false}) {
+    final img = _holeImage;
+    if (img != null) return img.lieAt(x, y);
+    if (firstShot && _geometry.isNearTee(x, y)) return 'tee';
+    return _geometry.lieAt(x, y);
   }
 
   /// The map's own RenderBox, or null if it isn't laid out yet.
@@ -227,7 +253,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     setState(() {
       _shots = [
         ..._shots.sublist(0, idx),
-        _shots[idx].copyWith(x: x, y: y, lie: _geometry.lieAt(x, y)),
+        _shots[idx].copyWith(x: x, y: y, lie: _suggestLie(x, y)),
         ..._shots.sublist(idx + 1),
       ];
     });
@@ -445,24 +471,46 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                 ),
               )
             else
-              GestureDetector(
-                onTapUp: _onTapUp,
-                onPanDown: _onPanDown,
-                onPanUpdate: (d) => _moveDraggedShot(d.globalPosition),
-                onPanEnd: (_) => _endDrag(),
-                onPanCancel: _endDrag,
-                child: AspectRatio(
-                  aspectRatio: 3 / 4,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: HoleMap(
-                      key: _mapKey,
-                      geometry: _geometry,
-                      shots: _shots,
-                      activeIndex: _dragIndex,
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  GestureDetector(
+                    onTapUp: _onTapUp,
+                    onPanDown: _onPanDown,
+                    onPanUpdate: (d) => _moveDraggedShot(d.globalPosition),
+                    onPanEnd: (_) => _endDrag(),
+                    onPanCancel: _endDrag,
+                    child: AspectRatio(
+                      aspectRatio: 3 / 4,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: _holeImage != null
+                            ? HoleMap.imaged(
+                                key: _mapKey,
+                                image: _holeImage!,
+                                shots: _shots,
+                                activeIndex: _dragIndex,
+                              )
+                            : HoleMap(
+                                key: _mapKey,
+                                geometry: _geometry,
+                                shots: _shots,
+                                activeIndex: _dragIndex,
+                              ),
+                      ),
                     ),
                   ),
-                ),
+                  if (_holeImage != null)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text(
+                        '© OpenStreetMap contributors',
+                        textAlign: TextAlign.right,
+                        style:
+                            TextStyle(fontSize: 10, color: Colors.grey),
+                      ),
+                    ),
+                ],
               ),
             if (_finished) ...[
               const SizedBox(height: 8),
