@@ -30,8 +30,12 @@ if [[ ! -x "$SDK_DIR/bin/flutter" ]]; then
   STABLE_VERSION="$(python3 -c "
 import json, urllib.request
 d = json.load(urllib.request.urlopen('https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json', timeout=30))
-print(d['current_release']['stable'])
-" 2>/dev/null || echo "3.38.7")"
+# NOTE: current_release.stable is a commit HASH, not a version number --
+# resolve it through the releases list to get e.g. '3.47.6'.
+stable_hash = d['current_release']['stable']
+m = next(r for r in d['releases'] if r['hash'] == stable_hash)
+print(m['version'])
+" 2>/dev/null || echo "3.47.6")"
   echo "Installing Flutter $STABLE_VERSION ..."
   mkdir -p "$SDK_DIR"
   curl -fsSL -o /tmp/flutter.tar.xz \
