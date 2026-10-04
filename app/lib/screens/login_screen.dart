@@ -2,13 +2,17 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/auth.dart';
 import '../services/api_client.dart';
+import '../util/web_support.dart';
 import '../widgets/common.dart';
+import '../widgets/install_prompt.dart';
 
 /// Login screen: "Login with Discord" via the system browser.
 ///
@@ -45,7 +49,32 @@ class _LoginScreenState extends State<LoginScreen> {
 
   bool get _configured => _clientId.isNotEmpty && _redirectUri.isNotEmpty;
 
+  @override
+  void initState() {
+    super.initState();
+    // Web: surface an OAuth failure the server redirected back with
+    // (#oauth_error=...) and strip it from the URL. Native: no-op.
+    if (kIsWeb) {
+      final err = readWebOAuthError();
+      if (err != null) {
+        clearUrlFragment();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            showSnack(context, 'Discord login failed ($err). Please try again.',
+                error: true);
+          }
+        });
+      }
+    }
+  }
+
   Future<void> _login() async {
+    // Web (PWA): full-page redirect flow — custom URL schemes don't work in
+    // browsers. Native flow below is unchanged.
+    if (kIsWeb) {
+      await _loginWeb();
+      return;
+    }
     setState(() => _busy = true);
     try {
       final redirectUri = _redirectUri;
@@ -87,6 +116,63 @@ class _LoginScreenState extends State<LoginScreen> {
         verifier: verifier,
       );
       await widget.auth.saveToken(token);
+    } catch (e) {
+      if (mounted) showSnack(context, 'Login failed: $e', error: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Web (PWA) Discord login: full-page redirect.
+  ///
+  /// 1. Generate PKCE verifier/challenge + a random state.
+  /// 2. Register {state, code_verifier, client_id, redirect_uri} with the
+  ///    server (the verifier must reach the server without ever appearing
+  ///    in a URL, and the browser must never see a client secret).
+  /// 3. Redirect the tab to Discord. Discord returns to the server's
+  ///    /oauth/web-callback, which exchanges the code and redirects back to
+  ///    the PWA root with #discord_token=... (picked up in main()).
+  Future<void> _loginWeb() async {
+    setState(() => _busy = true);
+    try {
+      final redirectUri = _redirectUri;
+      final clientId = _clientId;
+      if (!redirectUri.startsWith('https://')) {
+        throw Exception(
+          'Web login needs an https redirect URI. Set it in Settings '
+          '(Discord redirect URI).',
+        );
+      }
+
+      final verifier = _generateCodeVerifier();
+      final challenge = _codeChallenge(verifier);
+      final state = _generateCodeVerifier();
+
+      final reg = await http.post(
+        Uri.parse('${widget.settings.baseUrl}/api/oauth/pkce'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'state': state,
+          'code_verifier': verifier,
+          'client_id': clientId,
+          'redirect_uri': redirectUri,
+        }),
+      );
+      if (reg.statusCode != 200) {
+        throw Exception('Could not start web login (${reg.statusCode}).');
+      }
+
+      final authorizeUrl = Uri.https('discord.com', '/oauth2/authorize', {
+        'client_id': clientId,
+        'redirect_uri': redirectUri,
+        'response_type': 'code',
+        'scope': 'identify',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'state': state,
+      });
+      final ok = await launchUrl(authorizeUrl, webOnlyWindowName: '_self');
+      if (!ok) throw Exception('Could not open the Discord login page.');
     } catch (e) {
       if (mounted) showSnack(context, 'Login failed: $e', error: true);
     } finally {
@@ -194,6 +280,9 @@ class _LoginScreenState extends State<LoginScreen> {
                           )),
                   child: const Text('Continue with email instead'),
                 ),
+                const SizedBox(height: 8),
+                // PWA only: "Add to Home Screen" hint. No-op on native.
+                InstallPrompt(settings: widget.settings),
               ],
             ),
           ),

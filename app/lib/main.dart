@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -10,6 +11,7 @@ import 'screens/settings_screen.dart';
 import 'screens/tournaments_screen.dart';
 import 'services/auth.dart';
 import 'services/push.dart';
+import 'util/web_support.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,6 +19,17 @@ void main() async {
   final settings = await SettingsService.load();
   final auth = AuthService(const FlutterSecureStorage());
   await auth.load();
+
+  // Web (PWA): the server's /oauth/web-callback redirects back here with
+  // #discord_token=... in the URL fragment. Pick it up, store it, and strip
+  // it from the address bar before the first frame. Native: no-op.
+  if (kIsWeb) {
+    final webToken = readWebOAuthToken();
+    if (webToken != null && webToken.isNotEmpty) {
+      await auth.saveToken(webToken);
+      clearUrlFragment();
+    }
+  }
 
   runApp(AlpenglowApp(auth: auth, settings: settings));
 }

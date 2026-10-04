@@ -71,6 +71,7 @@ import bcrypt  # noqa: E402
 import jwt  # noqa: E402
 from fastapi import (Depends, FastAPI, HTTPException, Request, Response,
                      status)  # noqa: E402
+from fastapi.responses import FileResponse  # noqa: E402
 from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
 
 
@@ -1125,6 +1126,10 @@ how it is used, and how you can delete it.</p>
   <li><strong>Match play, alt-shot, and casual rounds.</strong> Your
   participation, scores, and win/loss records in match-play, alt-shot, and
   casual rounds.</li>
+  <li><strong>On-device sign-in.</strong> Your sign-in token is kept on your
+  own device (the OS keychain on the mobile app; your browser's local storage
+  on the web version) so you stay signed in. It is never stored on our
+  servers.</li>
 </ul>
 
 <h2>How it is used</h2>
@@ -4327,6 +4332,145 @@ async def player_stats(key: str, user: CurrentUser) -> dict:
         "golfplus_handle": player.get("golfplus_handle"),
     }
     return stats
+
+
+# --------------------------------------------------------------------------
+# PWA (web) hosting + web Discord OAuth
+# --------------------------------------------------------------------------
+# Phase 1 of the PWA distribution path (branch `pwa`). The Flutter web build
+# output is copied to api/static_web/ at build time (see tools/build_pwa.sh;
+# that directory is gitignored and only exists when the web build ran).
+#
+# Everything here is additive: the native app's /oauth/callback bounce and
+# all /api/* routes are registered earlier and take precedence. The catch-all
+# below is deliberately the last route in the file.
+# --------------------------------------------------------------------------
+
+_STATIC_WEB_DIR = Path(__file__).resolve().parent / "static_web"
+
+# In-memory PKCE verifiers for the web OAuth flow: state -> (verifier,
+# client_id, redirect_uri, expires_at). Short-lived; single-process only.
+_oauth_pkce_store: dict[str, tuple[str, str, str, float]] = {}
+
+
+def _pwa_enabled() -> bool:
+    return _STATIC_WEB_DIR.is_dir()
+
+
+def _prune_pkce_store() -> None:
+    now = time.time()
+    for k in [k for k, v in _oauth_pkce_store.items() if v[3] < now]:
+        _oauth_pkce_store.pop(k, None)
+
+
+@app.post("/api/oauth/pkce", include_in_schema=False)
+async def oauth_pkce_register(request: Request) -> dict:
+    """Web login step 1: stash the PKCE verifier server-side, keyed by state.
+
+    The browser can't keep the verifier across the full-page Discord redirect
+    (and must never see a client secret), so the client registers
+    {state, code_verifier, client_id, redirect_uri} here first, then redirects
+    to Discord with that state. /oauth/web-callback consumes it.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+    state = str(body.get("state", ""))
+    verifier = str(body.get("code_verifier", ""))
+    client_id = str(body.get("client_id", ""))
+    redirect_uri = str(body.get("redirect_uri", ""))
+    ok = (
+        re.fullmatch(r"[A-Za-z0-9\-._~]{16,128}", state) is not None
+        and re.fullmatch(r"[A-Za-z0-9\-._~]{43,128}", verifier) is not None
+        and re.fullmatch(r"\d{8,32}", client_id) is not None
+        and redirect_uri.startswith("https://")
+        and len(redirect_uri) < 256
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail="invalid parameters")
+    _prune_pkce_store()
+    _oauth_pkce_store[state] = (verifier, client_id, redirect_uri, time.time() + 600)
+    return {"ok": True}
+
+
+@app.get("/oauth/web-callback", include_in_schema=False)
+async def oauth_web_callback(request: Request):
+    """Web login step 2: Discord redirects here with ?code=&state=.
+
+    Completes the PKCE code exchange server-side (no client secret in the
+    browser, no CORS issue calling discord.com), then redirects back to the
+    PWA root with the Discord access token in the URL fragment (fragments are
+    never sent to the server or leaked via Referer). The app picks it up on
+    startup, stores it, and strips it from the URL.
+    """
+    from fastapi.responses import RedirectResponse
+    from urllib.parse import quote
+
+    qp = request.query_params
+    if qp.get("error"):
+        return RedirectResponse(f"/#oauth_error={quote(qp['error'])}", status_code=302)
+    code = qp.get("code") or ""
+    state = qp.get("state") or ""
+    rec = _oauth_pkce_store.pop(state, None) if state else None
+    if not code or rec is None or rec[3] < time.time():
+        return RedirectResponse("/#oauth_error=expired_or_invalid", status_code=302)
+    verifier, client_id, redirect_uri = rec[0], rec[1], rec[2]
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://discord.com/api/oauth2/token",
+                data={
+                    "client_id": client_id,
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "code_verifier": verifier,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+    except httpx.HTTPError:
+        return RedirectResponse("/#oauth_error=exchange_failed", status_code=302)
+    if resp.status_code != 200:
+        return RedirectResponse("/#oauth_error=exchange_failed", status_code=302)
+    try:
+        token = resp.json().get("access_token") or ""
+    except Exception:
+        token = ""
+    if not token:
+        return RedirectResponse("/#oauth_error=no_token", status_code=302)
+    return RedirectResponse(f"/#discord_token={quote(token, safe='')}", status_code=302)
+
+
+@app.get("/", include_in_schema=False)
+async def pwa_index() -> FileResponse:
+    """Serve the PWA entry point (only when a web build was staged)."""
+    if not _pwa_enabled():
+        raise HTTPException(status_code=404, detail="web app not deployed")
+    return FileResponse(_STATIC_WEB_DIR / "index.html")
+
+
+@app.get("/{pwa_path:path}", include_in_schema=False)
+async def pwa_frontend(pwa_path: str) -> FileResponse:
+    """Serve the PWA's static files + SPA fallback.
+
+    Registered LAST on purpose: every /api/*, /oauth/*, /support, /privacy
+    and /docs route above takes precedence. Reserved prefixes 404 here
+    rather than serving the app shell, so API 404s stay JSON-ish 404s.
+    """
+    if not _pwa_enabled():
+        raise HTTPException(status_code=404, detail="web app not deployed")
+    first = pwa_path.split("/", 1)[0]
+    if first in ("api", "oauth", "support", "privacy", "docs",
+                 "openapi.json", "redoc"):
+        raise HTTPException(status_code=404, detail="not found")
+    target = (_STATIC_WEB_DIR / pwa_path).resolve()
+    if not str(target).startswith(str(_STATIC_WEB_DIR.resolve()) + os.sep):
+        raise HTTPException(status_code=400, detail="bad path")
+    if target.is_file():
+        return FileResponse(target)
+    # SPA fallback: Flutter uses hash routing, so deep links still land here.
+    return FileResponse(_STATIC_WEB_DIR / "index.html")
 
 
 # --------------------------------------------------------------------------

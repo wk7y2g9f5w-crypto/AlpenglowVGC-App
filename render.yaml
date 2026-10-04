@@ -3,7 +3,7 @@ services:
     name: alpenglow-vgc
     runtime: python
     plan: starter
-    buildCommand: "pip install -r api/requirements.txt -r bot/requirements.txt"
+    buildCommand: "pip install -r api/requirements.txt -r bot/requirements.txt && bash tools/build_pwa.sh"
     startCommand: "bash start.sh"
     disk:
       name: vgc-data

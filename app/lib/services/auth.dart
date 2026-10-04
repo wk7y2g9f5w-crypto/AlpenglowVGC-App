@@ -8,6 +8,7 @@ class SettingsService extends ChangeNotifier {
   static const _kClientId = 'discord_client_id';
   static const _kRedirectUri = 'discord_redirect_uri';
   static const _kPushAsked = 'push_permission_asked';
+  static const _kInstallPromptDismissed = 'install_prompt_dismissed';
 
   static const defaultBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -52,6 +53,15 @@ class SettingsService extends ChangeNotifier {
 
   Future<void> setPushPermissionAsked(bool v) async {
     await _prefs.setBool(_kPushAsked, v);
+    notifyListeners();
+  }
+
+  /// True once the user dismissed the PWA "Add to Home Screen" hint (web).
+  bool get installPromptDismissed =>
+      _prefs.getBool(_kInstallPromptDismissed) ?? false;
+
+  Future<void> setInstallPromptDismissed(bool v) async {
+    await _prefs.setBool(_kInstallPromptDismissed, v);
     notifyListeners();
   }
 }

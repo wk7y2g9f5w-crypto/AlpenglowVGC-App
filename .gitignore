@@ -26,3 +26,7 @@ bot/seed/*.db
 # Realistic hole-map pipeline intermediates (derived OSM vectors — never commit).
 # Only rendered images + pipeline code + generated manifest are committed.
 tools/hole-maps/data/
+
+# PWA: Flutter web build output staged for FastAPI static serving (built at
+# deploy time by tools/build_pwa.sh, never committed)
+api/static_web/
