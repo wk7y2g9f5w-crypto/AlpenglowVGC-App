@@ -813,11 +813,12 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     );
   }
 
-  /// Quick buttons relative to par: Eagle(-2), Birdie(-1), Par(0),
-  /// Bogey(+1), Double(+2), Triple(+3).
+  /// Quick buttons relative to par: Albatross(-3), Eagle(-2), Birdie(-1),
+  /// Par(0), Bogey(+1), Double(+2), Triple(+3).
   Widget _parRelativeButtons(int par) {
-    const deltas = [-2, -1, 0, 1, 2, 3];
+    const deltas = [-3, -2, -1, 0, 1, 2, 3];
     const names = {
+      -3: 'Albatross',
       -2: 'Eagle',
       -1: 'Birdie',
       0: 'Par',
