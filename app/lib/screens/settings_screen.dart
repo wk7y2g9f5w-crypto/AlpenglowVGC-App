@@ -6,7 +6,8 @@ import '../services/auth.dart';
 import '../widgets/common.dart';
 import 'crew_management_screen.dart';
 
-/// Settings: API base URL, admin-only Discord OAuth config, logout.
+/// Settings: admin-only connection config (API base URL, Discord OAuth),
+/// notification prefs, privacy/support links, logout.
 /// Non-admins never see the Discord OAuth fields or the crew management row.
 ///
 /// Also hosts the privacy-policy link, the admin-only crew management entry,
@@ -155,20 +156,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          TextField(
-            controller: _baseUrl,
-            decoration: const InputDecoration(
-              labelText: 'API base URL',
-              hintText: 'http://localhost:8420',
-              border: OutlineInputBorder(),
-              helperText: 'Where the Alpenglow VGC backend lives.',
-            ),
-            keyboardType: TextInputType.url,
-            autocorrect: false,
-          ),
-          const SizedBox(height: 16),
-          // Discord OAuth config is admin-only: non-admins don't even see it.
+          // Connection settings are admin-only: non-admins don't even see
+          // them.
           if (_isAdmin) ...[
+            TextField(
+              controller: _baseUrl,
+              decoration: const InputDecoration(
+                labelText: 'API base URL',
+                hintText: 'http://localhost:8420',
+                border: OutlineInputBorder(),
+                helperText: 'Where the Alpenglow VGC backend lives.',
+              ),
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+            ),
+            const SizedBox(height: 16),
             Text(
               'Discord login',
               style: Theme.of(context).textTheme.titleSmall,
