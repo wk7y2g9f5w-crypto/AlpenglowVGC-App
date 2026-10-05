@@ -455,12 +455,14 @@ def _json_list(raw) -> list:
 def utcnow_iso() -> str:    return datetime.now(timezone.utc).isoformat()
 
 
-# Grace window for "upcoming" tee-time lists: a tee time whose start is this
-# many minutes in the past still shows as upcoming, so a round created for
-# 3:30pm doesn't vanish from the list at 3:31pm while people are teeing off.
+# Window for "upcoming" tee-time lists: a tee time whose start is this many
+# minutes in the past still shows as upcoming. A four-man round takes ~2h,
+# and the list entry is the only path to score entry, so tee times must not
+# drop off mid-round. (The original 10-minute grace was for backdating a tee
+# time at setup — creation never rejected past starts, so that still works.)
 # Deliberately NOT applied to get_reminder_due (push reminders must only
 # target future starts).
-_UPCOMING_GRACE_MINUTES = 10
+_UPCOMING_GRACE_MINUTES = 180
 
 
 def upcoming_bound_iso() -> str:
