@@ -304,7 +304,10 @@ void _paintTeeBox(Canvas canvas, Size size, Offset teePx) {
 /// markers. Shared by the procedural and image painters; [teePx] is the
 /// trail start in pixel coordinates.
 void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
-    int? activeIndex) {
+    int? activeIndex,
+    {Offset? pin,
+    double? yardsPerPixel,
+    int? labeledIndex}) {
   if (shots.isEmpty) return;
   final r = max(9.0, size.width * 0.032);
 
@@ -359,6 +362,51 @@ void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
     )..layout();
     tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
   }
+
+  // Live distance-to-pin readout on the labeled shot (the one being
+  // placed or most recently touched). Synced to the shot's position, so
+  // dragging the point updates the number in real time — a check that
+  // the point sits where the player intends. Hidden when the map scale
+  // is unknown.
+  if (pin != null &&
+      yardsPerPixel != null &&
+      labeledIndex != null &&
+      labeledIndex >= 0 &&
+      labeledIndex < shots.length) {
+    final s = shots[labeledIndex];
+    final c = Offset(s.x * size.width, s.y * size.height);
+    final dx = (s.x - pin.dx) * 600;
+    final dy = (s.y - pin.dy) * 800;
+    final yards = (sqrt(dx * dx + dy * dy) * yardsPerPixel).round();
+    final fontSize = max(9.0, size.width * 0.026);
+    final label = TextPainter(
+      text: TextSpan(
+        text: '${yards}y',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: fontSize,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final padX = fontSize * 0.45;
+    final padY = fontSize * 0.25;
+    final labelCenter = c + Offset(0, -(r + fontSize * 1.1));
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: labelCenter,
+          width: label.width + padX * 2,
+          height: label.height + padY * 2,
+        ),
+        Radius.circular(fontSize * 0.55),
+      ),
+      Paint()..color = Colors.amber.shade800.withValues(alpha: 0.92),
+    );
+    label.paint(
+        canvas, labelCenter - Offset(label.width / 2, label.height / 2));
+  }
 }
 
 /// Reference yardage-to-pin labels (e.g. "150"). Drawn only when the
@@ -412,8 +460,14 @@ class HoleMapImagePainter extends CustomPainter {
   /// the map.
   final int? activeIndex;
 
+  /// Index of the shot carrying the live distance-to-pin readout.
+  final int? labeledIndex;
+
   HoleMapImagePainter(
-      {required this.image, required this.shots, this.activeIndex});
+      {required this.image,
+      required this.shots,
+      this.activeIndex,
+      this.labeledIndex});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -431,14 +485,18 @@ class HoleMapImagePainter extends CustomPainter {
     // Reference yardages to the pin (only when the asset has markers).
     _paintYardages(canvas, size, image.yardages);
 
-    _paintShots(canvas, size, px(image.tee), shots, activeIndex);
+    _paintShots(canvas, size, px(image.tee), shots, activeIndex,
+        pin: image.pin,
+        yardsPerPixel: image.yardsPerPixel,
+        labeledIndex: labeledIndex);
   }
 
   @override
   bool shouldRepaint(covariant HoleMapImagePainter oldDelegate) =>
       oldDelegate.image != image ||
       oldDelegate.shots != shots ||
-      oldDelegate.activeIndex != activeIndex;
+      oldDelegate.activeIndex != activeIndex ||
+      oldDelegate.labeledIndex != labeledIndex;
 }
 
 /// Hole map: either the procedural schematic ([HoleMap]) or a realistic
@@ -453,6 +511,11 @@ class HoleMap extends StatelessWidget {
   /// Index of the shot being dragged, drawn with a highlight ring.
   final int? activeIndex;
 
+  /// Index of the shot carrying the live distance-to-pin readout (the
+  /// shot being placed or most recently touched). Null hides the readout.
+  /// Only applies in imaged mode when the asset has a known scale.
+  final int? labeledIndex;
+
   /// Procedural schematic mode. Always available; also the fallback when
   /// no rendered image exists (or its assets fail to load).
   const HoleMap(
@@ -460,7 +523,8 @@ class HoleMap extends StatelessWidget {
       required this.geometry,
       this.shots = const [],
       this.activeIndex})
-      : image = null;
+      : image = null,
+        labeledIndex = null;
 
   /// Realistic rendered-image mode. Tee/pin markers come from the image
   /// itself (manifest tee/pin, drawn at runtime).
@@ -468,7 +532,8 @@ class HoleMap extends StatelessWidget {
       {super.key,
       required this.image,
       this.shots = const [],
-      this.activeIndex})
+      this.activeIndex,
+      this.labeledIndex})
       : geometry = null;
 
   @override
@@ -477,7 +542,10 @@ class HoleMap extends StatelessWidget {
     if (img != null) {
       return CustomPaint(
         painter: HoleMapImagePainter(
-            image: img, shots: shots, activeIndex: activeIndex),
+            image: img,
+            shots: shots,
+            activeIndex: activeIndex,
+            labeledIndex: labeledIndex),
       );
     }
     return CustomPaint(

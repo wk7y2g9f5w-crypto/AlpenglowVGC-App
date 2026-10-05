@@ -32,6 +32,11 @@ class HoleMapImage {
   /// Drawn at runtime; empty for holes without markers.
   final List<YardageMarker> yardages;
 
+  /// Map scale in yards per artwork pixel (artwork is 600x800), copied
+  /// from the manifest asset. Null when unknown — the distance-to-pin
+  /// readout on placed shots is hidden.
+  final double? yardsPerPixel;
+
   final Uint8List _maskRgba;
   final int _maskW;
   final int _maskH;
@@ -41,6 +46,7 @@ class HoleMapImage {
     required this.tee,
     required this.pin,
     required this.yardages,
+    required this.yardsPerPixel,
     required this._maskRgba,
     required this._maskW,
     required this._maskH,
@@ -62,6 +68,7 @@ class HoleMapImage {
         tee: asset.tee,
         pin: asset.pin,
         yardages: asset.yardages,
+        yardsPerPixel: asset.yardsPerPixel,
         maskRgba: rgba.buffer.asUint8List(),
         maskW: mask.width,
         maskH: mask.height,

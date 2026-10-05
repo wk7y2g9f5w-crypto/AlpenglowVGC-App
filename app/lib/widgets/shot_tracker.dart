@@ -440,11 +440,12 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                 ),
               ],
             ),
-            const Text(
+            Text(
               'Tap the map to place each shot\u2019s landing spot. '
               'Drag a placed shot to move it. '
+              '${_holeImage?.yardsPerPixel != null ? 'The amber label shows your latest shot\u2019s distance to the pin. ' : ''}'
               'Shots save automatically when you close.',
-              style: TextStyle(color: Colors.grey, fontSize: 13),
+              style: const TextStyle(color: Colors.grey, fontSize: 13),
             ),
             const SizedBox(height: 8),
             if (_loading)
@@ -490,6 +491,12 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                                 image: _holeImage!,
                                 shots: _shots,
                                 activeIndex: _dragIndex,
+                                // Distance-to-pin readout follows the shot
+                                // being dragged, else the most recent shot.
+                                labeledIndex: _dragIndex ??
+                                    (_shots.isNotEmpty
+                                        ? _shots.length - 1
+                                        : null),
                               )
                             : HoleMap(
                                 key: _mapKey,
