@@ -328,6 +328,29 @@ class CasualFormatsTest(ApiTestCase):
                                         "match_play", "alt_shot"))
 
 
+    # -- starts_at is required ---------------------------------------
+    def test_create_requires_starts_at(self):
+        r = self.client.post(
+            "/api/casual-tee-times", headers=self.h("123"),
+            json={"label": "No date", "course": COURSE, "format": "stroke"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_create_rejects_blank_starts_at(self):
+        r = self.client.post(
+            "/api/casual-tee-times", headers=self.h("123"),
+            json={"label": "Blank date", "course": COURSE,
+                  "starts_at": "  ", "format": "stroke"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_update_cannot_clear_starts_at(self):
+        tt = self._mk_casual("123", {"label": "Sun stroke",
+                                     "format": "stroke"})
+        r = self.client.patch(f"/api/casual-tee-times/{tt['id']}",
+                              headers=self.h("123"),
+                              json={"starts_at": ""})
+        self.assertEqual(r.status_code, 422, r.text)
+
+
 # Unbind the imported base class so pytest does not collect ApiTestCase's whole
 # suite a second time under this module. Each duplicate suite burns another
 # ~50MB of temp DBs in /tmp's 512MB tmpfs and breaks full runs with
