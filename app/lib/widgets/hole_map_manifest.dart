@@ -1,5 +1,16 @@
 import 'dart:ui';
 
+/// One reference yardage marker: a distance to the pin at a fixed map
+/// position. Drawn at runtime (crisp at any size) — never baked into the
+/// image, and never part of the lie mask. All coordinates are normalized
+/// 0..1 in image space (x right, y down).
+class YardageMarker {
+  final Offset offset;
+  final int yards;
+
+  const YardageMarker({required this.offset, required this.yards});
+}
+
 /// One hole's realistic map assets. All coordinates are normalized 0..1 in
 /// image space (x right, y down) — the image is drawn full-bleed in the
 /// 3:4 map viewport, so these map directly onto taps and shot storage.
@@ -17,6 +28,10 @@ class HoleMapAsset {
   /// 'synthetic'. Informational only — rendering quality, not behavior.
   final String source;
 
+  /// Reference yardages to the pin, drawn as subtle labels at runtime.
+  /// Empty for holes without extracted markers — rendering is unchanged.
+  final List<YardageMarker> yardages;
+
   const HoleMapAsset({
     required this.par,
     required this.map,
@@ -24,6 +39,7 @@ class HoleMapAsset {
     required this.tee,
     required this.pin,
     this.source = 'synthetic',
+    this.yardages = const [],
   });
 }
 
@@ -291,23 +307,23 @@ const holeMapManifest = <String, Map<int, HoleMapAsset>>{
   },
   'The Old Course at St Andrews': {
     1: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/1.jpg', mask: 'assets/hole_maps/old-course-st-andrews/1_mask.png', tee: Offset(0.653, 0.898), pin: Offset(0.529, 0.099), source: 'traced'),
-    2: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/2.jpg', mask: 'assets/hole_maps/old-course-st-andrews/2_mask.png', tee: Offset(0.450, 0.658), pin: Offset(0.445, 0.335), source: 'osm'),
-    3: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/3.jpg', mask: 'assets/hole_maps/old-course-st-andrews/3_mask.png', tee: Offset(0.541, 0.920), pin: Offset(0.520, 0.166), source: 'mixed'),
-    4: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/4.jpg', mask: 'assets/hole_maps/old-course-st-andrews/4_mask.png', tee: Offset(0.472, 0.839), pin: Offset(0.472, 0.095), source: 'mixed'),
-    5: HoleMapAsset(par: 5, map: 'assets/hole_maps/old-course-st-andrews/5.jpg', mask: 'assets/hole_maps/old-course-st-andrews/5_mask.png', tee: Offset(0.560, 0.927), pin: Offset(0.560, 0.176), source: 'mixed'),
-    6: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/6.jpg', mask: 'assets/hole_maps/old-course-st-andrews/6_mask.png', tee: Offset(0.549, 0.924), pin: Offset(0.484, 0.188), source: 'osm'),
-    7: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/7.jpg', mask: 'assets/hole_maps/old-course-st-andrews/7_mask.png', tee: Offset(0.616, 0.922), pin: Offset(0.551, 0.225), source: 'osm'),
-    8: HoleMapAsset(par: 3, map: 'assets/hole_maps/old-course-st-andrews/8.jpg', mask: 'assets/hole_maps/old-course-st-andrews/8_mask.png', tee: Offset(0.575, 0.912), pin: Offset(0.575, 0.158), source: 'mixed'),
-    9: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/9.jpg', mask: 'assets/hole_maps/old-course-st-andrews/9_mask.png', tee: Offset(0.488, 0.926), pin: Offset(0.487, 0.208), source: 'osm'),
-    10: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/10.jpg', mask: 'assets/hole_maps/old-course-st-andrews/10_mask.png', tee: Offset(0.493, 0.919), pin: Offset(0.535, 0.157), source: 'osm'),
-    11: HoleMapAsset(par: 3, map: 'assets/hole_maps/old-course-st-andrews/11.jpg', mask: 'assets/hole_maps/old-course-st-andrews/11_mask.png', tee: Offset(0.467, 0.800), pin: Offset(0.467, 0.127), source: 'mixed'),
-    12: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/12.jpg', mask: 'assets/hole_maps/old-course-st-andrews/12_mask.png', tee: Offset(0.497, 0.830), pin: Offset(0.497, 0.107), source: 'mixed'),
-    13: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/13.jpg', mask: 'assets/hole_maps/old-course-st-andrews/13_mask.png', tee: Offset(0.478, 0.923), pin: Offset(0.476, 0.161), source: 'mixed'),
-    14: HoleMapAsset(par: 5, map: 'assets/hole_maps/old-course-st-andrews/14.jpg', mask: 'assets/hole_maps/old-course-st-andrews/14_mask.png', tee: Offset(0.550, 0.921), pin: Offset(0.504, 0.123), source: 'osm'),
-    15: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/15.jpg', mask: 'assets/hole_maps/old-course-st-andrews/15_mask.png', tee: Offset(0.456, 0.821), pin: Offset(0.456, 0.096), source: 'mixed'),
-    16: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/16.jpg', mask: 'assets/hole_maps/old-course-st-andrews/16_mask.png', tee: Offset(0.517, 0.917), pin: Offset(0.517, 0.160), source: 'mixed'),
-    17: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/17.jpg', mask: 'assets/hole_maps/old-course-st-andrews/17_mask.png', tee: Offset(0.375, 0.351), pin: Offset(0.378, 0.214), source: 'mixed'),
-    18: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/18.jpg', mask: 'assets/hole_maps/old-course-st-andrews/18_mask.png', tee: Offset(0.552, 0.888), pin: Offset(0.555, 0.114), source: 'mixed'),
+    2: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/2.jpg', mask: 'assets/hole_maps/old-course-st-andrews/2_mask.png', tee: Offset(0.522, 0.895), pin: Offset(0.510, 0.121), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.390, 0.056), yards: 67), YardageMarker(offset: Offset(0.369, 0.136), yards: 70), YardageMarker(offset: Offset(0.640, 0.165), yards: 67), YardageMarker(offset: Offset(0.381, 0.215), yards: 78)]),
+    3: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/3.jpg', mask: 'assets/hole_maps/old-course-st-andrews/3_mask.png', tee: Offset(0.508, 0.889), pin: Offset(0.502, 0.108), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.435, 0.055), yards: 44), YardageMarker(offset: Offset(0.385, 0.145), yards: 63), YardageMarker(offset: Offset(0.599, 0.227), yards: 79)]),
+    4: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/4.jpg', mask: 'assets/hole_maps/old-course-st-andrews/4_mask.png', tee: Offset(0.503, 0.895), pin: Offset(0.498, 0.109), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.406, 0.068), yards: 52), YardageMarker(offset: Offset(0.395, 0.128), yards: 54), YardageMarker(offset: Offset(0.582, 0.138), yards: 46), YardageMarker(offset: Offset(0.419, 0.205), yards: 64)]),
+    5: HoleMapAsset(par: 5, map: 'assets/hole_maps/old-course-st-andrews/5.jpg', mask: 'assets/hole_maps/old-course-st-andrews/5_mask.png', tee: Offset(0.549, 0.902), pin: Offset(0.513, 0.116), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.429, 0.106), yards: 56), YardageMarker(offset: Offset(0.448, 0.163), yards: 53), YardageMarker(offset: Offset(0.436, 0.195), yards: 73)]),
+    6: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/6.jpg', mask: 'assets/hole_maps/old-course-st-andrews/6_mask.png', tee: Offset(0.570, 0.900), pin: Offset(0.555, 0.116), source: 'traced'),
+    7: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/7.jpg', mask: 'assets/hole_maps/old-course-st-andrews/7_mask.png', tee: Offset(0.703, 0.914), pin: Offset(0.425, 0.175), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.313, 0.265), yards: 50)]),
+    8: HoleMapAsset(par: 3, map: 'assets/hole_maps/old-course-st-andrews/8.jpg', mask: 'assets/hole_maps/old-course-st-andrews/8_mask.png', tee: Offset(0.462, 0.847), pin: Offset(0.508, 0.206), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.317, 0.299), yards: 62), YardageMarker(offset: Offset(0.495, 0.329), yards: 36)]),
+    9: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/9.jpg', mask: 'assets/hole_maps/old-course-st-andrews/9_mask.png', tee: Offset(0.510, 0.912), pin: Offset(0.507, 0.198), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.401, 0.164), yards: 49), YardageMarker(offset: Offset(0.404, 0.232), yards: 48), YardageMarker(offset: Offset(0.511, 0.250), yards: 23)]),
+    10: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/10.jpg', mask: 'assets/hole_maps/old-course-st-andrews/10_mask.png', tee: Offset(0.480, 0.914), pin: Offset(0.487, 0.165), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.570, 0.081), yards: 51), YardageMarker(offset: Offset(0.608, 0.221), yards: 57)]),
+    11: HoleMapAsset(par: 3, map: 'assets/hole_maps/old-course-st-andrews/11.jpg', mask: 'assets/hole_maps/old-course-st-andrews/11_mask.png', tee: Offset(0.469, 0.873), pin: Offset(0.490, 0.150), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.258, 0.222), yards: 55), YardageMarker(offset: Offset(0.539, 0.204), yards: 16), YardageMarker(offset: Offset(0.655, 0.287), yards: 48)]),
+    12: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/12.jpg', mask: 'assets/hole_maps/old-course-st-andrews/12_mask.png', tee: Offset(0.495, 0.884), pin: Offset(0.495, 0.141), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.491, 0.199), yards: 23)]),
+    13: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/13.jpg', mask: 'assets/hole_maps/old-course-st-andrews/13_mask.png', tee: Offset(0.494, 0.917), pin: Offset(0.495, 0.152), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.614, 0.087), yards: 75), YardageMarker(offset: Offset(0.591, 0.123), yards: 55), YardageMarker(offset: Offset(0.578, 0.199), yards: 53)]),
+    14: HoleMapAsset(par: 5, map: 'assets/hole_maps/old-course-st-andrews/14.jpg', mask: 'assets/hole_maps/old-course-st-andrews/14_mask.png', tee: Offset(0.480, 0.805), pin: Offset(0.529, 0.159), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.400, 0.079), yards: 111), YardageMarker(offset: Offset(0.598, 0.079), yards: 77), YardageMarker(offset: Offset(0.386, 0.156), yards: 104)]),
+    15: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/15.jpg', mask: 'assets/hole_maps/old-course-st-andrews/15_mask.png', tee: Offset(0.528, 0.836), pin: Offset(0.537, 0.181), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.458, 0.112), yards: 62), YardageMarker(offset: Offset(0.391, 0.174), yards: 87)]),
+    16: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/16.jpg', mask: 'assets/hole_maps/old-course-st-andrews/16_mask.png', tee: Offset(0.518, 0.761), pin: Offset(0.530, 0.130), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.390, 0.070), yards: 85), YardageMarker(offset: Offset(0.390, 0.124), yards: 79), YardageMarker(offset: Offset(0.390, 0.170), yards: 82)]),
+    17: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/17.jpg', mask: 'assets/hole_maps/old-course-st-andrews/17_mask.png', tee: Offset(0.531, 0.827), pin: Offset(0.540, 0.128), source: 'traced', yardages: const [YardageMarker(offset: Offset(0.441, 0.114), yards: 60), YardageMarker(offset: Offset(0.394, 0.199), yards: 97)]),
+    18: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/18.jpg', mask: 'assets/hole_maps/old-course-st-andrews/18_mask.png', tee: Offset(0.447, 0.883), pin: Offset(0.447, 0.114), source: 'traced'),
   },
   'The Riviera Country Club': {
     1: HoleMapAsset(par: 5, map: 'assets/hole_maps/riviera-country-club/1.jpg', mask: 'assets/hole_maps/riviera-country-club/1_mask.png', tee: Offset(0.465, 0.848), pin: Offset(0.463, 0.193), source: 'osm'),

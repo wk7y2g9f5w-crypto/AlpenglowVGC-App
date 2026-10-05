@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/models.dart';
 import 'hole_map_image.dart';
+import 'hole_map_manifest.dart';
 
 /// Stylized, procedurally drawn hole schematic for shot tracking.
 ///
@@ -360,6 +361,43 @@ void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
   }
 }
 
+/// Reference yardage-to-pin labels (e.g. "150"). Drawn only when the
+/// manifest asset carries markers; holes without markers render exactly
+/// as before. Visual only — markers never affect taps or lie detection.
+void _paintYardages(
+    Canvas canvas, Size size, List<YardageMarker> yardages) {
+  if (yardages.isEmpty) return;
+  final fontSize = max(9.0, size.width * 0.026);
+  for (final m in yardages) {
+    final c = Offset(m.offset.dx * size.width, m.offset.dy * size.height);
+    final tp = TextPainter(
+      text: TextSpan(
+        text: '${m.yards}',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: fontSize,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final padX = fontSize * 0.45;
+    final padY = fontSize * 0.25;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: c,
+          width: tp.width + padX * 2,
+          height: tp.height + padY * 2,
+        ),
+        Radius.circular(fontSize * 0.55),
+      ),
+      Paint()..color = Colors.black.withValues(alpha: 0.62),
+    );
+    tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
+  }
+}
+
 /// Paints a realistic rendered hole image plus numbered shot markers
 /// with a connecting trail from the tee. The image is drawn full-bleed
 /// in the 0..1 coordinate space, identical to the procedural path; pin
@@ -389,6 +427,9 @@ class HoleMapImagePainter extends CustomPainter {
     // Pin + tee markers, drawn at runtime from the manifest positions.
     _paintPin(canvas, size, px(image.pin));
     _paintTeeBox(canvas, size, px(image.tee));
+
+    // Reference yardages to the pin (only when the asset has markers).
+    _paintYardages(canvas, size, image.yardages);
 
     _paintShots(canvas, size, px(image.tee), shots, activeIndex);
   }
