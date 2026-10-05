@@ -1,9 +1,10 @@
-"""API tests for the upcoming-list grace window.
+"""API tests for the upcoming-list window.
 
 list_casual_tee_times, list_altshot_tee_times, and list_matchplay_tee_times
-treat a start up to 10 minutes in the past as still upcoming, so a tee time
-created for 3:30pm doesn't vanish from the app's lists at 3:31pm while the
-round is being played.
+treat a start up to 3 hours in the past as still upcoming. A four-man round
+takes ~2h and the list entry is the only path to score entry, so tee times
+must not drop off mid-round. (Backdating a tee time up to 10 minutes at
+setup still works — creation never rejected past starts.)
 
 Uses the ApiTestCase harness from test_api.py (fresh temp DB per test).
 """
@@ -65,12 +66,12 @@ class UpcomingGraceTest(ApiTestCase):
         return [t["id"] for t in r.json()["tee_times"]]
 
     # -- casual -------------------------------------------------------
-    def test_casual_5_min_past_is_listed(self):
-        tt_id = self._mk_casual("123", _starts_at(-5))
+    def test_casual_2h_past_is_listed(self):
+        tt_id = self._mk_casual("123", _starts_at(-120))
         self.assertIn(tt_id, self._casual_ids("123"))
 
-    def test_casual_11_min_past_is_not_listed(self):
-        tt_id = self._mk_casual("123", _starts_at(-11))
+    def test_casual_3h1m_past_is_not_listed(self):
+        tt_id = self._mk_casual("123", _starts_at(-181))
         self.assertNotIn(tt_id, self._casual_ids("123"))
 
     def test_casual_future_still_listed(self):
@@ -78,21 +79,21 @@ class UpcomingGraceTest(ApiTestCase):
         self.assertIn(tt_id, self._casual_ids("123"))
 
     # -- matchplay ----------------------------------------------------
-    def test_matchplay_5_min_past_is_listed(self):
-        tt_id = self._mk_matchplay("123", _starts_at(-5))
+    def test_matchplay_2h_past_is_listed(self):
+        tt_id = self._mk_matchplay("123", _starts_at(-120))
         self.assertIn(tt_id, self._matchplay_ids("123"))
 
-    def test_matchplay_11_min_past_is_not_listed(self):
-        tt_id = self._mk_matchplay("123", _starts_at(-11))
+    def test_matchplay_3h1m_past_is_not_listed(self):
+        tt_id = self._mk_matchplay("123", _starts_at(-181))
         self.assertNotIn(tt_id, self._matchplay_ids("123"))
 
     # -- altshot ------------------------------------------------------
-    def test_altshot_5_min_past_is_listed(self):
-        tt_id = self._mk_altshot("123", _starts_at(-5))
+    def test_altshot_2h_past_is_listed(self):
+        tt_id = self._mk_altshot("123", _starts_at(-120))
         self.assertIn(tt_id, self._altshot_ids("123"))
 
-    def test_altshot_11_min_past_is_not_listed(self):
-        tt_id = self._mk_altshot("123", _starts_at(-11))
+    def test_altshot_3h1m_past_is_not_listed(self):
+        tt_id = self._mk_altshot("123", _starts_at(-181))
         self.assertNotIn(tt_id, self._altshot_ids("123"))
 
 
