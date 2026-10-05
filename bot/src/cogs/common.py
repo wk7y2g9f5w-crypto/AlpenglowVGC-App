@@ -139,6 +139,42 @@ async def require_strict_admin(interaction: discord.Interaction) -> bool:
     return False
 
 
+# Commands that may only be invoked from a designated channel, mapped by
+# command key -> required channel name. The gate is strict: when the guild
+# has no channel with that name, the command is refused with an error naming
+# the channel (the server isn't set up for it) rather than running elsewhere.
+DESIGNATED_CHANNELS: dict[str, str] = {
+    "tee_sheet": "tee-sheet",
+}
+
+
+async def require_designated_channel(
+    interaction: discord.Interaction, command_key: str
+) -> bool:
+    """True when the interaction ran in the command's designated channel.
+
+    Otherwise sends an ephemeral error naming the required channel and
+    returns False, so a designated command never goes through from the
+    wrong place — including a guild that lacks the channel entirely.
+    """
+    channel_name = DESIGNATED_CHANNELS.get(command_key)
+    if channel_name is None:
+        return True
+    guild = interaction.guild
+    target = (
+        discord.utils.get(guild.text_channels, name=channel_name)
+        if guild is not None
+        else None
+    )
+    if target is None or interaction.channel_id != target.id:
+        await interaction.response.send_message(
+            f"❌ This command can only be used in #{channel_name}.",
+            ephemeral=True,
+        )
+        return False
+    return True
+
+
 def _db_path(interaction: discord.Interaction) -> str:
     return interaction.client.db_path
 

@@ -129,7 +129,7 @@ ADMIN_COMMANDS: list[tuple[str, str, str]] = [
      "Close the season and post final standings."),
     ("Seasons & boards",
      "/tee_sheet post",
-     "Post the auto-updating registration + tee-time boards in this channel."),
+     "Post the auto-updating registration + tee-time boards (must run in #tee-sheet)."),
     ("Seasons & boards",
      "/tee_sheet refresh",
      "Refresh the Tee Sheet boards right now."),
