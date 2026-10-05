@@ -92,6 +92,24 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
   /// Index of the shot currently being dragged, or null.
   int? _dragIndex;
 
+  /// Pinch-zoom state. [_scale] is the uniform zoom (1 = whole hole);
+  /// [_translate] is the pan offset in viewport pixels, applied with the
+  /// transform origin at the top-left so scene point p lands at
+  /// p * _scale + _translate.
+  double _scale = 1.0;
+  Offset _translate = Offset.zero;
+  static const double _minScale = 1.0;
+  static const double _maxScale = 4.0;
+
+  /// Baseline captured at scale-gesture start for the pinch/pan math.
+  Offset _focalStart = Offset.zero;
+  double _baseScale = 1.0;
+  Offset _baseTranslate = Offset.zero;
+
+  /// Key on the map viewport (the AspectRatio) for focal-point math in
+  /// [_onScaleUpdate].
+  final GlobalKey _viewportKey = GlobalKey();
+
   /// A press starting within this many logical pixels of a placed shot
   /// drags that shot instead of adding a new one.
   static const double _touchSlopPx = 24.0;
@@ -187,15 +205,25 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
 
   /// Convert a global pointer position to 0..1 map coordinates using the
   /// map's actual rendered size. The painter draws the 0..1 geometry
-  /// across the full canvas with no letterboxing, so this is the exact
-  /// inverse of the paint transform.
+  /// across the full canvas with no letterboxing, and the pinch-zoom
+  /// Transform sits above the map in the tree, so globalToLocal inverts
+  /// the zoom/pan automatically — this stays the exact inverse of the
+  /// paint transform at any zoom level.
   Offset? _toMapCoords(Offset globalPosition) {
     final box = _mapBox();
     if (box == null) return null;
     final local = box.globalToLocal(globalPosition);
+    // When zoomed and panned, taps can land on the empty margin around
+    // the map — ignore those instead of clamping to the map edge.
+    if (local.dx < 0 ||
+        local.dy < 0 ||
+        local.dx > box.size.width ||
+        local.dy > box.size.height) {
+      return null;
+    }
     return Offset(
-      (local.dx / box.size.width).clamp(0.0, 1.0),
-      (local.dy / box.size.height).clamp(0.0, 1.0),
+      local.dx / box.size.width,
+      local.dy / box.size.height,
     );
   }
 
@@ -206,7 +234,9 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     if (box == null || _shots.isEmpty) return null;
     final local = box.globalToLocal(globalPosition);
     int? best;
-    var bestDist = _touchSlopPx;
+    // The slop is a screen-space constant but the comparison happens in
+    // scene (unzoomed) pixels, so shrink it as the map zooms in.
+    var bestDist = _touchSlopPx / _scale;
     for (var i = 0; i < _shots.length; i++) {
       final p = Offset(
           _shots[i].x * box.size.width, _shots[i].y * box.size.height);
@@ -229,14 +259,62 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     _addShot(coords.dx, coords.dy);
   }
 
-  /// Press down: if it starts on a placed shot, that shot becomes the
-  /// drag target (this also freezes sheet scrolling for the gesture).
-  void _onPanDown(DragDownDetails d) {
+  /// Scale-gesture start: a single-finger press landing on a placed shot
+  /// makes that shot the drag target (this also freezes sheet scrolling
+  /// for the gesture, as before); anything else starts a map pan/zoom.
+  void _onScaleStart(ScaleStartDetails d) {
     if (_loading || _finished) return;
-    final idx = _shotNear(d.globalPosition);
-    if (idx != null) {
-      setState(() => _dragIndex = idx);
+    _focalStart = d.focalPoint;
+    _baseScale = _scale;
+    _baseTranslate = _translate;
+    if (d.pointerCount == 1) {
+      final idx = _shotNear(d.focalPoint);
+      if (idx != null) {
+        setState(() => _dragIndex = idx);
+      }
     }
+  }
+
+  /// Scale-gesture update: either move the dragged shot, or pan/zoom the
+  /// map. The pinch math keeps the content point that was under the
+  /// starting focal point fixed, so a one-finger drag pans and a
+  /// two-finger pinch zooms around the fingers.
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    if (_loading || _finished) return;
+    if (_dragIndex != null) {
+      _moveDraggedShot(d.focalPoint);
+      return;
+    }
+    final obj = _viewportKey.currentContext?.findRenderObject();
+    if (obj is! RenderBox || !obj.hasSize) return;
+    final f0 = obj.globalToLocal(_focalStart);
+    final f = obj.globalToLocal(d.focalPoint);
+    final s = (_baseScale * d.scale).clamp(_minScale, _maxScale);
+    final content = (f0 - _baseTranslate) / _baseScale;
+    var t = f - content * s;
+    // Clamp the pan so the map can never leave the viewport.
+    final w = obj.size.width;
+    final h = obj.size.height;
+    t = Offset(
+      t.dx.clamp(w - w * s, 0.0),
+      t.dy.clamp(h - h * s, 0.0),
+    );
+    setState(() {
+      _scale = s;
+      _translate = t;
+    });
+  }
+
+  void _onScaleEnd(ScaleEndDetails _) {
+    _endDrag();
+  }
+
+  /// Reset pinch-zoom back to the whole-hole view.
+  void _resetZoom() {
+    setState(() {
+      _scale = _minScale;
+      _translate = Offset.zero;
+    });
   }
 
   /// Drag move: reposition the dragged shot, lifted above the fingertip
@@ -249,7 +327,9 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     if (box == null) return;
     final local = box.globalToLocal(globalPosition);
     final x = (local.dx / box.size.width).clamp(0.0, 1.0);
-    final y = ((local.dy - _dragLiftPx) / box.size.height).clamp(0.0, 1.0);
+    // The lift is a screen-space constant; local is in scene pixels.
+    final y =
+        ((local.dy - _dragLiftPx / _scale) / box.size.height).clamp(0.0, 1.0);
     setState(() {
       _shots = [
         ..._shots.sublist(0, idx),
@@ -443,6 +523,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
             Text(
               'Tap the map to place each shot\u2019s landing spot. '
               'Drag a placed shot to move it. '
+              'Pinch to zoom in for precise placement. '
               '${_holeImage?.yardsPerPixel != null ? 'The amber label shows your latest shot\u2019s distance to the pin. ' : ''}'
               'Shots save automatically when you close.',
               style: const TextStyle(color: Colors.grey, fontSize: 13),
@@ -475,37 +556,66 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  GestureDetector(
-                    onTapUp: _onTapUp,
-                    onPanDown: _onPanDown,
-                    onPanUpdate: (d) => _moveDraggedShot(d.globalPosition),
-                    onPanEnd: (_) => _endDrag(),
-                    onPanCancel: _endDrag,
-                    child: AspectRatio(
-                      aspectRatio: 3 / 4,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: _holeImage != null
-                            ? HoleMap.imaged(
-                                key: _mapKey,
-                                image: _holeImage!,
-                                shots: _shots,
-                                activeIndex: _dragIndex,
-                                // Distance-to-pin readout follows the shot
-                                // being dragged, else the most recent shot.
-                                labeledIndex: _dragIndex ??
-                                    (_shots.isNotEmpty
-                                        ? _shots.length - 1
-                                        : null),
-                              )
-                            : HoleMap(
-                                key: _mapKey,
-                                geometry: _geometry,
-                                shots: _shots,
-                                activeIndex: _dragIndex,
-                              ),
+                  Stack(
+                    children: [
+                      GestureDetector(
+                        onTapUp: _onTapUp,
+                        onScaleStart: _onScaleStart,
+                        onScaleUpdate: _onScaleUpdate,
+                        onScaleEnd: _onScaleEnd,
+                        child: AspectRatio(
+                          key: _viewportKey,
+                          aspectRatio: 3 / 4,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Transform(
+                              transform: Matrix4.identity()
+                                ..translate(
+                                    _translate.dx, _translate.dy)
+                                ..scale(_scale),
+                              alignment: Alignment.topLeft,
+                              child: _holeImage != null
+                                  ? HoleMap.imaged(
+                                      key: _mapKey,
+                                      image: _holeImage!,
+                                      shots: _shots,
+                                      activeIndex: _dragIndex,
+                                      // Distance-to-pin readout follows the shot
+                                      // being dragged, else the most recent shot.
+                                      labeledIndex: _dragIndex ??
+                                          (_shots.isNotEmpty
+                                              ? _shots.length - 1
+                                              : null),
+                                    )
+                                  : HoleMap(
+                                      key: _mapKey,
+                                      geometry: _geometry,
+                                      shots: _shots,
+                                      activeIndex: _dragIndex,
+                                    ),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
+                      // Reset-zoom button, shown only while zoomed. It
+                      // lives outside the GestureDetector so tapping it
+                      // can never place a shot.
+                      if (_scale > _minScale + 0.01)
+                        Positioned(
+                          right: 8,
+                          bottom: 8,
+                          child: Material(
+                            color: Colors.black54,
+                            shape: const CircleBorder(),
+                            child: IconButton(
+                              icon: const Icon(Icons.zoom_out_map,
+                                  color: Colors.white, size: 20),
+                              tooltip: 'Reset zoom',
+                              onPressed: _resetZoom,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                   if (_holeImage != null)
                     const Padding(
