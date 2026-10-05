@@ -5,7 +5,7 @@ from discord.ext import commands
 
 from src import db
 from src import teesheet as ts
-from src.cogs.common import require_admin
+from src.cogs.common import require_admin, require_designated_channel
 
 
 class TeeSheet(commands.Cog):
@@ -17,9 +17,11 @@ class TeeSheet(commands.Cog):
     )
 
     @teesheet_group.command(
-        name="post", description="Post the Tee Sheet boards in this channel (admin)"
+        name="post", description="Post the Tee Sheet boards (admin, #tee-sheet only)"
     )
     async def teesheet_post(self, interaction: discord.Interaction):
+        if not await require_designated_channel(interaction, "tee_sheet"):
+            return
         if not await require_admin(interaction):
             return
         await interaction.response.defer(ephemeral=True)
@@ -41,6 +43,8 @@ class TeeSheet(commands.Cog):
         name="refresh", description="Refresh the Tee Sheet boards now (admin)"
     )
     async def teesheet_refresh(self, interaction: discord.Interaction):
+        if not await require_designated_channel(interaction, "tee_sheet"):
+            return
         if not await require_admin(interaction):
             return
         await interaction.response.defer(ephemeral=True)
