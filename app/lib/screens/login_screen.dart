@@ -3,6 +3,8 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:http/http.dart' as http;
 
@@ -347,9 +349,37 @@ class _EmailAuthScreenState extends State<EmailAuthScreen> {
   bool _createAccount = false;
   bool _busy = false;
   bool _obscure = true;
+  bool _rememberMe = false;
   final _email = TextEditingController();
   final _password = TextEditingController();
   final _name = TextEditingController();
+
+  // "Remember me" credentials, kept in the platform secure store
+  // (Keychain on iOS, EncryptedSharedPreferences on Android).
+  static const _storage = FlutterSecureStorage();
+  static const _kSavedEmail = 'email_remember_email';
+  static const _kSavedPassword = 'email_remember_password';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedCredentials();
+  }
+
+  Future<void> _loadSavedCredentials() async {
+    final email = await _storage.read(key: _kSavedEmail);
+    final password = await _storage.read(key: _kSavedPassword);
+    if (!mounted) return;
+    if (email != null && email.isNotEmpty) {
+      setState(() {
+        _email.text = email;
+        if (password != null && password.isNotEmpty) {
+          _password.text = password;
+        }
+        _rememberMe = true;
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -389,6 +419,14 @@ class _EmailAuthScreenState extends State<EmailAuthScreen> {
       final token = result['token']?.toString() ?? '';
       if (token.isEmpty) throw Exception('No token returned.');
       await widget.auth.saveToken(token);
+      if (_rememberMe) {
+        await _storage.write(key: _kSavedEmail, value: email);
+        await _storage.write(key: _kSavedPassword, value: password);
+      } else {
+        await _storage.delete(key: _kSavedEmail);
+        await _storage.delete(key: _kSavedPassword);
+      }
+      TextInput.finishAutofillContext();
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
       if (mounted) {
@@ -406,73 +444,95 @@ class _EmailAuthScreenState extends State<EmailAuthScreen> {
       appBar: AppBar(
           title: Text(_createAccount ? 'Create account' : 'Sign in with email')),
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(24),
-          children: [
-            TextField(
-              controller: _email,
-              decoration: const InputDecoration(
-                labelText: 'Email',
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.emailAddress,
-              autocorrect: false,
-              enableSuggestions: false,
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _password,
-              decoration: InputDecoration(
-                labelText: 'Password',
-                border: const OutlineInputBorder(),
-                suffixIcon: IconButton(
-                  icon: Icon(
-                      _obscure ? Icons.visibility : Icons.visibility_off),
-                  onPressed: () => setState(() => _obscure = !_obscure),
-                ),
-              ),
-              obscureText: _obscure,
-              enableSuggestions: false,
-              autocorrect: false,
-            ),
-            if (_createAccount) ...[
-              const SizedBox(height: 12),
+        child: AutofillGroup(
+          child: ListView(
+            padding: const EdgeInsets.all(24),
+            children: [
               TextField(
-                controller: _name,
+                controller: _email,
                 decoration: const InputDecoration(
-                  labelText: 'Display name (optional)',
-                  hintText: 'Shown on leaderboards',
+                  labelText: 'Email',
                   border: OutlineInputBorder(),
                 ),
+                keyboardType: TextInputType.emailAddress,
+                autocorrect: false,
+                enableSuggestions: false,
+                autofillHints: const [
+                  AutofillHints.username,
+                  AutofillHints.email
+                ],
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _password,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                        _obscure ? Icons.visibility : Icons.visibility_off),
+                    onPressed: () => setState(() => _obscure = !_obscure),
+                  ),
+                ),
+                obscureText: _obscure,
+                enableSuggestions: false,
+                autocorrect: false,
+                autofillHints: [
+                  if (_createAccount)
+                    AutofillHints.newPassword
+                  else
+                    AutofillHints.password
+                ],
+              ),
+              if (_createAccount) ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _name,
+                  decoration: const InputDecoration(
+                    labelText: 'Display name (optional)',
+                    hintText: 'Shown on leaderboards',
+                    border: OutlineInputBorder(),
+                  ),
+                  autofillHints: const [AutofillHints.name],
+                ),
+              ],
+              CheckboxListTile(
+                value: _rememberMe,
+                onChanged: (v) => setState(() => _rememberMe = v ?? false),
+                title: const Text('Remember me on this device'),
+                subtitle: const Text(
+                    'Saves your email and password securely for next time.'),
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _busy ? null : _submit,
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: _busy
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Text(_createAccount ? 'Create account' : 'Sign in'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: _busy
+                    ? null
+                    : () => setState(() => _createAccount = !_createAccount),
+                child: Text(_createAccount
+                    ? 'Already have an account? Sign in'
+                    : 'New here? Create an account'),
               ),
             ],
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _busy ? null : _submit,
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-                child: _busy
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Text(_createAccount ? 'Create account' : 'Sign in'),
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: _busy
-                  ? null
-                  : () => setState(() => _createAccount = !_createAccount),
-              child: Text(_createAccount
-                  ? 'Already have an account? Sign in'
-                  : 'New here? Create an account'),
-            ),
-          ],
+          ),
         ),
       ),
     );
