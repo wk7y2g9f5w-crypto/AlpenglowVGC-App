@@ -339,12 +339,19 @@ class Shot {
   final String lie;
   final bool holed;
 
+  /// Putt count recorded on a green shot instead of tapping one point per
+  /// putt. 0 means "not a putt-counted shot". When > 0 the shot is always
+  /// the hole's last shot and holed is true (the counted putts finish the
+  /// hole); a 0-putt hole-out (ace, chip-in) is holed with putts == 0.
+  final int putts;
+
   const Shot({
     this.seq,
     required this.x,
     required this.y,
     required this.lie,
     this.holed = false,
+    this.putts = 0,
   });
 
   factory Shot.fromJson(Map<String, dynamic> j) => Shot(
@@ -353,6 +360,7 @@ class Shot {
         y: (j['y'] as num).toDouble(),
         lie: (j['lie'] ?? 'rough').toString(),
         holed: j['holed'] == true,
+        putts: (j['putts'] as num?)?.toInt() ?? 0,
       );
 
   /// Payload for PUT /api/scorecards/{id}/holes/{hole}/shots — the server
@@ -362,14 +370,17 @@ class Shot {
         'y': y,
         'lie': lie,
         'holed': holed,
+        'putts': putts,
       };
 
-  Shot copyWith({double? x, double? y, String? lie, bool? holed}) => Shot(
+  Shot copyWith({double? x, double? y, String? lie, bool? holed, int? putts}) =>
+      Shot(
         seq: seq,
         x: x ?? this.x,
         y: y ?? this.y,
         lie: lie ?? this.lie,
         holed: holed ?? this.holed,
+        putts: putts ?? this.putts,
       );
 
   /// Value equality on the tracked content. `seq` is deliberately excluded:
@@ -382,10 +393,11 @@ class Shot {
           x == other.x &&
           y == other.y &&
           lie == other.lie &&
-          holed == other.holed;
+          holed == other.holed &&
+          putts == other.putts;
 
   @override
-  int get hashCode => Object.hash(x, y, lie, holed);
+  int get hashCode => Object.hash(x, y, lie, holed, putts);
 }
 
 /// Honest shot-tracking stats for one player, from

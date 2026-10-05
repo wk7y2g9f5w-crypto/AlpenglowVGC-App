@@ -179,8 +179,16 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     x = x.clamp(0.0, 1.0);
     y = y.clamp(0.0, 1.0);
     final lie = _suggestLie(x, y, firstShot: _shots.isEmpty);
+    // A tap on the green records the one position plus a putt count
+    // (default 2) instead of one point per putt — the counted putts
+    // finish the hole. Set 0 for a holed-out (ace); "Holed it" stays
+    // for hole-outs from off the green.
+    final onGreen = lie == 'green';
     setState(() {
-      _shots = [..._shots, Shot(x: x, y: y, lie: lie)];
+      _shots = [
+        ..._shots,
+        Shot(x: x, y: y, lie: lie, putts: onGreen ? 2 : 0, holed: onGreen)
+      ];
     });
   }
 
@@ -259,20 +267,29 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     _addShot(coords.dx, coords.dy);
   }
 
-  /// Scale-gesture start: a single-finger press landing on a placed shot
-  /// makes that shot the drag target (this also freezes sheet scrolling
-  /// for the gesture, as before); anything else starts a map pan/zoom.
+  /// Synchronous pointer-down (a Listener, not a gesture recognizer, so
+  /// it fires at contact — before the gesture arena resolves). A press
+  /// starting on a placed shot makes that shot the drag target; setting
+  /// _dragIndex here also freezes sheet scrolling before the arena can
+  /// award the gesture to the scroll view. (onScaleStart is too late for
+  /// this: it only fires once the scale gesture is accepted, by which
+  /// point the finger has moved off the shot or scrolling has won.)
+  void _onPointerDown(PointerDownEvent e) {
+    if (_loading || _finished) return;
+    if (_dragIndex != null) return;
+    final idx = _shotNear(e.position);
+    if (idx != null) {
+      setState(() => _dragIndex = idx);
+    }
+  }
+
+  /// Scale-gesture start: capture the pinch/pan baseline. Drag-target
+  /// selection happens in [_onPointerDown], which runs earlier.
   void _onScaleStart(ScaleStartDetails d) {
     if (_loading || _finished) return;
     _focalStart = d.focalPoint;
     _baseScale = _scale;
     _baseTranslate = _translate;
-    if (d.pointerCount == 1) {
-      final idx = _shotNear(d.focalPoint);
-      if (idx != null) {
-        setState(() => _dragIndex = idx);
-      }
-    }
   }
 
   /// Scale-gesture update: either move the dragged shot, or pan/zoom the
@@ -330,10 +347,22 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     // The lift is a screen-space constant; local is in scene pixels.
     final y =
         ((local.dy - _dragLiftPx / _scale) / box.size.height).clamp(0.0, 1.0);
+    final newLie = _suggestLie(x, y);
+    var updated = _shots[idx].copyWith(x: x, y: y, lie: newLie);
+    if (updated.putts > 0 && newLie != 'green') {
+      // A putt-counted shot dragged off the green is no longer a
+      // completed hole.
+      updated = updated.copyWith(putts: 0, holed: false);
+    } else if (newLie == 'green' &&
+        idx == _shots.length - 1 &&
+        !updated.holed) {
+      // Dragged onto the green as the last shot: becomes putt-counted.
+      updated = updated.copyWith(putts: 2, holed: true);
+    }
     setState(() {
       _shots = [
         ..._shots.sublist(0, idx),
-        _shots[idx].copyWith(x: x, y: y, lie: _suggestLie(x, y)),
+        updated,
         ..._shots.sublist(idx + 1),
       ];
     });
@@ -347,12 +376,48 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
 
   void _setLastLie(String lie) {
     if (_shots.isEmpty) return;
+    var updated = _shots.last.copyWith(lie: lie);
+    if (updated.putts > 0 && lie != 'green') {
+      updated = updated.copyWith(putts: 0, holed: false);
+    } else if (lie == 'green') {
+      updated = updated.copyWith(putts: 2, holed: true);
+    }
     setState(() {
       _shots = [
         ..._shots.sublist(0, _shots.length - 1),
-        _shots.last.copyWith(lie: lie),
+        updated,
       ];
     });
+  }
+
+  /// The putt stepper is shown when the last shot is on the green: one
+  /// tap records the position, and the count (0 = holed out, e.g. an ace)
+  /// replaces tapping one point per putt. Setting the count marks the
+  /// hole finished.
+  bool get _showPuttStepper =>
+      _shots.isNotEmpty && _shots.last.lie == 'green';
+
+  int get _putts => _shots.isEmpty ? 0 : _shots.last.putts;
+
+  void _setPutts(int n) {
+    if (_shots.isEmpty) return;
+    n = n.clamp(0, 4);
+    setState(() {
+      _shots = [
+        ..._shots.sublist(0, _shots.length - 1),
+        _shots.last.copyWith(putts: n, holed: true),
+      ];
+    });
+  }
+
+  /// Effective strokes represented by the tracked points: a putt-counted
+  /// green shot stands for its putt count, every other shot for one stroke.
+  int get _trackedStrokes {
+    var n = 0;
+    for (final s in _shots) {
+      n += s.putts > 0 ? s.putts : 1;
+    }
+    return n;
   }
 
   void _holedIt() {
@@ -377,7 +442,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
       builder: (ctx) => AlertDialog(
         title: const Text('Clear tracked shots?'),
         content: Text(
-            'Remove all ${_shots.length} tracked shots for hole ${widget.holeNumber}? '
+            'Remove all $_trackedStrokes tracked stroke${_trackedStrokes == 1 ? '' : 's'} for hole ${widget.holeNumber}? '
             'Your entered score is kept.'),
         actions: [
           TextButton(
@@ -437,7 +502,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     if (await _persist() && mounted) {
       Navigator.of(context).pop(true);
       showSnack(context,
-          'Hole ${widget.holeNumber}: ${_shots.length} shot${_shots.length == 1 ? '' : 's'} saved.');
+          'Hole ${widget.holeNumber}: $_trackedStrokes stroke${_trackedStrokes == 1 ? '' : 's'} saved.');
     }
   }
 
@@ -471,7 +536,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     final showMismatch = !_loading &&
         strokes != null &&
         strokes > 0 &&
-        _shots.length != strokes;
+        _trackedStrokes != strokes;
     return DraggableScrollableSheet(
       initialChildSize: 0.94,
       minChildSize: 0.6,
@@ -480,8 +545,10 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
       builder: (ctx, scrollCtrl) => SingleChildScrollView(
         controller: scrollCtrl,
         // Freeze sheet scrolling while a shot is being dragged so the
-        // drag gesture isn't stolen by the scroll view.
-        physics: _dragIndex != null
+        // drag gesture isn't stolen by the scroll view — and while
+        // zoomed, so a one-finger drag pans the map instead of
+        // scrolling the sheet.
+        physics: (_dragIndex != null || _scale > _minScale + 0.01)
             ? const NeverScrollableScrollPhysics()
             : null,
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
@@ -510,7 +577,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                 ),
                 if (!_loading)
                   Text(
-                    '${_shots.length} shot${_shots.length == 1 ? '' : 's'}',
+                    '$_trackedStrokes stroke${_trackedStrokes == 1 ? '' : 's'}',
                     style: const TextStyle(color: Colors.grey),
                   ),
                 IconButton(
@@ -558,7 +625,9 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                 children: [
                   Stack(
                     children: [
-                      GestureDetector(
+                      Listener(
+                        onPointerDown: _onPointerDown,
+                        child: GestureDetector(
                         onTapUp: _onTapUp,
                         onScaleStart: _onScaleStart,
                         onScaleUpdate: _onScaleUpdate,
@@ -586,15 +655,18 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                                           (_shots.isNotEmpty
                                               ? _shots.length - 1
                                               : null),
+                                      zoom: _scale,
                                     )
                                   : HoleMap(
                                       key: _mapKey,
                                       geometry: _geometry,
                                       shots: _shots,
                                       activeIndex: _dragIndex,
+                                      zoom: _scale,
                                     ),
                             ),
                           ),
+                        ),
                         ),
                       ),
                       // Reset-zoom button, shown only while zoomed. It
@@ -629,6 +701,42 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                     ),
                 ],
               ),
+            // Putt count for a green shot: one tap records the position,
+            // the stepper records the putts (0 = holed out).
+            if (_showPuttStepper) ...[
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text('Putts:',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  IconButton(
+                    icon: const Icon(Icons.remove_circle_outline),
+                    tooltip: 'Fewer putts',
+                    visualDensity: VisualDensity.compact,
+                    onPressed:
+                        _putts > 0 ? () => _setPutts(_putts - 1) : null,
+                  ),
+                  Text(
+                    '$_putts',
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add_circle_outline),
+                    tooltip: 'More putts',
+                    visualDensity: VisualDensity.compact,
+                    onPressed:
+                        _putts < 4 ? () => _setPutts(_putts + 1) : null,
+                  ),
+                  if (_putts == 0)
+                    const Text('holed out',
+                        style: TextStyle(
+                            color: Colors.green,
+                            fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ],
             if (_finished) ...[
               const SizedBox(height: 8),
               const Row(
@@ -647,7 +755,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
             if (showMismatch) ...[
               const SizedBox(height: 8),
               Text(
-                '⚠ ${_shots.length} shot${_shots.length == 1 ? '' : 's'} tracked, '
+                '⚠ $_trackedStrokes stroke${_trackedStrokes == 1 ? '' : 's'} tracked, '
                 '$strokes stroke${strokes == 1 ? '' : 's'} entered — '
                 'both are kept as-is.',
                 textAlign: TextAlign.center,
