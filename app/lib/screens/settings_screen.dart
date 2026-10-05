@@ -6,7 +6,8 @@ import '../services/auth.dart';
 import '../widgets/common.dart';
 import 'crew_management_screen.dart';
 
-/// Settings: API base URL, Discord OAuth config, logout.
+/// Settings: API base URL, admin-only Discord OAuth config, logout.
+/// Non-admins never see the Discord OAuth fields or the crew management row.
 ///
 /// Also hosts the privacy-policy link, the admin-only crew management entry,
 /// and the self-service delete-account flow.
@@ -166,50 +167,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
             autocorrect: false,
           ),
           const SizedBox(height: 16),
-          Text(
-            'Discord login',
-            style: Theme.of(context).textTheme.titleSmall,
-          ),
-          if (usesDefines)
-            const Padding(
-              padding: EdgeInsets.only(top: 4, bottom: 8),
-              child: Text(
-                'OAuth values were provided via --dart-define and take '
-                'precedence over the fields below.',
-                style: TextStyle(color: Colors.grey, fontSize: 12),
+          // Discord OAuth config is admin-only: non-admins don't even see it.
+          if (_isAdmin) ...[
+            Text(
+              'Discord login',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            if (usesDefines)
+              const Padding(
+                padding: EdgeInsets.only(top: 4, bottom: 8),
+                child: Text(
+                  'OAuth values were provided via --dart-define and take '
+                  'precedence over the fields below.',
+                  style: TextStyle(color: Colors.grey, fontSize: 12),
+                ),
               ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _clientId,
+              decoration: const InputDecoration(
+                labelText: 'Discord client ID',
+                border: OutlineInputBorder(),
+              ),
+              autocorrect: false,
             ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _clientId,
-            decoration: const InputDecoration(
-              labelText: 'Discord client ID',
-              border: OutlineInputBorder(),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _redirectUri,
+              decoration: const InputDecoration(
+                labelText: 'Discord redirect URI',
+                hintText: 'e.g. com.alpenglowvgc.app://oauth-callback',
+                border: OutlineInputBorder(),
+                helperText:
+                    'Must be registered in the Discord developer portal.',
+              ),
+              autocorrect: false,
             ),
-            autocorrect: false,
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _redirectUri,
-            decoration: const InputDecoration(
-              labelText: 'Discord redirect URI',
-              hintText: 'e.g. com.alpenglowvgc.app://oauth-callback',
-              border: OutlineInputBorder(),
-              helperText:
-                  'Must be registered in the Discord developer portal.',
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: _saving ? null : _save,
+              child: _saving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('Save'),
             ),
-            autocorrect: false,
-          ),
-          const SizedBox(height: 16),
-          ElevatedButton(
-            onPressed: _saving ? null : _save,
-            child: _saving
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('Save'),
-          ),
+          ],
           const SizedBox(height: 32),
           const Divider(),
           const SizedBox(height: 8),
