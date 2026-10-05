@@ -290,7 +290,7 @@ const holeMapManifest = <String, Map<int, HoleMapAsset>>{
     18: HoleMapAsset(par: 4, map: 'assets/hole_maps/ocean-course-kiawah-island/18.jpg', mask: 'assets/hole_maps/ocean-course-kiawah-island/18_mask.png', tee: Offset(0.586, 0.814), pin: Offset(0.572, 0.109), source: 'osm'),
   },
   'The Old Course at St Andrews': {
-    1: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/1.jpg', mask: 'assets/hole_maps/old-course-st-andrews/1_mask.png', tee: Offset(0.526, 0.925), pin: Offset(0.527, 0.149), source: 'mixed'),
+    1: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/1.jpg', mask: 'assets/hole_maps/old-course-st-andrews/1_mask.png', tee: Offset(0.653, 0.898), pin: Offset(0.529, 0.099), source: 'traced'),
     2: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/2.jpg', mask: 'assets/hole_maps/old-course-st-andrews/2_mask.png', tee: Offset(0.450, 0.658), pin: Offset(0.445, 0.335), source: 'osm'),
     3: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/3.jpg', mask: 'assets/hole_maps/old-course-st-andrews/3_mask.png', tee: Offset(0.541, 0.920), pin: Offset(0.520, 0.166), source: 'mixed'),
     4: HoleMapAsset(par: 4, map: 'assets/hole_maps/old-course-st-andrews/4.jpg', mask: 'assets/hole_maps/old-course-st-andrews/4_mask.png', tee: Offset(0.472, 0.839), pin: Offset(0.472, 0.095), source: 'mixed'),
