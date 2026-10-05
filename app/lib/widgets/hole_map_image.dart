@@ -28,6 +28,10 @@ class HoleMapImage {
   final ui.Offset tee;
   final ui.Offset pin;
 
+  /// Reference yardages to the pin, copied from the manifest asset.
+  /// Drawn at runtime; empty for holes without markers.
+  final List<YardageMarker> yardages;
+
   final Uint8List _maskRgba;
   final int _maskW;
   final int _maskH;
@@ -36,6 +40,7 @@ class HoleMapImage {
     required this.map,
     required this.tee,
     required this.pin,
+    required this.yardages,
     required this._maskRgba,
     required this._maskW,
     required this._maskH,
@@ -56,6 +61,7 @@ class HoleMapImage {
         map: map,
         tee: asset.tee,
         pin: asset.pin,
+        yardages: asset.yardages,
         maskRgba: rgba.buffer.asUint8List(),
         maskW: mask.width,
         maskH: mask.height,
