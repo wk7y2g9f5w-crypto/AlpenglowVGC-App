@@ -132,6 +132,10 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
       showSnack(context, 'Pick a course.', error: true);
       return;
     }
+    if (_when == null) {
+      showSnack(context, 'Pick a start date & time.', error: true);
+      return;
+    }
     setState(() => _saving = true);
     try {
       final payload = <String, dynamic>{
@@ -141,7 +145,7 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
         'pin_position': _pin,
         'wind_strength': _wind,
         'green_speed': _greenSpeed,
-        'starts_at': _when?.toUtc().toIso8601String() ?? '',
+        'starts_at': _when!.toUtc().toIso8601String(),
         'max_players': _maxPlayers,
         'notes': _notes.text.trim(),
         'format': _format,
@@ -374,7 +378,7 @@ class _CasualFormScreenState extends State<CasualFormScreen> {
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.schedule),
                   title: Text(_when == null
-                      ? 'Start time (optional)'
+                      ? 'Start time (required)'
                       : DateFormat('EEE, MMM d · h:mm a').format(_when!)),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: _pickWhen,

@@ -2400,12 +2400,20 @@ class CasualTeeTimeCreate(BaseModel):
     pin_position: str = "white"
     wind_strength: str = "moderate"
     green_speed: str = "pro"
-    starts_at: str = ""  # ISO-8601
+    starts_at: str = Field(default="", validate_default=True)  # ISO-8601
     max_players: int = 4
     notes: str = ""
     format: str = "stroke"  # stroke | best_ball | match_play | alt_shot
     matchplay: CasualMatchPlayCreate | None = None
     altshot: CasualAltShotCreate | None = None
+
+    @field_validator("starts_at")
+    @classmethod
+    def _starts_at_required(cls, v: str) -> str:
+        if not (v or "").strip():
+            raise ValueError(
+                "starts_at is required — pick a start date & time.")
+        return v
 
     @field_validator("label", "course")
     @classmethod
@@ -2475,6 +2483,14 @@ class CasualTeeTimeUpdate(BaseModel):
     starts_at: str | None = None
     max_players: int | None = None
     notes: str | None = None
+
+    @field_validator("starts_at")
+    @classmethod
+    def _starts_at_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError(
+                "starts_at cannot be cleared — pick a start date & time.")
+        return v
 
 
 async def _casual_json(db_path, tt: dict) -> dict:
