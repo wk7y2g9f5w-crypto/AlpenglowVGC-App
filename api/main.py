@@ -2232,6 +2232,7 @@ class ShotInput(BaseModel):
     y: float
     lie: str
     holed: bool = False
+    putts: int = 0
 
     @field_validator("x", "y")
     @classmethod
@@ -2246,6 +2247,13 @@ class ShotInput(BaseModel):
         v = v.strip().lower()
         if v not in db.LIES:
             raise ValueError(f"lie must be one of {', '.join(db.LIES)}")
+        return v
+
+    @field_validator("putts")
+    @classmethod
+    def _putts_ok(cls, v: int) -> int:
+        if not 0 <= v <= 10:
+            raise ValueError("putts must be between 0 and 10")
         return v
 
 
@@ -2304,6 +2312,12 @@ async def put_hole_shots(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="the holed shot must be the last shot of the hole",
         )
+    for s in body.shots:
+        if s.putts > 0 and (s.lie != "green" or not s.holed):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="putts can only be set on a holed green shot",
+            )
     n = await db.set_hole_shots(
         DB_PATH, card_id, hole, [s.model_dump() for s in body.shots]
     )
@@ -2327,6 +2341,7 @@ async def get_hole_shots(
                 "y": s["y"],
                 "lie": s["lie"],
                 "holed": bool(s["holed"]),
+                "putts": int(s.get("putts") or 0),
             }
             for s in shots
         ],
@@ -4261,9 +4276,16 @@ def _compute_shot_stats(cards: list[dict],
             gir_den += 1
             if gir:
                 gir_num += 1
-            putts = sum(
-                1 for j in range(1, len(hs)) if hs[j - 1]["lie"] == "green"
-            )
+            # Putts: a green shot may carry an explicit putt count (one
+            # tap + count instead of one point per putt); otherwise fall
+            # back to counting shots that follow a green lie.
+            counted = [int(s.get("putts") or 0) for s in hs]
+            if any(counted):
+                putts = sum(counted)
+            else:
+                putts = sum(
+                    1 for j in range(1, len(hs)) if hs[j - 1]["lie"] == "green"
+                )
             round_putts += putts
             if gir:
                 gir_holes += 1

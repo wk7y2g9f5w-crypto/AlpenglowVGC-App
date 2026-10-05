@@ -129,7 +129,9 @@ CREATE TABLE IF NOT EXISTS scorecards(
 -- Shot-by-shot tracking (optional): where each shot landed on the hole,
 -- as normalized 0..1 coordinates on the hole schematic. lie is where the
 -- shot finished: tee, fairway, rough, sand, green. The final shot of a hole
--- carries holed=1. Replaced wholesale per hole by set_hole_shots.
+-- carries holed=1. putts counts putts on a green shot instead of tapping
+-- one point per putt (0 = not a putt-counted shot; the counted putts finish
+-- the hole). Replaced wholesale per hole by set_hole_shots.
 CREATE TABLE IF NOT EXISTS hole_shots(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   scorecard_id INTEGER NOT NULL REFERENCES scorecards(id) ON DELETE CASCADE,
@@ -139,6 +141,7 @@ CREATE TABLE IF NOT EXISTS hole_shots(
   y REAL NOT NULL CHECK(y >= 0 AND y <= 1),
   lie TEXT NOT NULL CHECK(lie IN ('tee','fairway','rough','sand','green')),
   holed INTEGER NOT NULL DEFAULT 0 CHECK(holed IN (0,1)),
+  putts INTEGER NOT NULL DEFAULT 0 CHECK(putts >= 0 AND putts <= 10),
   UNIQUE(scorecard_id, hole_number, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_hole_shots_card ON hole_shots(scorecard_id);
@@ -554,6 +557,17 @@ async def _migrate(db_path: str) -> None:
         if "witness_name" not in card_cols:
             await con.execute(
                 "ALTER TABLE scorecards ADD COLUMN witness_name TEXT")
+            await con.commit()
+
+        # hole_shots.putts — putt count on a green shot instead of one
+        # point per putt (0 = not putt-counted; older rows default to 0).
+        cur = await con.execute("PRAGMA table_info(hole_shots)")
+        hs_cols = [r[1] for r in await cur.fetchall()]
+        if "putts" not in hs_cols:
+            await con.execute(
+                "ALTER TABLE hole_shots ADD COLUMN putts INTEGER"
+                " NOT NULL DEFAULT 0 CHECK(putts >= 0 AND putts <= 10)"
+            )
             await con.commit()
 
         # tee_times.round_number (defaults to 1 for existing tee times).
@@ -2334,7 +2348,7 @@ async def set_hole_shots(db_path, scorecard_id: int, hole_number: int,
                          shots: list[dict]) -> int:
     """Replace one hole's tracked shots wholesale.
 
-    Each shot: {x, y, lie, holed}. seq is implied by list order (1-based).
+    Each shot: {x, y, lie, holed, putts}. seq is implied by list order (1-based).
     Returns the number of shots stored.
     """
     async with aiosqlite.connect(db_path) as con:
@@ -2345,11 +2359,12 @@ async def set_hole_shots(db_path, scorecard_id: int, hole_number: int,
         for i, s in enumerate(shots, start=1):
             await con.execute(
                 "INSERT INTO hole_shots"
-                " (scorecard_id, hole_number, seq, x, y, lie, holed)"
-                " VALUES (?,?,?,?,?,?,?)",
+                " (scorecard_id, hole_number, seq, x, y, lie, holed, putts)"
+                " VALUES (?,?,?,?,?,?,?,?)",
                 (scorecard_id, hole_number, i,
                  float(s["x"]), float(s["y"]), s["lie"],
-                 1 if s.get("holed") else 0),
+                 1 if s.get("holed") else 0,
+                 int(s.get("putts") or 0)),
             )
         await con.commit()
     return len(shots)
@@ -2359,7 +2374,7 @@ async def get_hole_shots(db_path, scorecard_id: int,
                          hole_number: int) -> list[dict]:
     return await _fetchall(
         db_path,
-        "SELECT seq, x, y, lie, holed FROM hole_shots"
+        "SELECT seq, x, y, lie, holed, putts FROM hole_shots"
         " WHERE scorecard_id = ? AND hole_number = ? ORDER BY seq ASC",
         (scorecard_id, hole_number),
     )
@@ -2373,7 +2388,7 @@ async def get_shots_for_scorecards(db_path,
     placeholders = ",".join("?" for _ in card_ids)
     rows = await _fetchall(
         db_path,
-        "SELECT scorecard_id, hole_number, seq, x, y, lie, holed"
+        "SELECT scorecard_id, hole_number, seq, x, y, lie, holed, putts"
         f" FROM hole_shots WHERE scorecard_id IN ({placeholders})"
         " ORDER BY scorecard_id, hole_number, seq",
         tuple(card_ids),

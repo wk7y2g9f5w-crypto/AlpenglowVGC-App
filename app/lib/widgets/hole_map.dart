@@ -207,12 +207,20 @@ class HoleMapPainter extends CustomPainter {
   /// the map.
   final int? activeIndex;
 
+  /// Pinch-zoom level of the map. Markers are drawn at 1/zoom so they
+  /// keep a constant screen size instead of ballooning when zoomed.
+  final double zoom;
+
   HoleMapPainter(
-      {required this.geometry, required this.shots, this.activeIndex});
+      {required this.geometry,
+      required this.shots,
+      this.activeIndex,
+      this.zoom = 1.0});
 
   @override
   void paint(Canvas canvas, Size size) {
     Offset px(Offset o) => Offset(o.dx * size.width, o.dy * size.height);
+    final markerScale = 1.0 / zoom;
 
     // Rough background.
     canvas.drawRect(
@@ -255,44 +263,50 @@ class HoleMapPainter extends CustomPainter {
       ),
       Paint()..color = const Color(0xFF3FA34D),
     );
-    _paintPin(canvas, size, px(geometry.pin));
+    _paintPin(canvas, size, px(geometry.pin), markerScale: markerScale);
 
     // Tee box marker.
-    _paintTeeBox(canvas, size, px(geometry.tee));
+    _paintTeeBox(canvas, size, px(geometry.tee), markerScale: markerScale);
 
-    _paintShots(canvas, size, px(geometry.tee), shots, activeIndex);
+    _paintShots(canvas, size, px(geometry.tee), shots, activeIndex,
+        markerScale: markerScale);
   }
 
   @override
   bool shouldRepaint(covariant HoleMapPainter oldDelegate) =>
       oldDelegate.geometry != geometry ||
       oldDelegate.shots != shots ||
-      oldDelegate.activeIndex != activeIndex;
+      oldDelegate.activeIndex != activeIndex ||
+      oldDelegate.zoom != zoom;
 }
 
 /// Pin marker: white stick with a red cup dot. [pinPx] is already in
 /// pixel coordinates. Shared by the procedural and image painters.
-void _paintPin(Canvas canvas, Size size, Offset pinPx) {
+/// [markerScale] keeps markers a constant screen size when the map is
+/// pinch-zoomed (pass 1/zoom).
+void _paintPin(Canvas canvas, Size size, Offset pinPx,
+    {double markerScale = 1.0}) {
   canvas.drawLine(
-    pinPx + Offset(0, -size.height * 0.035),
+    pinPx + Offset(0, -size.height * 0.035 * markerScale),
     pinPx,
     Paint()
       ..color = Colors.white
-      ..strokeWidth = max(1.5, size.width * 0.004),
+      ..strokeWidth = max(1.5, size.width * 0.004) * markerScale,
   );
-  canvas.drawCircle(pinPx, max(2.5, size.width * 0.008),
+  canvas.drawCircle(pinPx, max(2.5, size.width * 0.008) * markerScale,
       Paint()..color = Colors.red.shade700);
 }
 
 /// Tee-box marker: small rounded white rectangle. [teePx] is in pixel
 /// coordinates. Shared by the procedural and image painters.
-void _paintTeeBox(Canvas canvas, Size size, Offset teePx) {
+void _paintTeeBox(Canvas canvas, Size size, Offset teePx,
+    {double markerScale = 1.0}) {
   canvas.drawRRect(
     RRect.fromRectAndRadius(
       Rect.fromCenter(
         center: teePx,
-        width: size.width * 0.055,
-        height: size.height * 0.02,
+        width: size.width * 0.055 * markerScale,
+        height: size.height * 0.02 * markerScale,
       ),
       const Radius.circular(4),
     ),
@@ -307,9 +321,10 @@ void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
     int? activeIndex,
     {Offset? pin,
     double? yardsPerPixel,
-    int? labeledIndex}) {
+    int? labeledIndex,
+    double markerScale = 1.0}) {
   if (shots.isEmpty) return;
-  final r = max(9.0, size.width * 0.032);
+  final r = max(9.0, size.width * 0.032) * markerScale;
 
   // Trail: tee -> shot 1 -> shot 2 -> ...
   final trail = Path()..moveTo(teePx.dx, teePx.dy);
@@ -320,7 +335,7 @@ void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
     trail,
     Paint()
       ..color = Colors.white.withValues(alpha: 0.75)
-      ..strokeWidth = max(1.5, size.width * 0.005)
+      ..strokeWidth = max(1.5, size.width * 0.005) * markerScale
       ..style = PaintingStyle.stroke,
   );
 
@@ -333,10 +348,10 @@ void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
       // Highlight ring around the dragged shot.
       canvas.drawCircle(
         c,
-        r + 6,
+        r + 6 * markerScale,
         Paint()
           ..color = Colors.amber.shade600
-          ..strokeWidth = 3
+          ..strokeWidth = 3 * markerScale
           ..style = PaintingStyle.stroke,
       );
     }
@@ -346,7 +361,7 @@ void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
       r,
       Paint()
         ..color = Colors.black87
-        ..strokeWidth = 1.5
+        ..strokeWidth = 1.5 * markerScale
         ..style = PaintingStyle.stroke,
     );
     final tp = TextPainter(
@@ -378,7 +393,7 @@ void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
     final dx = (s.x - pin.dx) * 600;
     final dy = (s.y - pin.dy) * 800;
     final yards = (sqrt(dx * dx + dy * dy) * yardsPerPixel).round();
-    final fontSize = max(9.0, size.width * 0.026);
+    final fontSize = max(9.0, size.width * 0.026) * markerScale;
     final label = TextPainter(
       text: TextSpan(
         text: '${yards}y',
@@ -413,9 +428,10 @@ void _paintShots(Canvas canvas, Size size, Offset teePx, List<Shot> shots,
 /// manifest asset carries markers; holes without markers render exactly
 /// as before. Visual only — markers never affect taps or lie detection.
 void _paintYardages(
-    Canvas canvas, Size size, List<YardageMarker> yardages) {
+    Canvas canvas, Size size, List<YardageMarker> yardages,
+    {double markerScale = 1.0}) {
   if (yardages.isEmpty) return;
-  final fontSize = max(9.0, size.width * 0.026);
+  final fontSize = max(9.0, size.width * 0.026) * markerScale;
   for (final m in yardages) {
     final c = Offset(m.offset.dx * size.width, m.offset.dy * size.height);
     final tp = TextPainter(
@@ -463,15 +479,21 @@ class HoleMapImagePainter extends CustomPainter {
   /// Index of the shot carrying the live distance-to-pin readout.
   final int? labeledIndex;
 
+  /// Pinch-zoom level of the map. Markers are drawn at 1/zoom so they
+  /// keep a constant screen size instead of ballooning when zoomed.
+  final double zoom;
+
   HoleMapImagePainter(
       {required this.image,
       required this.shots,
       this.activeIndex,
-      this.labeledIndex});
+      this.labeledIndex,
+      this.zoom = 1.0});
 
   @override
   void paint(Canvas canvas, Size size) {
     Offset px(Offset o) => Offset(o.dx * size.width, o.dy * size.height);
+    final markerScale = 1.0 / zoom;
 
     // Rendered map, full-bleed across the 3:4 viewport.
     final src = Rect.fromLTWH(
@@ -479,16 +501,17 @@ class HoleMapImagePainter extends CustomPainter {
     canvas.drawImageRect(image.map, src, Offset.zero & size, Paint());
 
     // Pin + tee markers, drawn at runtime from the manifest positions.
-    _paintPin(canvas, size, px(image.pin));
-    _paintTeeBox(canvas, size, px(image.tee));
+    _paintPin(canvas, size, px(image.pin), markerScale: markerScale);
+    _paintTeeBox(canvas, size, px(image.tee), markerScale: markerScale);
 
     // Reference yardages to the pin (only when the asset has markers).
-    _paintYardages(canvas, size, image.yardages);
+    _paintYardages(canvas, size, image.yardages, markerScale: markerScale);
 
     _paintShots(canvas, size, px(image.tee), shots, activeIndex,
         pin: image.pin,
         yardsPerPixel: image.yardsPerPixel,
-        labeledIndex: labeledIndex);
+        labeledIndex: labeledIndex,
+        markerScale: markerScale);
   }
 
   @override
@@ -496,7 +519,8 @@ class HoleMapImagePainter extends CustomPainter {
       oldDelegate.image != image ||
       oldDelegate.shots != shots ||
       oldDelegate.activeIndex != activeIndex ||
-      oldDelegate.labeledIndex != labeledIndex;
+      oldDelegate.labeledIndex != labeledIndex ||
+      oldDelegate.zoom != zoom;
 }
 
 /// Hole map: either the procedural schematic ([HoleMap]) or a realistic
@@ -516,13 +540,18 @@ class HoleMap extends StatelessWidget {
   /// Only applies in imaged mode when the asset has a known scale.
   final int? labeledIndex;
 
+  /// Pinch-zoom level. Markers keep a constant screen size (1/zoom) so
+  /// they shrink relative to the map instead of ballooning when zoomed.
+  final double zoom;
+
   /// Procedural schematic mode. Always available; also the fallback when
   /// no rendered image exists (or its assets fail to load).
   const HoleMap(
       {super.key,
       required this.geometry,
       this.shots = const [],
-      this.activeIndex})
+      this.activeIndex,
+      this.zoom = 1.0})
       : image = null,
         labeledIndex = null;
 
@@ -533,7 +562,8 @@ class HoleMap extends StatelessWidget {
       required this.image,
       this.shots = const [],
       this.activeIndex,
-      this.labeledIndex})
+      this.labeledIndex,
+      this.zoom = 1.0})
       : geometry = null;
 
   @override
@@ -545,12 +575,16 @@ class HoleMap extends StatelessWidget {
             image: img,
             shots: shots,
             activeIndex: activeIndex,
-            labeledIndex: labeledIndex),
+            labeledIndex: labeledIndex,
+            zoom: zoom),
       );
     }
     return CustomPaint(
       painter: HoleMapPainter(
-          geometry: geometry!, shots: shots, activeIndex: activeIndex),
+          geometry: geometry!,
+          shots: shots,
+          activeIndex: activeIndex,
+          zoom: zoom),
     );
   }
 }

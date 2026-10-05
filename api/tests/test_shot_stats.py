@@ -26,12 +26,14 @@ PARS_4_18 = ",".join(["4"] * 18)
 
 
 def _shots(*specs):
-    """Build a shots payload from (x, y, lie[, holed]) tuples."""
+    """Build a shots payload from (x, y, lie[, holed[, putts]]) tuples."""
     out = []
     for s in specs:
         d = {"x": s[0], "y": s[1], "lie": s[2]}
         if len(s) > 3:
             d["holed"] = s[3]
+        if len(s) > 4:
+            d["putts"] = s[4]
         out.append(d)
     return {"shots": out}
 
@@ -179,6 +181,42 @@ class ShotTrackingTests:
             json=_shots((0.5, 0.5, "green", True), (0.5, 0.4, "green", True)))
         self.assertEqual(r.status_code, 422)
 
+    # -- putts -----------------------------------------------------------
+    def test_put_get_shots_putts_roundtrip(self):
+        cid = self._make_card()
+        body = _shots((0.5, 0.9, "fairway"), (0.5, 0.2, "green", True, 2))
+        r = self.client.put(f"/api/scorecards/{cid}/holes/1/shots",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.get(f"/api/scorecards/{cid}/holes/1/shots",
+                            headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        shots = r.json()["shots"]
+        self.assertEqual(shots[1]["putts"], 2)
+        self.assertEqual(shots[0]["putts"], 0)
+        self.assertTrue(shots[1]["holed"])
+
+    def test_put_shots_422_putts_non_green(self):
+        cid = self._make_card()
+        r = self.client.put(f"/api/scorecards/{cid}/holes/1/shots",
+                            headers=self.h("123"),
+                            json=_shots((0.5, 0.9, "fairway", True, 2)))
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_put_shots_422_putts_unholed(self):
+        cid = self._make_card()
+        r = self.client.put(f"/api/scorecards/{cid}/holes/1/shots",
+                            headers=self.h("123"),
+                            json=_shots((0.5, 0.2, "green", False, 2)))
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_put_shots_422_putts_out_of_range(self):
+        cid = self._make_card()
+        r = self.client.put(f"/api/scorecards/{cid}/holes/1/shots",
+                            headers=self.h("123"),
+                            json=_shots((0.5, 0.2, "green", True, 11)))
+        self.assertEqual(r.status_code, 422, r.text)
+
 
 def _holes_for(total):
     """18 hole scores summing to total (4s, remainder spread across holes)."""
@@ -257,6 +295,46 @@ class ShotStatsTestCase(ApiTestCase, ShotTrackingTests):
         self.assertEqual(s["sand_save_pct"], 100.0)
         self.assertIsNone(s["handicap_index"])
         self.assertEqual(s["player"]["discord_id"], "123")
+
+    def test_stats_putts_uses_putt_count(self):
+        # H1: F, G(holed, 2 putts) -> GIR yes, 2 putts
+        # H2: F, G(holed, 1 putt)  -> GIR yes, 1 putt
+        # H3: F, G, G(holed)       -> GIR yes, 1 putt (legacy counting)
+        # Expected putts/GIR = (2 + 1 + 1) / 3 = 1.33.
+        run(db.upsert_player(self.db_path, "123", "User123"))
+        async def ex(sql, params):
+            import aiosqlite
+            async with aiosqlite.connect(self.db_path) as con:
+                cur = await con.execute(sql, params)
+                await con.commit()
+                return cur.lastrowid
+        cid = run(ex(
+            "INSERT INTO scorecards (tournament_id, round_number,"
+            " player_discord_id, holes_json, total, status, submitted_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (self.t_open, 1, "123", json.dumps([4] * 18), 72, "verified",
+             "2026-10-02T00:00:00")))
+        holes = {
+            1: [{"x": 0.5, "y": 0.9, "lie": "fairway", "holed": False,
+                 "putts": 0},
+                {"x": 0.5, "y": 0.2, "lie": "green", "holed": True,
+                 "putts": 2}],
+            2: [{"x": 0.5, "y": 0.9, "lie": "fairway", "holed": False,
+                 "putts": 0},
+                {"x": 0.5, "y": 0.2, "lie": "green", "holed": True,
+                 "putts": 1}],
+            3: [{"x": 0.5, "y": 0.9, "lie": "fairway", "holed": False,
+                 "putts": 0},
+                {"x": 0.5, "y": 0.2, "lie": "green", "holed": False,
+                 "putts": 0},
+                {"x": 0.5, "y": 0.1, "lie": "green", "holed": True,
+                 "putts": 0}],
+        }
+        for hole, specs in holes.items():
+            run(db.set_hole_shots(self.db_path, cid, hole, specs))
+        s = self._stats("123")
+        self.assertEqual(s["gir_pct"], 100.0)
+        self.assertEqual(s["putts_per_gir"], 1.33)
 
     def test_stats_no_cards(self):
         s = self._stats("123")
