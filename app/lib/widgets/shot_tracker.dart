@@ -261,6 +261,10 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
   /// landed on an existing shot.
   void _onTapUp(TapUpDetails d) {
     if (_loading || _finished) return;
+    // A tap is never a drag — release any pointer-down drag target first,
+    // or a tap on a shot would leave the sheet scroll-frozen and arm the
+    // next one-finger drag to move that shot.
+    _endDrag();
     if (_shotNear(d.globalPosition) != null) return;
     final coords = _toMapCoords(d.globalPosition);
     if (coords == null) return;
@@ -290,6 +294,9 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     _focalStart = d.focalPoint;
     _baseScale = _scale;
     _baseTranslate = _translate;
+    // A second finger means pinch-zoom, never a shot drag — release any
+    // pointer-down drag target so the pinch can't move the shot.
+    if (d.pointerCount > 1) _endDrag();
   }
 
   /// Scale-gesture update: either move the dragged shot, or pan/zoom the
@@ -627,6 +634,11 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                     children: [
                       Listener(
                         onPointerDown: _onPointerDown,
+                        // Backstops: _endDrag is idempotent, so releasing
+                        // here covers paths the gesture callbacks miss
+                        // (e.g. a cancelled pointer mid-drag).
+                        onPointerUp: (_) => _endDrag(),
+                        onPointerCancel: (_) => _endDrag(),
                         child: GestureDetector(
                         onTapUp: _onTapUp,
                         onScaleStart: _onScaleStart,
