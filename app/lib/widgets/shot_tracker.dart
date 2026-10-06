@@ -180,14 +180,15 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     y = y.clamp(0.0, 1.0);
     final lie = _suggestLie(x, y, firstShot: _shots.isEmpty);
     // A tap on the green records the one position plus a putt count
-    // (default 2) instead of one point per putt — the counted putts
-    // finish the hole. Set 0 for a holed-out (ace); "Holed it" stays
-    // for hole-outs from off the green.
+    // (default 2) instead of one point per putt. It does NOT finish the
+    // hole — the shot stays draggable and the zoom stays live until the
+    // user taps "Holed it". Set 0 putts for a holed-out (ace); "Holed it"
+    // stays for hole-outs from off the green.
     final onGreen = lie == 'green';
     setState(() {
       _shots = [
         ..._shots,
-        Shot(x: x, y: y, lie: lie, putts: onGreen ? 2 : 0, holed: onGreen)
+        Shot(x: x, y: y, lie: lie, putts: onGreen ? 2 : 0, holed: false)
       ];
     });
   }
@@ -289,8 +290,10 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
 
   /// Scale-gesture start: capture the pinch/pan baseline. Drag-target
   /// selection happens in [_onPointerDown], which runs earlier.
+  /// Pinch/pan always work — even after the hole is finished — so the
+  /// map stays inspectable; only shot editing is gated on [_finished].
   void _onScaleStart(ScaleStartDetails d) {
-    if (_loading || _finished) return;
+    if (_loading) return;
     _focalStart = d.focalPoint;
     _baseScale = _scale;
     _baseTranslate = _translate;
@@ -302,9 +305,10 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
   /// Scale-gesture update: either move the dragged shot, or pan/zoom the
   /// map. The pinch math keeps the content point that was under the
   /// starting focal point fixed, so a one-finger drag pans and a
-  /// two-finger pinch zooms around the fingers.
+  /// two-finger pinch zooms around the fingers. Zoom/pan stay live after
+  /// the hole is finished (a drag target can only exist while editing).
   void _onScaleUpdate(ScaleUpdateDetails d) {
-    if (_loading || _finished) return;
+    if (_loading) return;
     if (_dragIndex != null) {
       _moveDraggedShot(d.focalPoint);
       return;
@@ -357,14 +361,15 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     final newLie = _suggestLie(x, y);
     var updated = _shots[idx].copyWith(x: x, y: y, lie: newLie);
     if (updated.putts > 0 && newLie != 'green') {
-      // A putt-counted shot dragged off the green is no longer a
-      // completed hole.
+      // A putt-counted shot dragged off the green is no longer
+      // putt-counted.
       updated = updated.copyWith(putts: 0, holed: false);
     } else if (newLie == 'green' &&
         idx == _shots.length - 1 &&
         !updated.holed) {
-      // Dragged onto the green as the last shot: becomes putt-counted.
-      updated = updated.copyWith(putts: 2, holed: true);
+      // Dragged onto the green as the last shot: becomes putt-counted,
+      // but the hole is not finished — "Holed it" does that.
+      updated = updated.copyWith(putts: 2, holed: false);
     }
     setState(() {
       _shots = [
@@ -387,7 +392,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     if (updated.putts > 0 && lie != 'green') {
       updated = updated.copyWith(putts: 0, holed: false);
     } else if (lie == 'green') {
-      updated = updated.copyWith(putts: 2, holed: true);
+      updated = updated.copyWith(putts: 2, holed: false);
     }
     setState(() {
       _shots = [
@@ -399,8 +404,8 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
 
   /// The putt stepper is shown when the last shot is on the green: one
   /// tap records the position, and the count (0 = holed out, e.g. an ace)
-  /// replaces tapping one point per putt. Setting the count marks the
-  /// hole finished.
+  /// replaces tapping one point per putt. Setting the count does not
+  /// finish the hole — "Holed it" does that explicitly.
   bool get _showPuttStepper =>
       _shots.isNotEmpty && _shots.last.lie == 'green';
 
@@ -412,7 +417,7 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     setState(() {
       _shots = [
         ..._shots.sublist(0, _shots.length - 1),
-        _shots.last.copyWith(putts: n, holed: true),
+        _shots.last.copyWith(putts: n, holed: false),
       ];
     });
   }
