@@ -6,6 +6,7 @@ import '../services/auth.dart';
 import '../services/timezones.dart';
 import '../widgets/common.dart';
 import '../widgets/shot_stats_view.dart';
+import 'round_history_screen.dart';
 
 /// Profile: timezone picker, Golf+ handle, my stats, my registrations.
 class ProfileScreen extends StatefulWidget {
@@ -324,6 +325,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         '${t.course ?? ''} · ${formatDateRange(t.startDate, t.endDate)}'),
                     trailing: StatusChip(status: t.status),
                   )),
+              const SizedBox(height: 24),
+              const Text('Round history',
+                  style:
+                      TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              const Text(
+                'Every completed tournament and casual round, '
+                'with tee-time timestamps.',
+                style: TextStyle(color: Colors.grey, fontSize: 13),
+              ),
+              const SizedBox(height: 8),
+              Card(
+                margin: EdgeInsets.zero,
+                child: ListTile(
+                  leading: const Icon(Icons.history),
+                  title: const Text('View round history'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => RoundHistoryScreen(
+                        api: _api,
+                        playerKey: data.me.discordId,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
               const SizedBox(height: 24),
               const Text('Shot stats',
                   style:

@@ -4367,6 +4367,76 @@ async def player_stats(key: str, user: CurrentUser) -> dict:
     return stats
 
 
+@app.get("/api/players/{key}/rounds")
+async def player_rounds(key: str, user: CurrentUser) -> dict:
+    """Round history: a player's completed/submitted rounds.
+
+    Tournament and casual scorecards unified, newest tee time first, each
+    labeled with its kind and tee-time timestamp. Only non-in_progress
+    cards (pending/verified) — live partials are not history yet.
+    Owner or crew only. Registered after /api/players/me/* routes so "me"
+    is not swallowed; key == "me" is also accepted here for convenience.
+    """
+    target_key = user["discord_id"] if key == "me" else key
+    player = await db.get_player(DB_PATH, target_key)
+    if player is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "player_not_found"},
+        )
+    if target_key != user["discord_id"]:
+        crew = await fetch_crew_status(user["discord_id"])
+        if crew is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify crew status — try again shortly.",
+            )
+        if not crew:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "not_card_owner"},
+            )
+    rows = await db.get_player_round_history(DB_PATH, GUILD_ID, target_key)
+    rounds = []
+    for r in rows:
+        try:
+            scores = json.loads(r["holes_json"])
+        except (json.JSONDecodeError, TypeError):
+            scores = []
+        pars = _parse_pars(r["pars"])
+        if pars is not None and len(pars) != len(scores):
+            pars = None
+        rounds.append(
+            {
+                "scorecard_id": r["scorecard_id"],
+                "kind": r["kind"],
+                "tournament_id": r["tournament_id"],
+                "tournament_name": r["tournament_name"],
+                "round_number": r["round_number"],
+                "label": r["label"],
+                "course": r["course"],
+                "format": r["format"],
+                "starts_at": r["starts_at"],
+                "submitted_at": r["submitted_at"],
+                "status": r["status"],
+                "witness_name": r["witness_name"],
+                "holes": r["holes"],
+                "scores": scores,
+                "pars": pars,
+                "total": r["total"],
+                "to_par": sl.to_par(r["total"], pars),
+            }
+        )
+    return {
+        "player": {
+            "discord_id": player["discord_id"],
+            "display_name": player["display_name"],
+            "golfplus_handle": player.get("golfplus_handle"),
+        },
+        "rounds": rounds,
+    }
+
+
 # --------------------------------------------------------------------------
 # Run
 # --------------------------------------------------------------------------
