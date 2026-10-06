@@ -339,10 +339,12 @@ class Shot {
   final String lie;
   final bool holed;
 
-  /// Putt count recorded on a green shot instead of tapping one point per
-  /// putt. 0 means "not a putt-counted shot". When > 0 the shot is always
-  /// the hole's last shot and holed is true (the counted putts finish the
-  /// hole); a 0-putt hole-out (ace, chip-in) is holed with putts == 0.
+  /// Putt count recorded on a green shot. Legacy: the tracker used to
+  /// record one tap plus a count instead of one point per putt. The app
+  /// now records every putt as its own point (putts stays 0); a nonzero
+  /// value here only appears on older saved holes, where the shot is
+  /// always the hole's last shot and holed is true. 0 means "not a
+  /// putt-counted shot".
   final int putts;
 
   const Shot({

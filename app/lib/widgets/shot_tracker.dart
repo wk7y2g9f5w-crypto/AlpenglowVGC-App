@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 
@@ -179,16 +180,16 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     x = x.clamp(0.0, 1.0);
     y = y.clamp(0.0, 1.0);
     final lie = _suggestLie(x, y, firstShot: _shots.isEmpty);
-    // A tap on the green records the one position plus a putt count
-    // (default 2) instead of one point per putt. It does NOT finish the
-    // hole — the shot stays draggable and the zoom stays live until the
-    // user taps "Holed it". Set 0 putts for a holed-out (ace); "Holed it"
-    // stays for hole-outs from off the green.
-    final onGreen = lie == 'green';
+    // One point per stroke: a tap on the green records the shot that got
+    // there with 0 putts. Each putt is added as its own point with the +
+    // button below, and "Holed out" drops the final point on the pin — so
+    // the stroke count is always exactly the number of points. Tapping the
+    // green does NOT finish the hole; the shot stays draggable and the
+    // zoom stays live until the user taps "Holed out".
     setState(() {
       _shots = [
         ..._shots,
-        Shot(x: x, y: y, lie: lie, putts: onGreen ? 2 : 0, holed: false)
+        Shot(x: x, y: y, lie: lie, putts: 0, holed: false)
       ];
     });
   }
@@ -361,15 +362,9 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     final newLie = _suggestLie(x, y);
     var updated = _shots[idx].copyWith(x: x, y: y, lie: newLie);
     if (updated.putts > 0 && newLie != 'green') {
-      // A putt-counted shot dragged off the green is no longer
+      // Legacy putt-counted data dragged off the green is no longer
       // putt-counted.
       updated = updated.copyWith(putts: 0, holed: false);
-    } else if (newLie == 'green' &&
-        idx == _shots.length - 1 &&
-        !updated.holed) {
-      // Dragged onto the green as the last shot: becomes putt-counted,
-      // but the hole is not finished — "Holed it" does that.
-      updated = updated.copyWith(putts: 2, holed: false);
     }
     setState(() {
       _shots = [
@@ -391,8 +386,6 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     var updated = _shots.last.copyWith(lie: lie);
     if (updated.putts > 0 && lie != 'green') {
       updated = updated.copyWith(putts: 0, holed: false);
-    } else if (lie == 'green') {
-      updated = updated.copyWith(putts: 2, holed: false);
     }
     setState(() {
       _shots = [
@@ -402,28 +395,54 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     });
   }
 
-  /// The putt stepper is shown when the last shot is on the green: one
-  /// tap records the position, and the count (0 = holed out, e.g. an ace)
-  /// replaces tapping one point per putt. Setting the count does not
-  /// finish the hole — "Holed it" does that explicitly.
+  /// The putt stepper is shown when the last shot is on the green. One point
+  /// per putt: each + appends a putt point on the map, each − removes the
+  /// last one. The stepper carries no hole-out meaning anymore — "Holed
+  /// out" below finishes the hole.
   bool get _showPuttStepper =>
-      _shots.isNotEmpty && _shots.last.lie == 'green';
+      _shots.isNotEmpty && _shots.last.lie == 'green' && !_finished;
 
-  int get _putts => _shots.isEmpty ? 0 : _shots.last.putts;
+  /// Index of the first green-lie shot (the shot that reached the green).
+  /// Every shot after it is a putt point.
+  int get _firstGreenIndex => _shots.indexWhere((s) => s.lie == 'green');
 
-  void _setPutts(int n) {
-    if (_shots.isEmpty) return;
-    n = n.clamp(0, 4);
+  /// Number of putt points: shots after the first green-lie shot.
+  int get _puttPoints {
+    final i = _firstGreenIndex;
+    if (i < 0) return 0;
+    return _shots.length - 1 - i;
+  }
+
+  static const int _maxPutts = 10;
+
+  /// Append one putt point at the previous point's spot, nudged along a
+  /// deterministic spiral so stacked putts stay individually tappable and
+  /// draggable.
+  void _addPutt() {
+    if (_shots.isEmpty || _finished || _puttPoints >= _maxPutts) return;
+    final last = _shots.last;
+    final ang = _puttPoints * 2.399963; // golden angle
+    const r = 0.014;
+    final x = (last.x + r * cos(ang)).clamp(0.0, 1.0);
+    final y = (last.y + r * sin(ang)).clamp(0.0, 1.0);
     setState(() {
       _shots = [
-        ..._shots.sublist(0, _shots.length - 1),
-        _shots.last.copyWith(putts: n, holed: false),
+        ..._shots,
+        Shot(x: x, y: y, lie: 'green', putts: 0, holed: false),
       ];
     });
   }
 
-  /// Effective strokes represented by the tracked points: a putt-counted
-  /// green shot stands for its putt count, every other shot for one stroke.
+  /// Remove the most recent putt point. Enabled only while at least one
+  /// exists, so the shot that reached the green is never removed by −.
+  void _removePutt() {
+    if (_puttPoints <= 0 || _finished) return;
+    setState(() => _shots = _shots.sublist(0, _shots.length - 1));
+  }
+
+  /// Effective strokes represented by the tracked points: one per point.
+  /// (Legacy data may carry a putt count on a holed green shot; that keeps
+  /// its old meaning.)
   int get _trackedStrokes {
     var n = 0;
     for (final s in _shots) {
@@ -432,13 +451,35 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     return n;
   }
 
-  void _holedIt() {
+  /// Pin position in 0..1 map coordinates, from the realistic map when one
+  /// is loaded, else the procedural schematic.
+  Offset get _pin {
+    final imgPin = _holeImage?.pin;
+    if (imgPin != null) return Offset(imgPin.dx, imgPin.dy);
+    return _geometry.pin;
+  }
+
+  /// "Holed out" drops the final point on the pin and finishes the hole.
+  /// When the last point is already at the hole (chip-in, ace, tap-in) it
+  /// is snapped onto the pin instead of adding a duplicate stroke.
+  void _holedOut() {
     if (_shots.isEmpty || _finished) return;
+    final pin = _pin;
+    final last = _shots.last;
+    final nearPin =
+        (Offset(last.x, last.y) - pin).distance <= 0.04;
     setState(() {
-      _shots = [
-        ..._shots.sublist(0, _shots.length - 1),
-        _shots.last.copyWith(holed: true),
-      ];
+      if (nearPin) {
+        _shots = [
+          ..._shots.sublist(0, _shots.length - 1),
+          last.copyWith(x: pin.dx, y: pin.dy, lie: 'green', putts: 0, holed: true),
+        ];
+      } else {
+        _shots = [
+          ..._shots,
+          Shot(x: pin.dx, y: pin.dy, lie: 'green', putts: 0, holed: true),
+        ];
+      }
     });
   }
 
@@ -603,6 +644,8 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
               'Tap the map to place each shot\u2019s landing spot. '
               'Drag a placed shot to move it. '
               'Pinch to zoom in for precise placement. '
+              'On the green, tap + for each putt \u2014 when one drops, '
+              'hit Holed out instead and the final point lands on the pin. '
               '${_holeImage?.yardsPerPixel != null ? 'The amber label shows your latest shot\u2019s distance to the pin. ' : ''}'
               'Shots save automatically when you close.',
               style: const TextStyle(color: Colors.grey, fontSize: 13),
@@ -718,8 +761,9 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                     ),
                 ],
               ),
-            // Putt count for a green shot: one tap records the position,
-            // the stepper records the putts (0 = holed out).
+            // One point per putt: + adds a putt point on the map, − takes
+            // the last one away. No hole-out meaning — "Holed out" below
+            // finishes the hole.
             if (_showPuttStepper) ...[
               const SizedBox(height: 8),
               Row(
@@ -729,28 +773,22 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                       style: TextStyle(fontWeight: FontWeight.w600)),
                   IconButton(
                     icon: const Icon(Icons.remove_circle_outline),
-                    tooltip: 'Fewer putts',
+                    tooltip: 'Remove a putt',
                     visualDensity: VisualDensity.compact,
-                    onPressed:
-                        _putts > 0 ? () => _setPutts(_putts - 1) : null,
+                    onPressed: _puttPoints > 0 ? _removePutt : null,
                   ),
                   Text(
-                    '$_putts',
+                    '$_puttPoints',
                     style: const TextStyle(
                         fontSize: 20, fontWeight: FontWeight.bold),
                   ),
                   IconButton(
                     icon: const Icon(Icons.add_circle_outline),
-                    tooltip: 'More putts',
+                    tooltip: 'Add a putt',
                     visualDensity: VisualDensity.compact,
                     onPressed:
-                        _putts < 4 ? () => _setPutts(_putts + 1) : null,
+                        _puttPoints < _maxPutts ? _addPutt : null,
                   ),
-                  if (_putts == 0)
-                    const Text('holed out',
-                        style: TextStyle(
-                            color: Colors.green,
-                            fontWeight: FontWeight.w600)),
                 ],
               ),
             ],
@@ -834,9 +872,9 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                 OutlinedButton.icon(
                   onPressed: (_shots.isEmpty || _finished)
                       ? null
-                      : _holedIt,
+                      : _holedOut,
                   icon: const Icon(Icons.flag, size: 18),
-                  label: const Text('Holed it'),
+                  label: const Text('Holed out'),
                 ),
               ],
             ),
