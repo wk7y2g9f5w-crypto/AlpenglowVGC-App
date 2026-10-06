@@ -10,10 +10,10 @@ import 'hole_map.dart';
 import 'hole_map_image.dart';
 import 'hole_map_manifest.dart';
 
-/// Opt-in shot-by-shot tracking for one hole, as a tall bottom sheet.
+/// Opt-in shot-by-shot tracking for one hole, as a full-screen page.
 ///
 /// Purely additive: nothing here prompts, badges, or requires anything —
-/// the sheet only exists while the player has it open. Tap the map to
+/// the page only exists while the player has it open. Tap the map to
 /// place each shot's landing spot, or drag a placed shot to fine-tune it;
 /// the lie is suggested from the map geometry with manual override chips.
 /// Saving never blocks on a shot-count vs strokes mismatch — it shows a
@@ -27,17 +27,17 @@ Future<bool> showShotTracker({
   required int par,
   int? strokes,
 }) async {
-  final saved = await showModalBottomSheet<bool>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    builder: (ctx) => _ShotTrackerSheet(
-      api: api,
-      cardId: cardId,
-      courseName: courseName,
-      holeNumber: holeNumber,
-      par: par,
-      strokes: strokes,
+  final saved = await Navigator.of(context).push<bool>(
+    MaterialPageRoute<bool>(
+      fullscreenDialog: true,
+      builder: (ctx) => _ShotTrackerSheet(
+        api: api,
+        cardId: cardId,
+        courseName: courseName,
+        holeNumber: holeNumber,
+        par: par,
+        strokes: strokes,
+      ),
     ),
   );
   return saved == true;
@@ -459,27 +459,17 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
     return _geometry.pin;
   }
 
-  /// "Holed out" drops the final point on the pin and finishes the hole.
-  /// When the last point is already at the hole (chip-in, ace, tap-in) it
-  /// is snapped onto the pin instead of adding a duplicate stroke.
+  /// "Holed out" adds the final point directly on the pin and finishes
+  /// the hole. It always adds a point — never reuses the last one — so
+  /// the stroke count stays exactly one per point.
   void _holedOut() {
     if (_shots.isEmpty || _finished) return;
     final pin = _pin;
-    final last = _shots.last;
-    final nearPin =
-        (Offset(last.x, last.y) - pin).distance <= 0.04;
     setState(() {
-      if (nearPin) {
-        _shots = [
-          ..._shots.sublist(0, _shots.length - 1),
-          last.copyWith(x: pin.dx, y: pin.dy, lie: 'green', putts: 0, holed: true),
-        ];
-      } else {
-        _shots = [
-          ..._shots,
-          Shot(x: pin.dx, y: pin.dy, lie: 'green', putts: 0, holed: true),
-        ];
-      }
+      _shots = [
+        ..._shots,
+        Shot(x: pin.dx, y: pin.dy, lie: 'green', putts: 0, holed: true),
+      ];
     });
   }
 
@@ -590,67 +580,51 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
         strokes != null &&
         strokes > 0 &&
         _trackedStrokes != strokes;
-    return DraggableScrollableSheet(
-      initialChildSize: 0.94,
-      minChildSize: 0.6,
-      maxChildSize: 0.98,
-      expand: false,
-      builder: (ctx, scrollCtrl) => SingleChildScrollView(
-        controller: scrollCtrl,
-        // Freeze sheet scrolling while a shot is being dragged so the
-        // drag gesture isn't stolen by the scroll view — and while
-        // zoomed, so a one-finger drag pans the map instead of
-        // scrolling the sheet.
-        physics: (_dragIndex != null || _scale > _minScale + 0.01)
-            ? const NeverScrollableScrollPhysics()
-            : null,
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 8),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade400,
-                  borderRadius: BorderRadius.circular(2),
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Hole ${widget.holeNumber} · Par ${widget.par}'),
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          tooltip: 'Close',
+          onPressed: _saving ? null : _close,
+        ),
+        actions: [
+          if (!_loading)
+            Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: Center(
+                child: Text(
+                  '$_trackedStrokes stroke${_trackedStrokes == 1 ? '' : 's'}',
+                  style: const TextStyle(fontSize: 14),
                 ),
               ),
             ),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Hole ${widget.holeNumber} · Par ${widget.par}',
-                    style: const TextStyle(
-                        fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                if (!_loading)
-                  Text(
-                    '$_trackedStrokes stroke${_trackedStrokes == 1 ? '' : 's'}',
-                    style: const TextStyle(color: Colors.grey),
-                  ),
-                IconButton(
-                  icon: const Icon(Icons.close),
-                  tooltip: 'Close',
-                  onPressed: _saving ? null : _close,
-                ),
-              ],
-            ),
-            Text(
-              'Tap the map to place each shot\u2019s landing spot. '
-              'Drag a placed shot to move it. '
-              'Pinch to zoom in for precise placement. '
-              'On the green, tap + for each putt \u2014 when one drops, '
-              'hit Holed out instead and the final point lands on the pin. '
-              '${_holeImage?.yardsPerPixel != null ? 'The amber label shows your latest shot\u2019s distance to the pin. ' : ''}'
-              'Shots save automatically when you close.',
-              style: const TextStyle(color: Colors.grey, fontSize: 13),
-            ),
-            const SizedBox(height: 8),
+        ],
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          // Freeze page scrolling while a shot is being dragged so the
+          // drag gesture isn't stolen by the scroll view — and while
+          // zoomed, so a one-finger drag pans the map instead of
+          // scrolling the page.
+          physics: (_dragIndex != null || _scale > _minScale + 0.01)
+              ? const NeverScrollableScrollPhysics()
+              : null,
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Tap the map to place each shot\u2019s landing spot. '
+                'Drag a placed shot to move it. '
+                'Pinch to zoom in for precise placement. '
+                'On the green, tap + for each putt \u2014 when one drops, '
+                'hit Holed out instead and the final point lands on the pin. '
+                '${_holeImage?.yardsPerPixel != null ? 'The amber label shows your latest shot\u2019s distance to the pin. ' : ''}'
+                'Shots save automatically when you close.',
+                style: const TextStyle(color: Colors.grey, fontSize: 13),
+              ),
+              const SizedBox(height: 8),
             if (_loading)
               const AspectRatio(
                 aspectRatio: 3 / 4,
@@ -895,6 +869,6 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
           ],
         ),
       ),
-    );
+    ));
   }
 }
