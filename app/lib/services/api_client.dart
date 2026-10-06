@@ -448,6 +448,19 @@ class ApiClient {
     }
   }
 
+  /// Round history: the player's completed/submitted rounds (tournament +
+  /// casual), newest tee time first. [key] is a discord id, a `local:<hex>`
+  /// key, or "me".
+  Future<List<RoundSummary>> getRoundHistory(String key) async {
+    final body = await _get('/api/players/$key/rounds');
+    final rounds = (body as Map<String, dynamic>)['rounds'];
+    if (rounds is! List) return const [];
+    return rounds
+        .whereType<Map<String, dynamic>>()
+        .map(RoundSummary.fromJson)
+        .toList();
+  }
+
   /// Permanently delete the caller's own player record (auth required).
   /// Returns the raw response body (e.g. {"deleted": true, "discord_id": ...}).
   Future<Map<String, dynamic>> deleteAccount() async {

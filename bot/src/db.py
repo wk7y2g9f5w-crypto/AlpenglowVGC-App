@@ -2561,6 +2561,45 @@ async def get_player_stat_cards(db_path, guild_id,
     )
 
 
+async def get_player_round_history(db_path, guild_id,
+                                   player_discord_id) -> list[dict]:
+    """Completed/submitted individual scorecards for round history.
+
+    Tournament and casual cards unified, newest tee time first (cards
+    without a tee-time timestamp sort last). Team cards excluded; only
+    non-in_progress cards (pending/verified) — i.e. actually submitted
+    rounds, not live partials.
+    """
+    return await _fetchall(
+        db_path,
+        "SELECT 'tournament' AS kind, s.id AS scorecard_id,"
+        " s.round_number, s.holes_json, s.total, s.status,"
+        " s.submitted_at, s.witness_name,"
+        " t.id AS tournament_id, t.name AS tournament_name,"
+        " t.course AS course, t.pars AS pars, t.holes AS holes,"
+        " tt.starts_at AS starts_at,"
+        " NULL AS label, NULL AS format"
+        " FROM scorecards s JOIN tournaments t ON t.id = s.tournament_id"
+        " LEFT JOIN tee_times tt ON tt.id = s.tee_time_id"
+        " WHERE t.guild_id = ? AND s.player_discord_id = ?"
+        " AND s.team_id IS NULL AND s.status != 'in_progress'"
+        " UNION ALL"
+        " SELECT 'casual' AS kind, s.id AS scorecard_id,"
+        " s.round_number, s.holes_json, s.total, s.status,"
+        " s.submitted_at, s.witness_name,"
+        " NULL AS tournament_id, NULL AS tournament_name,"
+        " c.course AS course, c.pars AS pars, 18 AS holes,"
+        " c.starts_at AS starts_at,"
+        " c.label AS label, c.format AS format"
+        " FROM scorecards s JOIN casual_tee_times c"
+        " ON c.id = s.casual_tee_time_id"
+        " WHERE s.player_discord_id = ?"
+        " AND s.team_id IS NULL AND s.status != 'in_progress'"
+        " ORDER BY starts_at DESC, submitted_at DESC",
+        (guild_id, player_discord_id, player_discord_id),
+    )
+
+
 # ------------------------------------------------------------------- matches
 async def create_match(db_path, tournament_id, player1, player2, reported_by,
                        winner=None, score_note=None) -> int:

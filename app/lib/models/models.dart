@@ -470,6 +470,123 @@ class PlayerShotStats {
       handicapIndex != null;
 }
 
+/// One completed/submitted round in a player's round history —
+/// either a tournament round or a casual round. Timestamps come from the
+/// tee time; pars may be null when the course's pars are unknown.
+class RoundSummary {
+  final int scorecardId;
+  final String kind; // 'tournament' | 'casual'
+  final int? tournamentId;
+  final String? tournamentName;
+  final int roundNumber;
+  final String? label; // casual tee-time label
+  final String course;
+  final String? format; // casual format, e.g. 'stroke'
+  final String? startsAt; // tee-time timestamp (ISO)
+  final String? submittedAt;
+  final String status;
+  final String? witnessName;
+  final int holes;
+  final List<int?> scores;
+  final List<int>? pars;
+  final int total;
+  final int? toPar;
+
+  const RoundSummary({
+    required this.scorecardId,
+    required this.kind,
+    this.tournamentId,
+    this.tournamentName,
+    this.roundNumber = 1,
+    this.label,
+    required this.course,
+    this.format,
+    this.startsAt,
+    this.submittedAt,
+    required this.status,
+    this.witnessName,
+    required this.holes,
+    required this.scores,
+    this.pars,
+    required this.total,
+    this.toPar,
+  });
+
+  static List<int?> _scores(dynamic v) {
+    if (v is! List) return const [];
+    return v.map((s) => (s as num?)?.toInt()).toList();
+  }
+
+  static List<int>? _ints(dynamic v) {
+    if (v is! List) return null;
+    final out = <int>[];
+    for (final e in v) {
+      final n = (e as num?)?.toInt();
+      if (n == null) return null;
+      out.add(n);
+    }
+    return out;
+  }
+
+  factory RoundSummary.fromJson(Map<String, dynamic> j) => RoundSummary(
+        scorecardId: (j['scorecard_id'] as num).toInt(),
+        kind: (j['kind'] ?? 'tournament').toString(),
+        tournamentId: (j['tournament_id'] as num?)?.toInt(),
+        tournamentName: j['tournament_name']?.toString(),
+        roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
+        label: j['label']?.toString(),
+        course: (j['course'] ?? '').toString(),
+        format: j['format']?.toString(),
+        startsAt: j['starts_at']?.toString(),
+        submittedAt: j['submitted_at']?.toString(),
+        status: (j['status'] ?? '').toString(),
+        witnessName: j['witness_name']?.toString(),
+        holes: (j['holes'] as num?)?.toInt() ?? 18,
+        scores: _scores(j['scores']),
+        pars: _ints(j['pars']),
+        total: (j['total'] as num?)?.toInt() ?? 0,
+        toPar: (j['to_par'] as num?)?.toInt(),
+      );
+
+  bool get isTournament => kind == 'tournament';
+
+  /// Display title: tournament name + round, or the casual label/course.
+  String get title {
+    if (isTournament) {
+      final name = tournamentName ?? 'Tournament';
+      return roundNumber > 1 ? '$name · Round $roundNumber' : name;
+    }
+    if (label != null && label!.isNotEmpty) return label!;
+    return course.isNotEmpty ? course : 'Casual round';
+  }
+
+  /// Subtitle line: kind badge text + format for casual rounds.
+  String get kindLabel {
+    if (isTournament) return 'Tournament';
+    final fmt = format;
+    if (fmt != null && fmt.isNotEmpty && fmt != 'stroke') {
+      return 'Casual · ${_formatName(fmt)}';
+    }
+    return 'Casual';
+  }
+
+  static String _formatName(String fmt) {
+    switch (fmt) {
+      case 'best_ball':
+        return 'Best ball';
+      case 'match_play':
+        return 'Match play';
+      case 'alt_shot':
+        return 'Alt shot';
+      default:
+        return fmt;
+    }
+  }
+
+  /// Holes actually played (non-null scores).
+  int get thru => scores.where((s) => s != null).length;
+}
+
 class LeaderboardEntry {
   final Map<String, dynamic> raw;
 
