@@ -452,7 +452,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       cardId: cardId,
       courseName: widget.tournament.course ?? '',
       holeNumber: hole + 1,
-      par: _pars != null ? _pars[hole] : 4,
+      par: _pars?[hole] ?? 4,
       strokes: _scores[hole],
     );
     if (tracked != null && mounted) {

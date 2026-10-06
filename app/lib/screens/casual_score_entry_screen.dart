@@ -350,7 +350,7 @@ class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
       cardId: cardId,
       courseName: widget.teeTime.course,
       holeNumber: hole + 1,
-      par: _pars != null ? _pars[hole] : 4,
+      par: _pars?[hole] ?? 4,
       strokes: _scores[hole],
     );
     if (tracked != null && mounted) {
