@@ -406,22 +406,59 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     }
   }
 
-  /// Opt-in shot tracking for the current hole. Only available once the
-  /// scorecard exists server-side (live or submitted); until then the
-  /// button stays quietly disabled — tracking is never required or nagged.
+  /// Create the in-progress scorecard on first use (all-null scores are a
+  /// valid live partial save) so shot tracking doesn't wait for a manually
+  /// entered score. Returns the card id, or null on failure.
+  Future<int?> _ensureCard() async {
+    final player = _player;
+    if (player == null || _locked || _submitting) return null;
+    try {
+      final card = await _api.submitScorecard(
+        widget.teeTime.id,
+        player.discordId,
+        List<int?>.from(_scores),
+        roundNumber: _roundNumber,
+      );
+      if (!mounted) return null;
+      setState(() {
+        _existingStatus ??= card.status;
+        _cardId ??= card.id;
+      });
+      return _cardId;
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+      return null;
+    } catch (e) {
+      if (mounted) {
+        showSnack(context, 'Could not start shot tracking: $e', error: true);
+      }
+      return null;
+    }
+  }
+
+  /// Opt-in shot tracking for the current hole. Always available — the
+  /// scorecard is created on first use if needed. A finished (holed)
+  /// tracking session writes its stroke count as the hole's score, so
+  /// tracking doubles as score entry; an unfinished or untouched session
+  /// leaves the score alone.
   Future<void> _openShotTracker() async {
-    final cardId = _cardId;
-    if (cardId == null) return;
-    final pars = _pars;
-    await showShotTracker(
+    var cardId = _cardId;
+    cardId ??= await _ensureCard();
+    if (cardId == null || !mounted) return;
+    final hole = _hole;
+    final tracked = await showShotTracker(
       context: context,
       api: _api,
       cardId: cardId,
       courseName: widget.tournament.course ?? '',
-      holeNumber: _hole + 1,
-      par: pars != null ? pars[_hole] : 4,
-      strokes: _scores[_hole],
+      holeNumber: hole + 1,
+      par: _pars != null ? _pars[hole] : 4,
+      strokes: _scores[hole],
     );
+    if (tracked != null && mounted) {
+      setState(() => _scores[hole] = tracked);
+      _scheduleLiveSave();
+    }
   }
 
   /// Read-only review of every hole's tracked shots, loaded fresh from
@@ -705,15 +742,12 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                             fontWeight: FontWeight.bold)),
                     const SizedBox(width: 2),
                     // Quiet opt-in shot tracking: a small muted button, no
-                    // badges or prompts anywhere. Disabled (with a hint)
-                    // until the scorecard exists server-side.
+                    // badges or prompts anywhere. Always available — the
+                    // scorecard is created on first use.
                     Tooltip(
-                      message: _cardId == null
-                          ? 'Enter a score to enable shot tracking'
-                          : 'Track shots for this hole (optional)',
+                      message: 'Track shots for this hole (optional)',
                       child: TextButton.icon(
-                        onPressed:
-                            _cardId == null ? null : _openShotTracker,
+                        onPressed: _openShotTracker,
                         icon: const Icon(Icons.timeline, size: 15),
                         label: const Text('Track shots',
                             style: TextStyle(fontSize: 12)),
