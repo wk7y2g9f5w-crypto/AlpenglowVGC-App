@@ -733,6 +733,59 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                             ),
                           ),
                         ),
+                      // Putt stepper overlay: one point per putt. Floating
+                      // on the map (instead of in the page flow) so its
+                      // appearance never shifts the layout or pushes the
+                      // action buttons off screen. Above the
+                      // GestureDetector, so tapping it can never place a
+                      // shot.
+                      if (_showPuttStepper)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 8,
+                          child: Center(
+                            child: Material(
+                              elevation: 4,
+                              borderRadius: BorderRadius.circular(24),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 4),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(
+                                          Icons.remove_circle_outline),
+                                      tooltip: 'Remove a putt',
+                                      visualDensity:
+                                          VisualDensity.compact,
+                                      onPressed: _puttPoints > 0
+                                          ? _removePutt
+                                          : null,
+                                    ),
+                                    Text(
+                                      '$_puttPoints putt${_puttPoints == 1 ? '' : 's'}',
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w600),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(
+                                          Icons.add_circle_outline),
+                                      tooltip: 'Add a putt',
+                                      visualDensity:
+                                          VisualDensity.compact,
+                                      onPressed:
+                                          _puttPoints < _maxPutts
+                                              ? _addPutt
+                                              : null,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                   if (_holeImage != null)
@@ -747,37 +800,6 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                     ),
                 ],
               ),
-            // One point per putt: + adds a putt point on the map, − takes
-            // the last one away. No hole-out meaning — "Holed out" below
-            // finishes the hole.
-            if (_showPuttStepper) ...[
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text('Putts:',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                  IconButton(
-                    icon: const Icon(Icons.remove_circle_outline),
-                    tooltip: 'Remove a putt',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: _puttPoints > 0 ? _removePutt : null,
-                  ),
-                  Text(
-                    '$_puttPoints',
-                    style: const TextStyle(
-                        fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.add_circle_outline),
-                    tooltip: 'Add a putt',
-                    visualDensity: VisualDensity.compact,
-                    onPressed:
-                        _puttPoints < _maxPutts ? _addPutt : null,
-                  ),
-                ],
-              ),
-            ],
             if (_finished) ...[
               const SizedBox(height: 8),
               const Row(
@@ -839,35 +861,45 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                TextButton.icon(
-                  onPressed: _shots.isEmpty ? null : _undo,
-                  icon: const Icon(Icons.undo, size: 18),
-                  label: const Text('Undo'),
-                ),
-                TextButton.icon(
-                  onPressed: _shots.isEmpty ? null : _clear,
-                  icon: const Icon(Icons.delete_outline, size: 18),
-                  label: const Text('Clear hole'),
-                  style: TextButton.styleFrom(
-                      foregroundColor: Colors.red.shade700),
-                ),
-                const Spacer(),
-                OutlinedButton.icon(
-                  onPressed: (_shots.isEmpty || _finished)
-                      ? null
-                      : _holedOut,
-                  icon: const Icon(Icons.flag, size: 18),
-                  label: const Text('Holed out'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
+          ],
+        ),
+      ),
+      ),
+      // Fixed action bar: Undo / Clear / Holed out / Save never scroll and
+      // are never pushed off screen when the putt stepper appears.
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: _shots.isEmpty ? null : _undo,
+                    icon: const Icon(Icons.undo, size: 18),
+                    label: const Text('Undo'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _shots.isEmpty ? null : _clear,
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    label: const Text('Clear hole'),
+                    style: TextButton.styleFrom(
+                        foregroundColor: Colors.red.shade700),
+                  ),
+                  const Spacer(),
+                  OutlinedButton.icon(
+                    onPressed: (_shots.isEmpty || _finished)
+                        ? null
+                        : _holedOut,
+                    icon: const Icon(Icons.flag, size: 18),
+                    label: const Text('Holed out'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              ElevatedButton(
                 onPressed: (_loading || _saving) ? null : _save,
                 child: _saving
                     ? const SizedBox(
@@ -877,10 +909,10 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
                             strokeWidth: 2))
                     : const Text('Save shots'),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
-    ));
+    );
   }
 }
