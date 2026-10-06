@@ -18,7 +18,11 @@ import 'hole_map_manifest.dart';
 /// the lie is suggested from the map geometry with manual override chips.
 /// Saving never blocks on a shot-count vs strokes mismatch — it shows a
 /// gentle inline warning.
-Future<bool> showShotTracker({
+///
+/// Returns the tracked stroke count when this session saved a finished
+/// (holed) hole with changes — the score entry screen writes it as the
+/// hole's score, so tracking doubles as score entry — and null otherwise.
+Future<int?> showShotTracker({
   required BuildContext context,
   required ApiClient api,
   required int cardId,
@@ -27,8 +31,8 @@ Future<bool> showShotTracker({
   required int par,
   int? strokes,
 }) async {
-  final saved = await Navigator.of(context).push<bool>(
-    MaterialPageRoute<bool>(
+  return Navigator.of(context).push<int?>(
+    MaterialPageRoute<int?>(
       fullscreenDialog: true,
       builder: (ctx) => _ShotTrackerSheet(
         api: api,
@@ -40,7 +44,6 @@ Future<bool> showShotTracker({
       ),
     ),
   );
-  return saved == true;
 }
 
 const _lies = ['tee', 'fairway', 'rough', 'sand', 'green'];
@@ -542,22 +545,31 @@ class _ShotTrackerSheetState extends State<_ShotTrackerSheet> {
   }
 
   Future<void> _save() async {
+    final wasDirty = _dirty;
     if (await _persist() && mounted) {
-      Navigator.of(context).pop(true);
+      // Hand the finished count back when this session changed something
+      // and holed out — the score entry screen writes it as the hole's
+      // score. Untouched sessions report null so a manual score is never
+      // clobbered by a look-but-don't-touch open.
+      final result = (_finished && wasDirty) ? _trackedStrokes : null;
+      Navigator.of(context).pop(result);
       showSnack(context,
           'Hole ${widget.holeNumber}: $_trackedStrokes stroke${_trackedStrokes == 1 ? '' : 's'} saved.');
     }
   }
 
   /// Close button: unsaved work is flushed first so it is never silently
-  /// lost. If the save fails the sheet stays open so the player can
+  /// lost. If the save fails the page stays open so the player can
   /// retry instead of losing shots.
   Future<void> _close() async {
-    if (_dirty) {
+    final wasDirty = _dirty;
+    if (wasDirty) {
       final ok = await _persist();
       if (!ok || !mounted) return;
     }
-    if (mounted) Navigator.of(context).pop(false);
+    if (mounted) {
+      Navigator.of(context).pop((_finished && wasDirty) ? _trackedStrokes : null);
+    }
   }
 
   @override
