@@ -750,6 +750,25 @@ class TestHoleShots(TempDbTest):
         self.assertEqual(row["display_name"], "Old Player")
         self.assertEqual(row["stats_private"], 0)
 
+    async def test_altshot_backfill_tolerates_null_player1(self):
+        # Regression: a team row with NULL player1_discord_id (and no
+        # matching player row) must not crash the migration with
+        # "NOT NULL constraint failed: altshot_team_members.name" —
+        # this crash-looped the production bot on startup.
+        async with aiosqlite.connect(self.db_path) as con:
+            await con.execute(
+                "INSERT INTO altshot_teams (id, tee_time_id, team_number,"
+                " player1_discord_id, created_at) VALUES (?,?,?,?,?)",
+                ("t1", "tt1", 1, None, "2026-10-07T00:00:00+00:00"),
+            )
+            await con.commit()
+        await db._migrate(self.db_path)  # must not raise
+        rows = await db._fetchall(
+            self.db_path,
+            "SELECT name FROM altshot_team_members WHERE team_id = 't1'")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "")
+
     async def test_delete_player_data_removes_shots(self):
         cid = (await self._card("p1"))[0]
         await db.set_hole_shots(self.db_path, cid, 1, [

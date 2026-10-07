@@ -841,7 +841,7 @@ async def _migrate(db_path: str) -> None:
             "SELECT t.id, t.player1_discord_id, t.player2_name,"
             " t.player3_name, t.player4_name,"
             " COALESCE(p.display_name,"
-            " '<@' || t.player1_discord_id || '>') AS pname"
+            " '<@' || t.player1_discord_id || '>', '') AS pname"
             " FROM altshot_teams t LEFT JOIN players p"
             " ON p.discord_id = t.player1_discord_id"
             " WHERE NOT EXISTS (SELECT 1 FROM altshot_team_members m"
