@@ -580,6 +580,36 @@ async def _migrate(db_path: str) -> None:
             )
             await con.commit()
 
+        # tee_times.started_at / archived_at (Start Round flow).
+        # started_at: when any player pressed Start Round (NULL = not started).
+        # archived_at: when all scorecards were submitted (NULL = active).
+        if "started_at" not in tt_cols:
+            await con.execute(
+                "ALTER TABLE tee_times ADD COLUMN started_at TEXT")
+            await con.commit()
+        if "archived_at" not in tt_cols:
+            await con.execute(
+                "ALTER TABLE tee_times ADD COLUMN archived_at TEXT")
+            await con.commit()
+
+        # casual_tee_times.archived_at / completed_at / completed_by
+        # (admin review flow; no Start Round for casual).
+        cur = await con.execute("PRAGMA table_info(casual_tee_times)")
+        ctt_cols = [r[1] for r in await cur.fetchall()]
+        if "archived_at" not in ctt_cols:
+            await con.execute(
+                "ALTER TABLE casual_tee_times ADD COLUMN archived_at TEXT")
+            await con.commit()
+        if "completed_at" not in ctt_cols:
+            await con.execute(
+                "ALTER TABLE casual_tee_times ADD COLUMN completed_at TEXT")
+            await con.commit()
+        if "completed_by" not in ctt_cols:
+            await con.execute(
+                "ALTER TABLE casual_tee_times"
+                " ADD COLUMN completed_by TEXT")
+            await con.commit()
+
         # rounds.start_date / end_date. Existing rounds inherit their
         # tournament's overall window until crew tunes them.
         cur = await con.execute("PRAGMA table_info(rounds)")
@@ -1773,14 +1803,17 @@ async def tee_time_player_count(db_path, tee_time_id) -> int:
 
 
 async def join_tee_time(db_path, tee_time_id, discord_id) -> str:
-    """Returns 'ok', 'full', 'already', 'round_conflict', or 'missing'.
+    """Returns 'ok', 'full', 'already', 'round_conflict', 'started', or 'missing'.
 
     'round_conflict': the player is already in a different tee time for the
     same tournament round. One tee time per player per round — no exceptions.
+    'started': the round has started; no new players may join.
     """
     tt = await get_tee_time(db_path, tee_time_id)
     if tt is None:
         return "missing"
+    if tt.get("started_at"):
+        return "started"
     players = await get_tee_time_players(db_path, tee_time_id)
     if any(p["discord_id"] == discord_id for p in players):
         return "already"
@@ -1799,6 +1832,59 @@ async def join_tee_time(db_path, tee_time_id, discord_id) -> str:
         (tee_time_id, discord_id),
     )
     return "ok"
+
+
+async def start_tournament_tee_time(db_path, tee_time_id, discord_id) -> str:
+    """Press Start Round on a tournament tee time.
+
+    Any player in the tee time (or a server admin/owner) may start it.
+    Returns 'ok', 'missing', 'not_player', or 'already_started'.
+    Sets started_at to the press time (UTC ISO); joining locks at this point.
+    """
+    tt = await get_tee_time(db_path, tee_time_id)
+    if tt is None:
+        return "missing"
+    if tt.get("started_at"):
+        return "already_started"
+    players = await get_tee_time_players(db_path, tee_time_id)
+    if not any(p["discord_id"] == discord_id for p in players):
+        # Admins/owners may also start (checked by caller via is_admin).
+        return "not_player"
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    await _execute(
+        db_path,
+        "UPDATE tee_times SET started_at = ? WHERE id = ?",
+        (now, tee_time_id),
+    )
+    return "ok"
+
+
+async def archive_tournament_tee_time_if_complete(db_path, tee_time_id) -> bool:
+    """Archive a tournament tee time once every player has a verified card.
+
+    Returns True if the tee time was newly archived.
+    """
+    tt = await get_tee_time(db_path, tee_time_id)
+    if tt is None or tt.get("archived_at"):
+        return False
+    players = await get_tee_time_players(db_path, tee_time_id)
+    if not players:
+        return False
+    for p in players:
+        card = await find_scorecard(
+            db_path, tt["tournament_id"],
+            player_discord_id=p["discord_id"],
+            tee_time_id=tee_time_id,
+            round_number=tt.get("round_number") or 1)
+        if card is None or card.get("status") != "verified":
+            return False
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    await _execute(
+        db_path,
+        "UPDATE tee_times SET archived_at = ? WHERE id = ?",
+        (now, tee_time_id),
+    )
+    return True
 
 
 async def leave_tee_time(db_path, tee_time_id, discord_id) -> bool:
@@ -3083,6 +3169,53 @@ async def leave_casual_tee_time(db_path, tt_id: str,
         " WHERE tee_time_id = ? AND discord_id = ?",
         (tt_id, discord_id),
     )
+
+
+async def archive_casual_tee_time_if_complete(db_path, tt_id: str) -> bool:
+    """Archive a casual tee time once every player has a verified card.
+
+    Returns True if the tee time was newly archived. Admins then review
+    and mark it complete via complete_casual_tee_time.
+    """
+    tt = await get_casual_tee_time(db_path, tt_id)
+    if tt is None or tt.get("archived_at"):
+        return False
+    players = tt.get("players") or []
+    if not players:
+        return False
+    cards = await get_casual_scorecards(db_path, tt_id)
+    verified = {c.get("player_discord_id") for c in cards
+                if c.get("status") == "verified"}
+    if not all(pid in verified for pid in players):
+        return False
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    await _execute(
+        db_path,
+        "UPDATE casual_tee_times SET archived_at = ? WHERE id = ?",
+        (now, tt_id),
+    )
+    return True
+
+
+async def complete_casual_tee_time(db_path, tt_id: str,
+                                   admin_discord_id: str) -> str:
+    """Admin marks an archived casual tee time as reviewed/complete.
+
+    Returns 'ok', 'missing', or 'not_archived'.
+    """
+    tt = await get_casual_tee_time(db_path, tt_id)
+    if tt is None:
+        return "missing"
+    if not tt.get("archived_at"):
+        return "not_archived"
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    await _execute(
+        db_path,
+        "UPDATE casual_tee_times SET completed_at = ?, completed_by = ?"
+        " WHERE id = ?",
+        (now, admin_discord_id, tt_id),
+    )
+    return "ok"
 
 
 async def update_casual_tee_time(db_path, tt_id: str,

@@ -222,6 +222,8 @@ class TeeTime {
   final String createdBy;
   final int roundNumber;
   final List<TeeTimePlayer> players;
+  final DateTime? startedAtUtc;
+  final DateTime? archivedAtUtc;
 
   TeeTime({
     required this.id,
@@ -231,7 +233,18 @@ class TeeTime {
     required this.createdBy,
     this.roundNumber = 1,
     required this.players,
+    this.startedAtUtc,
+    this.archivedAtUtc,
   });
+
+  static DateTime? _parseOpt(dynamic v) {
+    if (v == null) return null;
+    try {
+      return DateTime.parse(v.toString()).toUtc();
+    } catch (_) {
+      return null;
+    }
+  }
 
   factory TeeTime.fromJson(Map<String, dynamic> j) {
     DateTime parsed;
@@ -250,12 +263,17 @@ class TeeTime {
       players: ((j['players'] as List?) ?? [])
           .map((e) => TeeTimePlayer.fromJson(e as Map<String, dynamic>))
           .toList(),
+      startedAtUtc: _parseOpt(j['started_at']),
+      archivedAtUtc: _parseOpt(j['archived_at']),
     );
   }
 
   DateTime get startsAtLocal => startsAtUtc.toLocal();
+  DateTime? get startedAtLocal => startedAtUtc?.toLocal();
   int get spotsFilled => players.length;
   bool get isFull => spotsFilled >= maxPlayers;
+  bool get isStarted => startedAtUtc != null;
+  bool get isArchived => archivedAtUtc != null;
   bool hasPassed(DateTime now) => !startsAtUtc.isAfter(now);
 }
 

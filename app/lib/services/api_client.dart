@@ -266,6 +266,25 @@ class ApiClient {
   Future<void> joinTeeTime(String teeTimeId) async {    await _post('/api/tee-times/$teeTimeId/join');
   }
 
+  Future<Map<String, dynamic>> startTeeTime(String teeTimeId) async {
+    final r = await _post('/api/tee-times/$teeTimeId/start');
+    return r as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getArchiveTournamentTeeTimes() async {
+    final r = await _get('/api/admin/archive/tournament-tee-times');
+    return r as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getArchiveCasualTeeTimes() async {
+    final r = await _get('/api/admin/archive/casual-tee-times');
+    return r as Map<String, dynamic>;
+  }
+
+  Future<void> completeCasualTeeTime(String ttId) async {
+    await _post('/api/admin/casual-tee-times/$ttId/complete');
+  }
+
   Future<void> leaveTeeTime(String teeTimeId) async {
     await _post('/api/tee-times/$teeTimeId/leave');
   }
