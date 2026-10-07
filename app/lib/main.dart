@@ -162,6 +162,8 @@ class _ScrollableNavBar extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Container(
+        // 1/16in (~10pt) lift so the bar clears the iPhone swipe-up zone.
+        margin: const EdgeInsets.only(bottom: 10),
         decoration: BoxDecoration(
           color: scheme.surface,
           border: Border(top: BorderSide(color: scheme.outlineVariant)),
