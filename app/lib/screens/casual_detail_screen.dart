@@ -262,6 +262,7 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
           return ListView(
             children: [
               const ScorecardDeadlineWarning(),
+              const ProDifficultyDisclaimer(),
               CourseArtHeader(
                 course: tt.course,
                 children: [

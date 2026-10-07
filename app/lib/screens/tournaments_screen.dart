@@ -128,9 +128,10 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
           }
           return ListView.builder(
             physics: const AlwaysScrollableScrollPhysics(),
-            itemCount: tournaments.length,
+            itemCount: tournaments.length + 1,
             itemBuilder: (context, i) {
-              final t = tournaments[i];
+              if (i == 0) return const ProDifficultyDisclaimer();
+              final t = tournaments[i - 1];
               final art = courseArtAsset(t.course);
               return Card(
                 margin:
