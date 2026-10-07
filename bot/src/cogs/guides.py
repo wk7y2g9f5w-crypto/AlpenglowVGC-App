@@ -74,18 +74,9 @@ async def _upsert_guide(channel: discord.TextChannel, embed: discord.Embed,
     existing = await _find_guide_message(channel, marker, bot_user_id)
     try:
         if existing is not None:
-            msg = await existing.edit(embed=embed)
-            how = "edit"
+            await existing.edit(embed=embed)
         else:
-            msg = await channel.send(embed=embed)
-            how = "send"
-        # TEMP DIAGNOSTIC (2026-10-07): log what the API echoed back.
-        if msg.embeds:
-            _rd = msg.embeds[0].to_dict()
-            print(f"guide debug2: {how} #{channel.name} echo title={_rd.get('title')!r} "
-                  f"fields={len(_rd.get('fields', []))} keys={sorted(_rd.keys())}")
-        else:
-            print(f"guide debug2: {how} #{channel.name} echo EMPTY (0 embeds)")
+            await channel.send(embed=embed)
         return True
     except (discord.Forbidden, discord.HTTPException) as e:
         print(f"guide upsert failed in #{channel.name}: {e}")
