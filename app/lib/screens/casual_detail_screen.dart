@@ -261,6 +261,7 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
               tt.creatorDiscordId == myId || d.me.isCrew || d.me.isAdmin;
           return ListView(
             children: [
+              const ScorecardDeadlineWarning(),
               CourseArtHeader(
                 course: tt.course,
                 children: [

@@ -257,6 +257,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
 
           return ListView(
             children: [
+              const ScorecardDeadlineWarning(),
               CourseArtHeader(
                 course: widget.tournament.course,
                 children: [
