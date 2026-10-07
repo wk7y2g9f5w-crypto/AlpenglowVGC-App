@@ -156,4 +156,17 @@ class StartRoundApiTestCase(_ApiTestCase):
                             headers=self.h("999"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
 
+    def test_admin_can_start_without_being_in_tee_time(self):
+        tt_id = self._started_tt(self.t_open, creator="123")
+        # Non-admin, not in tee time: 403.
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h("456"))
+        self.assertEqual(r.status_code, 403, r.text)
+        # Admin, not in tee time: 200.
+        self._admin(True)
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h("999"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["started"])
+
 del _ApiTestCase
