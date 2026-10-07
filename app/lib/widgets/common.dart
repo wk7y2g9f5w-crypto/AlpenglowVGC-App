@@ -148,3 +148,38 @@ String formatTeeTimeWhen(String iso) {
     return iso;
   }
 }
+
+/// Amber policy banner shown at the top of every tee-time detail screen:
+/// scorecards must be submitted within 4 hours of the tee time.
+class ScorecardDeadlineWarning extends StatelessWidget {
+  const ScorecardDeadlineWarning({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.amber.shade50,
+        border: Border(bottom: BorderSide(color: Colors.amber.shade700)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_rounded,
+              color: Colors.amber.shade800, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Scorecards must be submitted/complete within 4 hours of tee time!',
+              style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.amber.shade900,
+                  fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

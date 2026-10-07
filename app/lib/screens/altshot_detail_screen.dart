@@ -714,6 +714,7 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
               tt.creatorDiscordId == myId || d.me.isCrew || d.me.isAdmin;
           return ListView(
             children: [
+              const ScorecardDeadlineWarning(),
               _header(tt),
               Padding(
                 padding: const EdgeInsets.all(16),

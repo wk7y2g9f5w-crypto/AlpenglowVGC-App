@@ -264,6 +264,7 @@ class _MatchPlayDetailScreenState extends State<MatchPlayDetailScreen> {
           final completed = score?.isCompleted == true;
           return ListView(
             children: [
+              const ScorecardDeadlineWarning(),
               CourseArtHeader(
                 course: tt.course,
                 children: [
