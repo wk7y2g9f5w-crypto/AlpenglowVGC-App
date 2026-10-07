@@ -139,12 +139,40 @@ async def require_strict_admin(interaction: discord.Interaction) -> bool:
     return False
 
 
+# Channel names accepted for the tee-sheet boards and the /tee_sheet
+# commands, in preference order. The emoji-prefixed forms are tried first
+# (in case the guild uses them); "tee-sheet" remains as a legacy fallback.
+TEESHEET_CHANNEL_NAMES: tuple[str, ...] = (
+    "⛳️tee-times",
+    "⛳tee-times",
+    "tee-times",
+    "tee-sheet",
+)
+
+
+def find_teesheet_channel(bot, guild_id):
+    """The guild's tee-sheet channel, or None when it has none of the
+    accepted names."""
+    try:
+        guild = bot.get_guild(int(guild_id))
+    except (TypeError, ValueError):
+        return None
+    if guild is None:
+        return None
+    for name in TEESHEET_CHANNEL_NAMES:
+        channel = discord.utils.get(guild.text_channels, name=name)
+        if channel is not None:
+            return channel
+    return None
+
+
 # Commands that may only be invoked from a designated channel, mapped by
-# command key -> required channel name. The gate is strict: when the guild
-# has no channel with that name, the command is refused with an error naming
-# the channel (the server isn't set up for it) rather than running elsewhere.
-DESIGNATED_CHANNELS: dict[str, str] = {
-    "tee_sheet": "tee-sheet",
+# command key -> accepted channel names (first is the display name). The
+# gate is strict: when the guild has no channel with any of those names,
+# the command is refused with an error naming the channel (the server
+# isn't set up for it) rather than running elsewhere.
+DESIGNATED_CHANNELS: dict[str, tuple[str, ...]] = {
+    "tee_sheet": TEESHEET_CHANNEL_NAMES,
 }
 
 
@@ -157,18 +185,19 @@ async def require_designated_channel(
     returns False, so a designated command never goes through from the
     wrong place — including a guild that lacks the channel entirely.
     """
-    channel_name = DESIGNATED_CHANNELS.get(command_key)
-    if channel_name is None:
+    channel_names = DESIGNATED_CHANNELS.get(command_key)
+    if channel_names is None:
         return True
     guild = interaction.guild
-    target = (
-        discord.utils.get(guild.text_channels, name=channel_name)
-        if guild is not None
-        else None
-    )
+    target = None
+    if guild is not None:
+        for name in channel_names:
+            target = discord.utils.get(guild.text_channels, name=name)
+            if target is not None:
+                break
     if target is None or interaction.channel_id != target.id:
         await interaction.response.send_message(
-            f"❌ This command can only be used in #{channel_name}.",
+            f"❌ This command can only be used in #{channel_names[0]}.",
             ephemeral=True,
         )
         return False

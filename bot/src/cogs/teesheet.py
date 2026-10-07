@@ -17,7 +17,7 @@ class TeeSheet(commands.Cog):
     )
 
     @teesheet_group.command(
-        name="post", description="Post the Tee Sheet boards (admin, #tee-sheet only)"
+        name="post", description="Post the Tee Sheet boards (admin, #⛳️tee-times only)"
     )
     async def teesheet_post(self, interaction: discord.Interaction):
         if not await require_designated_channel(interaction, "tee_sheet"):
@@ -52,7 +52,7 @@ class TeeSheet(commands.Cog):
                                  ts.REGISTER_KIND)
         if not rec:
             await interaction.followup.send(
-                "No boards posted yet — run `/tee_sheet post` in #tee-sheet first.",
+                "No boards posted yet — run `/tee_sheet post` in #⛳️tee-times first.",
                 ephemeral=True,
             )
             return
