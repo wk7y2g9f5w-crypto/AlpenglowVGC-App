@@ -86,6 +86,12 @@ async def detect_score_events(
                           "player_discord_id": player_discord_id,
                           "hole": hole_no},
                 )
+                await db.enqueue_outbox(
+                    db_path, "score_highlight",
+                    {"tournament_id": tournament_id, "event_type": "ace",
+                     "player_discord_id": player_discord_id,
+                     "player_name": name, "hole": hole_no,
+                     "course": course})
                 fired.append("ace")
             elif is_alba and not was_alba:
                 await db.notify_tournament_players(
@@ -98,6 +104,14 @@ async def detect_score_events(
                           "player_discord_id": player_discord_id,
                           "hole": hole_no},
                 )
+                await db.enqueue_outbox(
+                    db_path, "score_highlight",
+                    {"tournament_id": tournament_id,
+                     "event_type": "albatross",
+                     "player_discord_id": player_discord_id,
+                     "player_name": name, "hole": hole_no,
+                     "course": course,
+                     "under": par - new if par and new else None})
                 fired.append("albatross")
 
         # Top-3 movement (stroke leaderboards; live cards count).
@@ -119,6 +133,10 @@ async def detect_score_events(
                     data={"type": "top3", "tournament_id": tournament_id,
                           "top3": top3},
                 )
+                await db.enqueue_outbox(
+                    db_path, "score_highlight",
+                    {"tournament_id": tournament_id, "event_type": "top3",
+                     "top3_names": names[:3], "course": course})
                 fired.append("top3")
     except Exception:
         import logging
