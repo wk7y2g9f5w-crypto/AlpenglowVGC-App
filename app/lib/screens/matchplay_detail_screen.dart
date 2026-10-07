@@ -265,6 +265,7 @@ class _MatchPlayDetailScreenState extends State<MatchPlayDetailScreen> {
           return ListView(
             children: [
               const ScorecardDeadlineWarning(),
+              const ProDifficultyDisclaimer(),
               CourseArtHeader(
                 course: tt.course,
                 children: [

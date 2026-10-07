@@ -183,3 +183,39 @@ class ScorecardDeadlineWarning extends StatelessWidget {
     );
   }
 }
+
+/// Amber policy banner: every round must be played on PRO difficulty to be
+/// valid. Shown on all tee-time detail screens and above the tournaments
+/// list.
+class ProDifficultyDisclaimer extends StatelessWidget {
+  const ProDifficultyDisclaimer({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.amber.shade50,
+        border: Border(bottom: BorderSide(color: Colors.amber.shade700)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline,
+              color: Colors.amber.shade800, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Each round must be played on PRO difficulty for the rounds to be valid!',
+              style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.amber.shade900,
+                  fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

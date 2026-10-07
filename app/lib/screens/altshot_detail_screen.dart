@@ -715,6 +715,7 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
           return ListView(
             children: [
               const ScorecardDeadlineWarning(),
+              const ProDifficultyDisclaimer(),
               _header(tt),
               Padding(
                 padding: const EdgeInsets.all(16),
