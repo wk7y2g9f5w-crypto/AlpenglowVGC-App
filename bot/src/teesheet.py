@@ -1,6 +1,6 @@
 """The Tee Sheet: persistent, auto-updating boards for registration and tee times.
 
-Two bot-managed messages live in the #tee-sheet channel:
+Two bot-managed messages live in the tee-sheet channel (#⛳️tee-times):
 
 - the **registration board** lists tournaments open for registration, each
   with a Register button;
@@ -23,6 +23,7 @@ import discord
 
 from src import db
 from src import scoring_logic as sl
+from src.cogs.common import find_teesheet_channel
 
 REGISTER_KIND = "register"
 TEESHEET_KIND = "teesheet"
@@ -344,7 +345,7 @@ async def post_boards(bot, guild_id: str, channel) -> None:
 async def startup(bot, guild_id: str) -> None:
     """(Re)register persistent board views; refresh existing boards.
 
-    If no board has been posted yet and a #tee-sheet channel exists, post
+    If no board has been posted yet and a tee-sheet channel exists, post
     the boards there automatically.
     """
     get_view(bot, guild_id, REGISTER_KIND)
@@ -354,8 +355,7 @@ async def startup(bot, guild_id: str) -> None:
     if has_register or has_teesheet:
         await refresh_boards(bot, guild_id)
         return
-    guild = bot.get_guild(int(guild_id))
-    channel = discord.utils.get(guild.text_channels, name="tee-sheet") if guild else None
+    channel = find_teesheet_channel(bot, guild_id)
     if channel is not None:
         await post_boards(bot, guild_id, channel)
 

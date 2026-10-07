@@ -29,7 +29,7 @@ def setup_checklist_text(tz_name: str | None, handle: str | None) -> str:
     )
     if tz_name:
         lines.append(
-            "\nYou're all set — grab a tournament from the **#tee-sheet** board "
+            "\nYou're all set — grab a tournament from the **#⛳️tee-times** board "
             "or `/tournament list`, then hit Register. See you at golden hour. :sunset:"
         )
     else:

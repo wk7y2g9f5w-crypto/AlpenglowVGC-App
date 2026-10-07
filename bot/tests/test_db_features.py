@@ -550,14 +550,14 @@ class SetupChecklistTest(unittest.TestCase):
         self.assertNotIn("⬜", txt)
         self.assertIn("America/Denver", txt)
         self.assertIn("CaydenVR", txt)
-        self.assertIn("#tee-sheet", txt)
+        self.assertIn("#⛳️tee-times", txt)
 
     def test_timezone_only_still_ready(self):
         from src.cogs import onboarding as ob
         txt = ob.setup_checklist_text("UTC", None)
         self.assertIn("✅ **Timezone:** UTC", txt)
         self.assertIn("⬜ **Golf+ username:**", txt)
-        self.assertIn("#tee-sheet", txt)  # handle is optional
+        self.assertIn("#⛳️tee-times", txt)  # handle is optional
 
 
 class FormatTeeTimeLocalTest(unittest.TestCase):

@@ -46,10 +46,18 @@ class TestDesignatedChannelGate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ix.response.sent, [])
 
     async def test_mapping_covers_tee_sheet(self):
-        self.assertEqual(common.DESIGNATED_CHANNELS["tee_sheet"], "tee-sheet")
+        names = common.DESIGNATED_CHANNELS["tee_sheet"]
+        self.assertEqual(names[0], "⛳️tee-times")
+        self.assertIn("tee-sheet", names)  # legacy fallback
 
     async def test_allowed_in_designated_channel(self):
         guild = make_guild("general", "tee-sheet")  # tee-sheet has id 2
+        ix = FakeInteraction(guild, 2)
+        self.assertTrue(await common.require_designated_channel(ix, "tee_sheet"))
+        self.assertEqual(ix.response.sent, [])
+
+    async def test_allowed_in_emoji_channel(self):
+        guild = make_guild("general", "⛳️tee-times")  # ⛳️tee-times has id 2
         ix = FakeInteraction(guild, 2)
         self.assertTrue(await common.require_designated_channel(ix, "tee_sheet"))
         self.assertEqual(ix.response.sent, [])
@@ -60,20 +68,20 @@ class TestDesignatedChannelGate(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await common.require_designated_channel(ix, "tee_sheet"))
         self.assertEqual(len(ix.response.sent), 1)
         content, ephemeral = ix.response.sent[0]
-        self.assertIn("#tee-sheet", content)
+        self.assertIn("#⛳️tee-times", content)
         self.assertTrue(ephemeral)
 
     async def test_blocked_when_guild_lacks_channel(self):
         ix = FakeInteraction(make_guild("general", "random"), 1)
         self.assertFalse(await common.require_designated_channel(ix, "tee_sheet"))
         content, _ = ix.response.sent[0]
-        self.assertIn("#tee-sheet", content)
+        self.assertIn("#⛳️tee-times", content)
 
     async def test_blocked_in_dm(self):
         ix = FakeInteraction(None, 99)
         self.assertFalse(await common.require_designated_channel(ix, "tee_sheet"))
         content, _ = ix.response.sent[0]
-        self.assertIn("#tee-sheet", content)
+        self.assertIn("#⛳️tee-times", content)
 
 
 if __name__ == "__main__":
