@@ -104,6 +104,50 @@ class TestOutbox(TempDbTest):
 
 
 class TestMigration(TempDbTest):
+    async def test_reset_tournament_ids(self):
+        import json as _json
+        # 4 tournaments; keepers are 3 and 4 -> become 1 and 2.
+        for i in range(4):
+            await db.create_tournament(
+                self.db_path, "g1", f"T{i+1}", "stroke", 18, "Course",
+                _json.dumps([4] * 18), "", "admin")
+        for tid in (3, 4):
+            await db.register_player(self.db_path, tid, "p1")
+            await db.create_tee_time(
+                self.db_path, tid, "Morning", "2026-10-10T10:00:00",
+                4, "admin", "ch1")
+        await db.register_player(self.db_path, 1, "p2")  # doomed
+        report = await db.reset_tournament_ids(self.db_path, keep_ids=(3, 4))
+        self.assertEqual(report["deleted"], [1, 2])
+        self.assertEqual(report["renumbered"], {3: 1, 4: 2})
+        remaining = await db._fetchall(
+            self.db_path, "SELECT id, name FROM tournaments ORDER BY id")
+        self.assertEqual(
+            [(r["id"], r["name"]) for r in remaining],
+            [(1, "T3"), (2, "T4")])
+        regs = await db._fetchall(
+            self.db_path,
+            "SELECT tournament_id, player_discord_id FROM registrations")
+        self.assertEqual(
+            sorted((r["tournament_id"], r["player_discord_id"]) for r in regs),
+            [(1, "p1"), (2, "p1")])
+        tts = await db._fetchall(
+            self.db_path, "SELECT tournament_id FROM tee_times")
+        self.assertEqual(
+            sorted(r["tournament_id"] for r in tts), [1, 2])
+        seq = await db._fetchone(
+            self.db_path,
+            "SELECT seq FROM sqlite_sequence WHERE name='tournaments'")
+        self.assertEqual(seq["seq"], 2)
+        for tbl in ("rounds", "registrations", "teams", "tee_times",
+                    "scorecards", "matches", "season_tournaments",
+                    "season_points", "tournament_leaders"):
+            bad = await db._fetchall(
+                self.db_path,
+                f"SELECT tournament_id FROM {tbl} WHERE tournament_id "
+                f"NOT IN (SELECT id FROM tournaments)")
+            self.assertEqual(bad, [], f"orphans in {tbl}")
+
     async def test_old_db_gets_dates_and_scramble(self):
         # Build a legacy database (pre-dates, pre-scramble) by hand.
         legacy = os.path.join(self.tmp.name, "legacy.db")
