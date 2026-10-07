@@ -1544,13 +1544,20 @@ async def start_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
     players = await db.get_tee_time_players(DB_PATH, tee_time_id)
     is_player = any(
         p["discord_id"] == user["discord_id"] for p in players)
-    if not is_player and not user.get("is_admin"):
+    # Admins may start any round without being in the tee time.
+    is_admin = await fetch_admin_status(user["discord_id"])
+    if is_admin is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify admin status — try again shortly.",
+        )
+    if not is_player and not is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only players in this tee time (or admins) can start the round.",
         )
     result = await db.start_tournament_tee_time(
-        DB_PATH, tee_time_id, user["discord_id"])
+        DB_PATH, tee_time_id, user["discord_id"], is_admin=is_admin)
     if result == "missing":  # pragma: no cover - checked above
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Tee time not found"

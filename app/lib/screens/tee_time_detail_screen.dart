@@ -350,6 +350,15 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                         foregroundColor: Colors.white,
                       ),
                     ),
+                  if (!inIt && data.isAdmin && !tt.isStarted)
+                    OutlinedButton.icon(
+                      onPressed: () => _act(
+                        () => _api.startTeeTime(tt.id),
+                        'Round started.',
+                      ),
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('Start Round (admin)'),
+                    ),
                   if (inIt && tt.isStarted)
                     ElevatedButton.icon(
                       onPressed: () {
