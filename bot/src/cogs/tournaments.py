@@ -198,7 +198,9 @@ async def post_signup_announcement(
         pars=pars,
         pars_auto=pars_auto,
     )
-    await channel.send(embed=embed, view=announcement_view(tournament_id))
+    await channel.send(
+        content="@everyone", embed=embed, view=announcement_view(tournament_id)
+    )
     await ts.maybe_refresh(bot, guild_id)
     return True
 
@@ -448,11 +450,13 @@ class Tournaments(commands.Cog):
         channel = signup_channel(self.bot, str(interaction.guild_id))
         view = announcement_view(tid)
         if channel is not None:
-            await channel.send(embed=embed, view=view)
+            await channel.send(content="@everyone", embed=embed, view=view)
             where = "announced in #event-signups"
         else:
             # No #event-signups channel - fall back to the invoking channel.
-            await interaction.channel.send(embed=embed, view=view)
+            await interaction.channel.send(
+                content="@everyone", embed=embed, view=view
+            )
             where = "announced here (#event-signups not found)"
         await ts.maybe_refresh(self.bot, str(interaction.guild_id))
         await interaction.followup.send(
