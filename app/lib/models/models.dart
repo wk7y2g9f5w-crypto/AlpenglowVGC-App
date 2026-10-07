@@ -587,6 +587,33 @@ class RoundSummary {
   int get thru => scores.where((s) => s != null).length;
 }
 
+/// One row of the tournament players list: an account with a Golf+
+/// username, flagged registered or not for the tournament.
+class TournamentPlayer {
+  final String discordId;
+  final String displayName;
+  final String golfplusHandle;
+  final bool registered;
+  final String? registeredAt;
+
+  const TournamentPlayer({
+    required this.discordId,
+    required this.displayName,
+    required this.golfplusHandle,
+    required this.registered,
+    this.registeredAt,
+  });
+
+  factory TournamentPlayer.fromJson(Map<String, dynamic> j) =>
+      TournamentPlayer(
+        discordId: (j['discord_id'] ?? '').toString(),
+        displayName: (j['display_name'] ?? '').toString(),
+        golfplusHandle: (j['golfplus_handle'] ?? '').toString(),
+        registered: j['registered'] == true,
+        registeredAt: j['registered_at']?.toString(),
+      );
+}
+
 class LeaderboardEntry {
   final Map<String, dynamic> raw;
 

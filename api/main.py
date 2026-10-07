@@ -1393,6 +1393,27 @@ async def unregister(tournament_id: int, user: CurrentUser) -> dict:
     return {"registered": False}
 
 
+@app.get("/api/tournaments/{tournament_id}/players")
+async def tournament_players(tournament_id: int, user: CurrentUser) -> dict:
+    """Read-only players list: every account with a Golf+ username, flagged
+    registered or not for this tournament. Registered first, then A-Z."""
+    t = await _tournament_or_404(tournament_id)
+    rows = await db.get_tournament_players(DB_PATH, t["id"])
+    return {
+        "tournament_id": t["id"],
+        "players": [
+            {
+                "discord_id": r["discord_id"],
+                "display_name": r["display_name"],
+                "golfplus_handle": r["golfplus_handle"],
+                "registered": bool(r["registered"]),
+                "registered_at": r.get("registered_at"),
+            }
+            for r in rows
+        ],
+    }
+
+
 # --------------------------------------------------------------------------
 # Tee times
 # --------------------------------------------------------------------------

@@ -127,7 +127,7 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
   Widget build(BuildContext context) {
     final t = _tournament;
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
           title: Text(t.name),
@@ -135,6 +135,7 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
           bottom: const TabBar(tabs: [
             Tab(text: 'Tee Times'),
             Tab(text: 'Leaderboard'),
+            Tab(text: 'Players'),
           ]),
         ),
         body: Column(
@@ -149,6 +150,11 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
                     tournament: t,
                   ),
                   _LeaderboardTab(
+                    auth: widget.auth,
+                    settings: widget.settings,
+                    tournament: t,
+                  ),
+                  _PlayersTab(
                     auth: widget.auth,
                     settings: widget.settings,
                     tournament: t,
@@ -1176,6 +1182,142 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
           },
         );
       },
+    );
+  }
+}
+
+/// Players tab: read-only list of every account with a Golf+ username,
+/// grouped into registered vs not registered for this tournament.
+class _PlayersTab extends StatefulWidget {
+  final AuthService auth;
+  final SettingsService settings;
+  final Tournament tournament;
+
+  const _PlayersTab({
+    required this.auth,
+    required this.settings,
+    required this.tournament,
+  });
+
+  @override
+  State<_PlayersTab> createState() => _PlayersTabState();
+}
+
+class _PlayersTabState extends State<_PlayersTab> {
+  late Future<List<TournamentPlayer>> _future;
+
+  ApiClient get _api => ApiClient(
+      baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _api.getTournamentPlayers(widget.tournament.id);
+  }
+
+  Future<void> _refresh() async {
+    final f = _api.getTournamentPlayers(widget.tournament.id);
+    setState(() => _future = f);
+    await f;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AsyncBody<List<TournamentPlayer>>(
+      future: _future,
+      onRefresh: _refresh,
+      builder: (context, players) {
+        if (players.isEmpty) {
+          return ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: const [
+              SizedBox(height: 120),
+              Text(
+                'No players with a Golf+ username yet.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey),
+              ),
+            ],
+          );
+        }
+        final registered = players.where((p) => p.registered).toList();
+        final unregistered = players.where((p) => !p.registered).toList();
+        return ListView(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          children: [
+            _sectionHeader(
+                'Registered', registered.length, Colors.green.shade700),
+            for (final p in registered) _playerTile(p),
+            _sectionHeader(
+                'Not registered', unregistered.length, Colors.grey.shade600),
+            for (final p in unregistered) _playerTile(p),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _sectionHeader(String label, int count, Color color) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Row(
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '$label · $count',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _playerTile(TournamentPlayer p) {
+    // Handle-first display rule: Golf+ username only.
+    return ListTile(
+      contentPadding:
+          const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      leading: CircleAvatar(
+        backgroundColor: p.registered
+            ? Colors.green.shade100
+            : Colors.grey.shade200,
+        child: Icon(
+          Icons.person,
+          color: p.registered
+              ? Colors.green.shade700
+              : Colors.grey.shade600,
+        ),
+      ),
+      title: Text(
+        p.golfplusHandle,
+        style: const TextStyle(fontWeight: FontWeight.w600),
+      ),
+      trailing: p.registered
+          ? Chip(
+              label: const Text('Registered'),
+              labelStyle: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.green.shade800),
+              backgroundColor: Colors.green.shade100,
+              visualDensity: VisualDensity.compact,
+            )
+          : const Chip(
+              label: Text('Not registered'),
+              labelStyle:
+                  TextStyle(fontSize: 12, color: Colors.grey),
+              backgroundColor: Color(0xFFF0F0F0),
+              visualDensity: VisualDensity.compact,
+            ),
     );
   }
 }
