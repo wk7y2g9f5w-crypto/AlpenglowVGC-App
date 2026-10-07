@@ -838,6 +838,42 @@ class Tournaments(commands.Cog):
             ephemeral=True,
         )
 
+    # TEMPORARY (2026-10-07): one-time tournament ID reset. Remove after use.
+    @tournament.command(name="reset_ids",
+                        description="ADMIN ONE-TIME: wipe old tournaments, renumber keepers to 1..N")
+    async def tournament_reset_ids(self, interaction: discord.Interaction):
+        if not await require_strict_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            report = await db.reset_tournament_ids(
+                self.bot.db_path, keep_ids=(16, 17))
+        except Exception as e:  # noqa: BLE001 - report, don't crash
+            await interaction.followup.send(
+                f"❌ Reset failed: {e}", ephemeral=True)
+            return
+        # Re-register persistent Register buttons under the new IDs and
+        # refresh the tee-sheet board so no stale IDs remain.
+        for new_id in sorted(report["renumbered"].values()):
+            self.bot.add_view(RegisterView(new_id))
+        try:
+            await ts.maybe_refresh(self.bot, str(interaction.guild_id))
+        except Exception:  # noqa: BLE001 - board refresh is best-effort
+            pass
+        lines = [
+            "✅ Tournament IDs reset.",
+            f"Deleted tournaments: {report['deleted'] or 'none'}",
+            "Renumbered: " + (", ".join(
+                f"{o}→{n}" for o, n in sorted(report["renumbered"].items())
+            ) or "none"),
+        ]
+        if report["outbox_updated"]:
+            lines.append(f"Outbox payloads fixed: {report['outbox_updated']}")
+        lines.append(
+            "Note: already-posted announcement messages still carry the old "
+            "IDs in their buttons — delete and re-post those if needed.")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Tournaments(bot))

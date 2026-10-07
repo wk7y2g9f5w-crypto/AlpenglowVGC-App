@@ -1651,6 +1651,95 @@ async def delete_tournament(db_path, tournament_id) -> None:
         db_path, "DELETE FROM tournaments WHERE id = ?", (tournament_id,))
 
 
+async def reset_tournament_ids(db_path, keep_ids=(16, 17)) -> dict:
+    """One-time operation: delete all tournaments except keep_ids, then
+    renumber the keepers to 1..N (in keep_ids order), updating every
+    referencing table. Resets the tournaments autoincrement sequence.
+
+    Returns a report dict: {"deleted": [...], "renumbered": {old: new},
+    "outbox_updated": N}. The renumber phase runs in a single transaction
+    (all-or-nothing). Uses temp negative IDs to avoid collisions.
+    """
+    report: dict = {"deleted": [], "renumbered": {}, "outbox_updated": 0}
+
+    # Phase 1: delete everything except the keepers (tested cascade).
+    all_ids = [r["id"] for r in await _fetchall(
+        db_path, "SELECT id FROM tournaments ORDER BY id")]
+    keep_set = set(keep_ids)
+    for tid in all_ids:
+        if tid not in keep_set:
+            await delete_tournament(db_path, tid)
+            await _execute(
+                db_path,
+                "DELETE FROM leaderboard_snapshots WHERE tournament_id = ?",
+                (str(tid),))
+            report["deleted"].append(tid)
+
+    # Phase 2: renumber keepers to 1..N in a single transaction.
+    keep_existing = [tid for tid in keep_ids if tid in all_ids]
+    mapping = {old: new for new, old in enumerate(keep_existing, start=1)}
+    if not mapping:
+        return report
+
+    tables = ["rounds", "registrations", "teams", "tee_times", "scorecards",
+              "matches", "season_tournaments", "season_points",
+              "tournament_leaders"]
+
+    async with aiosqlite.connect(db_path) as con:
+        await con.execute("BEGIN IMMEDIATE")
+        try:
+            for old, new in mapping.items():
+                await con.execute(
+                    "UPDATE tournaments SET id = ? WHERE id = ?", (-new, old))
+                for tbl in tables:
+                    await con.execute(
+                        f"UPDATE {tbl} SET tournament_id = ? "
+                        f"WHERE tournament_id = ?",
+                        (-new, old))
+                await con.execute(
+                    "UPDATE leaderboard_snapshots SET tournament_id = ? "
+                    "WHERE tournament_id = ?",
+                    (str(-new), str(old)))
+            for old, new in mapping.items():
+                await con.execute(
+                    "UPDATE tournaments SET id = ? WHERE id = ?", (new, -new))
+                for tbl in tables:
+                    await con.execute(
+                        f"UPDATE {tbl} SET tournament_id = ? "
+                        f"WHERE tournament_id = ?",
+                        (new, -new))
+                await con.execute(
+                    "UPDATE leaderboard_snapshots SET tournament_id = ? "
+                    "WHERE tournament_id = ?",
+                    (str(new), str(-new)))
+            # Fix any pending outbox payloads referencing old IDs.
+            async with con.execute("SELECT id, payload FROM outbox") as cur:
+                rows = await cur.fetchall()
+            for oid, payload in rows:
+                try:
+                    data = json.loads(payload or "{}")
+                except (ValueError, TypeError):
+                    continue
+                tid = data.get("tournament_id")
+                if tid in mapping:
+                    data["tournament_id"] = mapping[tid]
+                    await con.execute(
+                        "UPDATE outbox SET payload = ? WHERE id = ?",
+                        (json.dumps(data), oid))
+                    report["outbox_updated"] += 1
+            # Next tournament gets MAX(id)+1.
+            await con.execute(
+                "UPDATE sqlite_sequence SET seq = "
+                "(SELECT MAX(id) FROM tournaments) WHERE name = 'tournaments'")
+            await con.commit()
+        except Exception:
+            await con.rollback()
+            raise
+
+    report["renumbered"] = mapping
+    return report
+
+
 async def search_tee_times(db_path, guild_id, current) -> list[dict]:
     sql = ("SELECT tt.*, t.name AS tournament_name FROM tee_times tt"
            " JOIN tournaments t ON t.id = tt.tournament_id"
