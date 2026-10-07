@@ -56,12 +56,16 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
       }
     }
     bool isCrew = false;
+    bool isAdmin = false;
     try {
-      isCrew = (await _api.getMe()).isCrew;
+      final me = await _api.getMe();
+      isCrew = me.isCrew;
+      isAdmin = me.isAdmin;
     } catch (_) {
       // Offline — crew actions just stay hidden.
     }
-    return _DetailData(teeTime: tt, requests: requests, isCrew: isCrew);
+    return _DetailData(
+        teeTime: tt, requests: requests, isCrew: isCrew, isAdmin: isAdmin);
   }
 
   Future<void> _refresh() async {
@@ -361,6 +365,21 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       icon: const Icon(Icons.scoreboard),
                       label: const Text('Enter scores'),
                     ),
+                  if (!inIt && data.isAdmin && tt.isStarted)
+                    OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => ScoreEntryScreen(
+                            auth: widget.auth,
+                            settings: widget.settings,
+                            tournament: widget.tournament,
+                            teeTime: tt,
+                          ),
+                        ));
+                      },
+                      icon: const Icon(Icons.edit),
+                      label: const Text('Edit scores (admin)'),
+                    ),
                   if (!inIt && !tt.isStarted)
                     const Padding(
                       padding: EdgeInsets.only(top: 4),
@@ -443,6 +462,10 @@ class _DetailData {
   final TeeTime teeTime;
   final List<TeeTimeRequest> requests;
   final bool isCrew;
+  final bool isAdmin;
   _DetailData(
-      {required this.teeTime, required this.requests, this.isCrew = false});
+      {required this.teeTime,
+      required this.requests,
+      this.isCrew = false,
+      this.isAdmin = false});
 }

@@ -2208,14 +2208,22 @@ async def put_scorecard(
     tee_time_id: int, body: ScorecardSubmit, user: CurrentUser
 ) -> dict:
     tt, t = await _tee_time_or_404(tee_time_id)
-    # Gate 1: the caller (submitter) must be in this tee time.
-    if not await db.is_player_in_tee_time(
-        DB_PATH, tt["id"], user["discord_id"]
-    ):
+    # Gate 1: the caller (submitter) must be in this tee time — admins
+    # may edit any card without being in the tee time.
+    is_admin = await fetch_admin_status(user["discord_id"])
+    if is_admin is None:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "not_in_tee_time"},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify admin status — try again shortly.",
         )
+    if not is_admin:
+        if not await db.is_player_in_tee_time(
+            DB_PATH, tt["id"], user["discord_id"]
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "not_in_tee_time"},
+            )
     # Gate 2: the card owner must be in the same tee time.
     players = await db.get_tee_time_players(DB_PATH, tt["id"])
     if not any(p["discord_id"] == body.player_discord_id for p in players):
