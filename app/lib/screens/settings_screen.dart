@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import 'archive_screen.dart';
 import 'crew_management_screen.dart';
 
 /// Settings: admin-only connection config (API base URL, Discord OAuth),
@@ -253,6 +254,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute(
                   builder: (_) => CrewManagementScreen(
+                    auth: widget.auth,
+                    settings: widget.settings,
+                  ),
+                ),
+              ),
+            ),
+          if (_isAdmin)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.archive),
+              title: const Text('Archive'),
+              subtitle: const Text('Completed tee times — solo and group'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => ArchiveScreen(
                     auth: widget.auth,
                     settings: widget.settings,
                   ),

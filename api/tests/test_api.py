@@ -577,14 +577,26 @@ class ApiTestCase(unittest.TestCase):
         self.assertNotIn("456", [p["discord_id"] for p in players])
 
     # -- scorecards ---------------------------------------------------
-    def _past_tee_time(self, tournament, creator="123", max_players=4):
+    def _past_tee_time(self, tournament, creator="123", max_players=4,
+                       extra_players=()):
         """Insert a tee time directly (past start) — the API has no reason to
         create past tee times."""
         tt_id = run(db.create_tee_time(
             self.db_path, tournament, "past flight",
             "2026-01-02T15:30:00+00:00", max_players, creator, None))
         run(db.join_tee_time(self.db_path, tt_id, creator))
+        for pid in extra_players:
+            run(db.join_tee_time(self.db_path, tt_id, pid))
+        # Score entry requires Start Round to have been pressed.
+        run(db.start_tournament_tee_time(self.db_path, tt_id, creator))
         return tt_id
+
+    def _start_tee_time(self, tt_id, uid="123"):
+        """Press Start Round via the API (any player in the tee time)."""
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h(uid))
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()
 
     def test_scorecard_get_none(self):
         self.with_tz("123")
@@ -633,8 +645,7 @@ class ApiTestCase(unittest.TestCase):
         self.with_tz("123")
         self.with_tz("456")
         self.with_tz("789")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         body = {"player_discord_id": "789", "scores": [4] * 18}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"), json=body)
@@ -643,8 +654,7 @@ class ApiTestCase(unittest.TestCase):
     def test_scorecard_submit_happy_and_get(self):
         self.with_tz("123")
         self.with_tz("456")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         scores = [4] * 18
         body = {"player_discord_id": "123", "scores": scores, "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
@@ -667,8 +677,7 @@ class ApiTestCase(unittest.TestCase):
         self.with_tz("123")
         self.with_tz("456")
         run(db.poll_outbox(self.db_path))  # clear setup noise
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         run(db.ack_outbox(self.db_path,
                           [r["id"] for r in run(db.poll_outbox(self.db_path))]))
         body = {"player_discord_id": "123", "scores": [4] * 18,
@@ -694,8 +703,7 @@ class ApiTestCase(unittest.TestCase):
         # The bot lets a playing partner enter someone else's card.
         self.with_tz("123")
         self.with_tz("456")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         body = {"player_discord_id": "456", "scores": [5] * 18,
                 "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
@@ -711,8 +719,7 @@ class ApiTestCase(unittest.TestCase):
         # member is rejected with scorecard_locked.
         self.with_tz("123")
         self.with_tz("456")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
@@ -757,8 +764,7 @@ class ApiTestCase(unittest.TestCase):
         # complete=True finalizes it; the old 403 lock only applies after.
         self.with_tz("123")
         self.with_tz("456")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         url = f"/api/tee-times/{tt_id}/scorecard"
         # First holes go in: nulls allowed, card is in_progress.
         scores = [4, 5, 3] + [None] * 15
@@ -816,8 +822,7 @@ class ApiTestCase(unittest.TestCase):
         # An in-progress card appears on the live leaderboard with thru.
         self.with_tz("123")
         self.with_tz("456")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         scores = [4, 5] + [None] * 16
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                             headers=self.h("123"),
@@ -839,8 +844,7 @@ class ApiTestCase(unittest.TestCase):
         # read-only submitted view.
         self.with_tz("123")
         self.with_tz("456")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         run(db.upsert_scorecard(self.db_path, self.t_open, "123", None, tt_id,
                                 [4] * 18, "verified", submitted_by="123"))
         r = self.client.get(
@@ -858,8 +862,7 @@ class ApiTestCase(unittest.TestCase):
     def test_leaderboard_stroke(self):
         self.with_tz("123")
         self.with_tz("456")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         run(db.upsert_scorecard(self.db_path, self.t_open, "123", None, tt_id,
                                 [4] * 18, "verified", submitted_by="123"))
         run(db.upsert_scorecard(self.db_path, self.t_open, "456", None, tt_id,
@@ -1073,8 +1076,7 @@ class ApiTestCase(unittest.TestCase):
     # -- stats --------------------------------------------------------
     def test_stats_with_rounds_and_match(self):
         self.with_tz("123")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         # 18 holes: 17 pars (4) + one birdie (3) -> total 71.
         scores = [3] + [4] * 17
         run(db.upsert_scorecard(self.db_path, self.t_open, "123", None, tt_id,
@@ -1370,6 +1372,7 @@ class ApiTestCase(unittest.TestCase):
             self.db_path, tid, "past flight",
             "2026-01-02T15:30:00+00:00", 4, "123", None))
         run(db.join_tee_time(self.db_path, tt_id, "123"))
+        run(db.start_tournament_tee_time(self.db_path, tt_id, "123"))
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "round_number": 2}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
@@ -1405,6 +1408,7 @@ class ApiTestCase(unittest.TestCase):
             self.db_path, tid, "past flight",
             "2026-01-02T15:30:00+00:00", 4, "123", None))
         run(db.join_tee_time(self.db_path, tt_id, "123"))
+        run(db.start_tournament_tee_time(self.db_path, tt_id, "123"))
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "round_number": 1}
         # Crew bypasses the cutoff.
@@ -1467,6 +1471,7 @@ class ApiTestCase(unittest.TestCase):
         make_tt("123", "R2 flight", 2)
         # Submit 123's round-1 card in tt1.
         run(db.register_player(self.db_path, tid, "123"))
+        self._start_tee_time(tt1, "123")
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "round_number": 1}
         r = self.client.put(f"/api/tee-times/{tt1}/scorecard",
@@ -1507,6 +1512,7 @@ class ApiTestCase(unittest.TestCase):
 
         tt1 = make_tt("123", "Morning")   # 123 auto-joins
         tt2 = make_tt("456", "Afternoon")  # 456 auto-joins
+        self._start_tee_time(tt1, "123")
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "round_number": 1}
         r = self.client.put(f"/api/tee-times/{tt1}/scorecard",
@@ -1516,6 +1522,8 @@ class ApiTestCase(unittest.TestCase):
         r = self.client.post(f"/api/tee-times/{tt1}/leave",
                              headers=self.h("123"))
         self.assertEqual(r.status_code, 200, r.text)
+        # A second card for the same round is refused even from a different
+        # tee time (leave the first, join the second, try to submit again).
         r = self.client.post(f"/api/tee-times/{tt2}/join",
                              headers=self.h("123"))
         self.assertEqual(r.status_code, 200, r.text)
@@ -1560,6 +1568,7 @@ class ApiTestCase(unittest.TestCase):
         # Submitting the round-2 card to the round-2 tee time works even
         # though tt1 was joined first.
         run(db.register_player(self.db_path, tid, "123"))
+        self._start_tee_time(tt2, "456")
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "round_number": 2}
         r = self.client.put(f"/api/tee-times/{tt2}/scorecard",
@@ -1569,8 +1578,7 @@ class ApiTestCase(unittest.TestCase):
     def test_scorecard_witness_round_trip(self):
         self.with_tz("123")
         self.with_tz("456")
-        tt_id = self._past_tee_time(self.t_open, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(self.t_open, creator="123", extra_players=["456"])
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "witness_name": "  Tank ", "complete": True}
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
@@ -1613,8 +1621,7 @@ class ApiTestCase(unittest.TestCase):
                 {"tee_position": "middle", "pin_position": "white",
                  "wind_strength": "moderate"},
             ]))
-        tt_id = self._past_tee_time(tid, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(tid, creator="123", extra_players=["456"])
         for rn, score in ((1, 4), (2, 5)):
             body = {"player_discord_id": "123", "scores": [score] * 18,
                     "round_number": rn}
@@ -1654,8 +1661,7 @@ class ApiTestCase(unittest.TestCase):
                 {"tee_position": "middle", "pin_position": "white",
                  "wind_strength": "moderate"},
             ]))
-        tt_id = self._past_tee_time(tid, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(tid, creator="123", extra_players=["456"])
         # 123: 72 + 90 = 162 (+18). 456: 76 + 76 = 152 (+8) — wins on to-par.
         run(db.upsert_scorecard(self.db_path, tid, "123", None, tt_id,
                                 [4] * 18, "verified", round_number=1))
@@ -1695,8 +1701,7 @@ class ApiTestCase(unittest.TestCase):
                 {"tee_position": "middle", "pin_position": "white",
                  "wind_strength": "moderate"},
             ]))
-        tt_id = self._past_tee_time(tid, creator="123")
-        run(db.join_tee_time(self.db_path, tt_id, "456"))
+        tt_id = self._past_tee_time(tid, creator="123", extra_players=["456"])
         run(db.upsert_scorecard(self.db_path, tid, "123", None, tt_id,
                                 [4] * 18, "verified", round_number=1))
         run(db.upsert_scorecard(self.db_path, tid, "456", None, tt_id,

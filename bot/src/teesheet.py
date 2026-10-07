@@ -82,6 +82,9 @@ class BoardTeeSheetView(discord.ui.View):
         self.clear_items()
         for t, tee_times in sections:
             for tt in tee_times:
+                # Started rounds lock joining — no Request button.
+                if tt.get("started_at"):
+                    continue
                 btn = discord.ui.Button(
                     label=f"Request: {tt['label'][:40]}",
                     style=discord.ButtonStyle.primary,
@@ -151,6 +154,9 @@ async def _upcoming_tee_times(db_path, guild_id):
     )
     for t in tournaments:
         for tt in await db.list_tee_times(db_path, t["id"]):
+            # Archived tee times live in the admin Archive, not the board.
+            if tt.get("archived_at"):
+                continue
             starts_at = tt.get("starts_at")
             if starts_at:
                 try:

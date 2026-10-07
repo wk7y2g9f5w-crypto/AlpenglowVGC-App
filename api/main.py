@@ -626,6 +626,8 @@ def _tee_time_json(tt: dict, players: list[dict]) -> dict:
         "max_players": tt["max_players"],
         "created_by": tt["created_by"],
         "round_number": tt.get("round_number") or 1,
+        "started_at": utc_iso(tt.get("started_at")),
+        "archived_at": utc_iso(tt.get("archived_at")),
         "players": [_player_json(p) for p in players],
     }
 
@@ -1423,6 +1425,9 @@ async def list_tee_times(tournament_id: int, user: CurrentUser) -> list[dict]:
     rows = await db.list_tee_times(DB_PATH, t["id"])
     out = []
     for tt in rows:
+        # Archived tee times live in the admin-only Archive, not here.
+        if tt.get("archived_at"):
+            continue
         players = await db.get_tee_time_players(DB_PATH, tt["id"])
         out.append(_tee_time_json(tt, players))
     return out
@@ -1517,7 +1522,52 @@ async def join_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "round_conflict"},
         )
+    if result == "started":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "round_started",
+                "message": "This round has already started — no new players may join.",
+            },
+        )
     return {"joined": True, "already": result == "already"}
+
+
+@app.post("/api/tee-times/{tee_time_id}/start")
+async def start_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
+    """Press Start Round on a tournament tee time.
+
+    Any player in the tee time (or an admin) may start it. Locks joining
+    and unlocks scorecard entry. The press time is recorded for the archive.
+    """
+    tt, t = await _tee_time_or_404(tee_time_id)
+    players = await db.get_tee_time_players(DB_PATH, tee_time_id)
+    is_player = any(
+        p["discord_id"] == user["discord_id"] for p in players)
+    if not is_player and not user.get("is_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only players in this tee time (or admins) can start the round.",
+        )
+    result = await db.start_tournament_tee_time(
+        DB_PATH, tee_time_id, user["discord_id"])
+    if result == "missing":  # pragma: no cover - checked above
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Tee time not found"
+        )
+    if result == "already_started":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "already_started",
+                    "message": "This round has already started."},
+        )
+    if result == "not_player":  # pragma: no cover - checked above
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only players in this tee time can start the round.",
+        )
+    tt = await db.get_tee_time(DB_PATH, tee_time_id)
+    return {"started": True, "started_at": tt.get("started_at")}
 
 
 @app.post("/api/tee-times/{tee_time_id}/leave")
@@ -1925,6 +1975,82 @@ async def reset_local_user_password(player_key: str,
     return {"ok": True, "player_key": player_key, "temp_password": temp}
 
 
+# --------------------------------------------------------------------------
+# Archive (admin-only): completed tee times, solo vs group
+# --------------------------------------------------------------------------
+@app.get("/api/admin/archive/tournament-tee-times")
+async def archive_tournament_tee_times(user: AdminUser) -> dict:
+    """Archived tournament tee times, separated into solo and group.
+
+    Each entry includes started_at (when Start Round was pressed) for the
+    admin's review.
+    """
+    # All tournaments the admin can see; collect archived tee times.
+    # For simplicity, scan all tournaments (admin-only endpoint).
+    solo: list[dict] = []
+    group: list[dict] = []
+    tournaments = await db.list_tournaments(DB_PATH, GUILD_ID)
+    for t in tournaments:
+        for tt in await db.list_tee_times(DB_PATH, t["id"]):
+            if not tt.get("archived_at"):
+                continue
+            players = await db.get_tee_time_players(DB_PATH, tt["id"])
+            entry = {
+                **_tee_time_json(tt, players),
+                "tournament_id": t["id"],
+                "tournament_name": t.get("name"),
+            }
+            if len(players) <= 1:
+                solo.append(entry)
+            else:
+                group.append(entry)
+    # Newest archived first.
+    solo.sort(key=lambda e: e.get("archived_at") or "", reverse=True)
+    group.sort(key=lambda e: e.get("archived_at") or "", reverse=True)
+    return {"solo": solo, "group": group}
+
+
+@app.get("/api/admin/archive/casual-tee-times")
+async def archive_casual_tee_times(user: AdminUser) -> dict:
+    """Archived casual tee times, separated into solo and group.
+
+    completed_at/completed_by track the admin's review.
+    """
+    solo: list[dict] = []
+    group: list[dict] = []
+    for tt in await db.list_casual_tee_times(DB_PATH):
+        if not tt.get("archived_at"):
+            continue
+        entry = await _casual_json(DB_PATH, tt)
+        players = tt.get("players") or []
+        if len(players) <= 1:
+            solo.append(entry)
+        else:
+            group.append(entry)
+    solo.sort(key=lambda e: e.get("archived_at") or "", reverse=True)
+    group.sort(key=lambda e: e.get("archived_at") or "", reverse=True)
+    return {"solo": solo, "group": group}
+
+
+@app.post("/api/admin/casual-tee-times/{tt_id}/complete")
+async def complete_casual_tee_time(tt_id: str, user: AdminUser) -> dict:
+    """Admin marks an archived casual tee time as reviewed/complete."""
+    result = await db.complete_casual_tee_time(
+        DB_PATH, tt_id, user["discord_id"])
+    if result == "missing":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Casual tee time not found.",
+        )
+    if result == "not_archived":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Tee time must be archived (all scorecards submitted) "
+                   "before it can be marked complete.",
+        )
+    return {"completed": True}
+
+
 @app.post("/api/tee-times/{tee_time_id}/request")
 async def request_join(tee_time_id: int, user: CurrentUser) -> dict:
     tt, _ = await _tee_time_or_404(tee_time_id)
@@ -2178,6 +2304,19 @@ async def put_scorecard(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "tee_time_not_passed"},
         )
+    # Gate 4b: Start Round must have been pressed (any player in the
+    # tee time). Scorecard entry unlocks only after the round starts.
+    if not tt.get("started_at"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "round_not_started",
+                "message": (
+                    "Press Start Round to begin — score entry unlocks "
+                    "once the round is started."
+                ),
+            },
+        )
     # Gate 5: a COMPLETED card can only be changed by crew (admins, mods,
     # tournament directors). Finalizing your own in-progress card, or a
     # first submission, stays open to tee-time members.
@@ -2242,6 +2381,14 @@ async def put_scorecard(
     await db.enqueue_outbox(
         DB_PATH, "scorecard_submitted", {"tournament_id": t["id"]}
     )
+    # If every player in the tee time now has a verified card, archive it.
+    # Best-effort: never allowed to break the save itself.
+    try:
+        if card.get("status") == "verified":
+            await db.archive_tournament_tee_time_if_complete(
+                DB_PATH, tt["id"])
+    except Exception:  # noqa: BLE001 - archive is best-effort
+        pass
     return {"card": _card_json(card, t.get("pars"))}
 
 
@@ -2540,6 +2687,9 @@ async def _casual_json(db_path, tt: dict) -> dict:
         "matchplay_tee_time_id": tt.get("matchplay_tee_time_id"),
         "altshot_tee_time_id": tt.get("altshot_tee_time_id"),
         "created_at": tt["created_at"],
+        "archived_at": utc_iso(tt.get("archived_at")),
+        "completed_at": utc_iso(tt.get("completed_at")),
+        "completed_by": tt.get("completed_by"),
         "players": players,
     }
 
@@ -2555,6 +2705,8 @@ async def _casual_or_404(tt_id: str) -> dict:
 @app.get("/api/casual-tee-times")
 async def list_casual_tee_times(user: CurrentUser) -> dict:
     tts = await db.list_casual_tee_times(DB_PATH)
+    # Archived tee times live in the admin-only Archive, not here.
+    tts = [tt for tt in tts if not tt.get("archived_at")]
     return {"tee_times": [await _casual_json(DB_PATH, tt) for tt in tts]}
 
 
@@ -2795,6 +2947,13 @@ async def put_casual_scorecard(
         casual_tee_time_id=tt["id"],
     )
     card = await db.get_scorecard(DB_PATH, card_id)
+    # If every player now has a verified card, archive the tee time for
+    # admin review. Best-effort: never allowed to break the save itself.
+    try:
+        if card.get("status") == "verified":
+            await db.archive_casual_tee_time_if_complete(DB_PATH, tt["id"])
+    except Exception:  # noqa: BLE001 - archive is best-effort
+        pass
     return {"card": _casual_card_json(card, tt.get("pars"))}
 
 

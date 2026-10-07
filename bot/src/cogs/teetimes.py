@@ -397,6 +397,14 @@ async def _decide_join_request_flow(interaction: discord.Interaction, accept: bo
             "before your request was accepted."
         )
         return
+    if join_result == "started":
+        await db.decide_join_request(db_path, request_id, "declined", decider_id)
+        await _disable_request_buttons(interaction, "Declined ❌")
+        await interaction.response.send_message(
+            f"❌ **{tt['label']}** has already started — request auto-declined.",
+            ephemeral=True,
+        )
+        return
     await db.decide_join_request(db_path, request_id, "accepted", decider_id)
     await _disable_request_buttons(interaction, "Accepted ✅")
     count = await db.tee_time_player_count(db_path, tt["id"])

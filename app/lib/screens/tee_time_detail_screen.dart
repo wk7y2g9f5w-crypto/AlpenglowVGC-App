@@ -303,20 +303,28 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  if (!inIt && !tt.isFull)
+                  if (!inIt && !tt.isFull && !tt.isStarted)
                     ElevatedButton.icon(
                       onPressed: () =>
                           _act(() => _api.joinTeeTime(tt.id), 'Joined.'),
                       icon: const Icon(Icons.add),
                       label: const Text('Join'),
                     ),
-                  if (!inIt && tt.isFull)
+                  if (!inIt && tt.isFull && !tt.isStarted)
                     OutlinedButton.icon(
                       onPressed: () => _act(
                           () => _api.requestTeeTime(tt.id),
                           'Request sent. The creator will approve it.'),
                       icon: const Icon(Icons.send),
                       label: const Text('Request to join'),
+                    ),
+                  if (tt.isStarted && !inIt)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text(
+                        'This round has started — no new players may join.',
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
                     ),
                   if (inIt && !isCreator)
                     OutlinedButton.icon(
@@ -325,7 +333,20 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       icon: const Icon(Icons.remove),
                       label: const Text('Leave'),
                     ),
-                  if (inIt)
+                  if (inIt && !tt.isStarted)
+                    ElevatedButton.icon(
+                      onPressed: () => _act(
+                        () => _api.startTeeTime(tt.id),
+                        'Round started! You can now enter scores.',
+                      ),
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('Start Round'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  if (inIt && tt.isStarted)
                     ElevatedButton.icon(
                       onPressed: () {
                         Navigator.of(context).push(MaterialPageRoute(
@@ -340,7 +361,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       icon: const Icon(Icons.scoreboard),
                       label: const Text('Enter scores'),
                     ),
-                  if (!inIt)
+                  if (!inIt && !tt.isStarted)
                     const Padding(
                       padding: EdgeInsets.only(top: 4),
                       child: Text(
