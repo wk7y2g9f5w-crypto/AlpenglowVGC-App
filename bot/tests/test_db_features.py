@@ -726,6 +726,28 @@ CREATE TABLE players(
 
 
 class TestHoleShots(TempDbTest):
+    async def test_score_highlight_queued_on_ace(self):
+        from src import score_events
+        import json as _json
+        await db.upsert_player(self.db_path, "p1", "Player One")
+        tid = await db.create_tournament(
+            self.db_path, "g1", "Cup", "stroke", 18, "Course",
+            ",".join(["4"] * 18), None, "p1")
+        old = {"holes_json": _json.dumps([4] * 18)}
+        new = {"holes_json": _json.dumps([1] + [4] * 17)}
+        fired = await score_events.detect_score_events(
+            self.db_path, tid, "p1", old, new)
+        self.assertIn("ace", fired)
+        rows = await db._fetchall(
+            self.db_path,
+            "SELECT kind, payload FROM outbox WHERE kind = 'score_highlight'")
+        self.assertEqual(len(rows), 1)
+        payload = _json.loads(rows[0]["payload"])
+        self.assertEqual(payload["event_type"], "ace")
+        self.assertEqual(payload["tournament_id"], tid)
+        self.assertEqual(payload["hole"], 1)
+        self.assertEqual(payload["player_name"], "Player One")
+
     async def _card(self, uid="p1"):
         await db.upsert_player(self.db_path, uid, "Player")
         tid = await db.create_tournament(

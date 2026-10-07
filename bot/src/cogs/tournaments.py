@@ -27,6 +27,10 @@ FORMAT_LABELS = {
     "scramble": "Scramble",
 }
 
+# Discord channel for score highlight notifications (aces, albatrosses,
+# top-3 shake-ups). Missing channel => skipped silently.
+NOTIFICATIONS_CHANNEL = "tournament-notifications"
+
 
 async def course_autocomplete(interaction: discord.Interaction, current: str):
     """Suggest Golf+ courses; free text is still accepted (not validated)."""
@@ -205,6 +209,54 @@ async def post_signup_announcement(
     return True
 
 
+async def post_score_highlight(bot: commands.Bot, payload: dict) -> bool:
+    """Post an ace/albatross/top-3 notification in #tournament-notifications.
+
+    Best-effort: missing channel or tournament => skip silently.
+    """
+    try:
+        tid = int(payload.get("tournament_id", 0))
+        t = await db.get_tournament(bot.db_path, tid)
+        if not t:
+            return False
+        guild = bot.get_guild(int(t["guild_id"]))
+        if guild is None:
+            return False
+        channel = discord.utils.get(
+            guild.text_channels, name=NOTIFICATIONS_CHANNEL)
+        if channel is None:
+            return False
+        event = payload.get("event_type")
+        course = payload.get("course") or "the course"
+        tname = t.get("name") or f"Tournament {tid}"
+        if event == "ace":
+            title = "🏌️ HOLE-IN-ONE!"
+            desc = (f"**{payload.get('player_name')}** aced hole "
+                    f"**{payload.get('hole')}** at {course}!")
+        elif event == "albatross":
+            under = payload.get("under")
+            under_txt = f"{under}-under" if under else "albatross"
+            title = "🦅 ALBATROSS!"
+            desc = (f"**{payload.get('player_name')}** went {under_txt} on "
+                    f"hole **{payload.get('hole')}** at {course}!")
+        elif event == "top3":
+            names = payload.get("top3_names") or []
+            title = "📊 Top 3 shake-up"
+            medals = ["🥇", "🥈", "🥉"]
+            lines = [f"{medals[i]} {n}" for i, n in enumerate(names[:3])]
+            desc = "\n".join(lines) if lines else "Leaderboard updated."
+        else:
+            return False
+        embed = discord.Embed(
+            title=title, description=desc, color=0xF0B429)
+        embed.set_footer(text=f"{tname} • live scoring")
+        await channel.send(embed=embed)
+        return True
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"score highlight post failed: {e}")
+        return False
+
+
 async def post_final_standings(
     bot: commands.Bot, guild_id: str, tournament_id: int
 ) -> bool:
@@ -257,6 +309,8 @@ class Tournaments(commands.Cog):
           submissions AND live hole-by-hole saves; bot submissions refresh
           directly at submit time). Rows are coalesced: one refresh per
           tournament per drain.
+        - score_highlight -> ace/albatross/top-3 post in
+          #tournament-notifications (skipped if the channel is missing).
         Idempotent: re-adding an existing view and re-refreshing the board
         are harmless; announcement/standings posts skip tournaments that no
         longer exist or are in the wrong state.
@@ -299,6 +353,8 @@ class Tournaments(commands.Cog):
                     tid = int(row["payload"].get("tournament_id", 0))
                     if tid:
                         board_refreshes.add(tid)
+                elif row["kind"] == "score_highlight":
+                    await post_score_highlight(self.bot, row["payload"])
                 done.append(row["id"])
             except Exception as e:  # noqa: BLE001 - one bad row skips, rest drain
                 print(f"outbox row {row['id']} failed: {e}")
