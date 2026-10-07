@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
+import 'score_entry_screen.dart';
 
 /// Admin-only Archive: completed tee times, separated into Solo and Group.
 /// Tournament entries show when Start Round was pressed. Casual entries show
@@ -112,8 +114,42 @@ class _ArchiveScreenState extends State<ArchiveScreen>
           ],
         ),
         isThreeLine: true,
+        trailing: TextButton(
+          onPressed: () => _editTournamentScores(e),
+          child: const Text('Edit scores'),
+        ),
       ),
     );
+  }
+
+  Future<void> _editTournamentScores(Map<String, dynamic> entry) async {
+    // Fetch the tournament, build the TeeTime, open the score editor.
+    // Admins can edit any player's card without being in the tee time.
+    try {
+      final tournaments = await _api.getTournaments();
+      final tid = entry['tournament_id']?.toString();
+      final tournament = tournaments.firstWhere(
+        (t) => t.id == tid,
+        orElse: () => throw Exception('Tournament not found'),
+      );
+      final teeTime = TeeTime.fromJson(entry);
+      if (mounted) {
+        Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => ScoreEntryScreen(
+            auth: widget.auth,
+            settings: widget.settings,
+            tournament: tournament,
+            teeTime: teeTime,
+          ),
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to open editor: $e')),
+        );
+      }
+    }
   }
 
   Widget _buildCasualCard(Map<String, dynamic> e) {

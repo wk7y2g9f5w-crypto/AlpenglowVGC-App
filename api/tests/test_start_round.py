@@ -137,4 +137,23 @@ class StartRoundApiTestCase(_ApiTestCase):
         entry = r.json()["solo"][0]
         self.assertIsNotNone(entry["started_at"])
         self.assertEqual(len(r.json()["group"]), 0)
+
+    def test_admin_can_edit_without_being_in_tee_time(self):
+        # Admin "999" is not in the tee time.
+        tt_id = self._started_tt(self.t_open, creator="123")
+        run(db.register_player(self.db_path, self.t_open, "123"))
+        self.client.post(f"/api/tee-times/{tt_id}/start",
+                         headers=self.h("123"))
+        # Non-admin, not in tee time: 403.
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "round_number": 1}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("456"), json=body)
+        self.assertEqual(r.status_code, 403, r.text)
+        # Admin, not in tee time: 200.
+        self._admin(True)
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("999"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+
 del _ApiTestCase
