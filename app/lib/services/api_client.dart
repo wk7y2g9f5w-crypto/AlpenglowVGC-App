@@ -365,6 +365,20 @@ class ApiClient {
         .toList();
   }
 
+  /// Tournament players list: every account with a Golf+ username, each
+  /// flagged registered or not for the tournament (registered first).
+  Future<List<TournamentPlayer>> getTournamentPlayers(
+      String tournamentId) async {
+    final body = await _get('/api/tournaments/$tournamentId/players');
+    if (body is! Map<String, dynamic>) return const [];
+    final players = body['players'];
+    if (players is! List) return const [];
+    return players
+        .whereType<Map<String, dynamic>>()
+        .map(TournamentPlayer.fromJson)
+        .toList();
+  }
+
   Future<Map<String, dynamic>> getSeasonStandings() async {
     final body = await _get('/api/seasons/standings');
     return (body as Map<String, dynamic>? ?? {});

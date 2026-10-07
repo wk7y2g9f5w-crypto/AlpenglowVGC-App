@@ -1412,6 +1412,24 @@ async def get_roster(db_path, tournament_id) -> list[dict]:
     )
 
 
+async def get_tournament_players(db_path, tournament_id) -> list[dict]:
+    """Every player account with a Golf+ username, flagged registered or not
+    for the given tournament. Registered players first, then alphabetical
+    by handle (case-insensitive)."""
+    return await _fetchall(
+        db_path,
+        "SELECT p.discord_id, p.display_name, p.golfplus_handle,"
+        " CASE WHEN r.tournament_id IS NOT NULL THEN 1 ELSE 0 END"
+        " AS registered,"
+        " r.registered_at FROM players p"
+        " LEFT JOIN registrations r ON r.player_discord_id = p.discord_id"
+        " AND r.tournament_id = ?"
+        " WHERE p.golfplus_handle IS NOT NULL AND p.golfplus_handle != ''"
+        " ORDER BY registered DESC, p.golfplus_handle COLLATE NOCASE ASC",
+        (tournament_id,),
+    )
+
+
 # --------------------------------------------------------------------- teams
 async def create_team(db_path, tournament_id, name, created_by) -> int:
     lastrowid, _ = await _execute(
