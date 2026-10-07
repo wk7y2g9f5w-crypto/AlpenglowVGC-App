@@ -59,6 +59,8 @@ class TournamentBot(commands.Bot):
     async def on_ready(self):
         print(f"Logged in as {self.user} (id={self.user.id})")
         print(f"Connected to {len(self.guilds)} guild(s)")
+        for _g in self.guilds:
+            print(f"Guild: {_g.name} (id={_g.id})")
         from src import teesheet as ts
         from src.cogs import guides as guides_mod
 
