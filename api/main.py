@@ -3416,6 +3416,10 @@ class AltShotTeamUpdate(BaseModel):
     # No team names in alt-shot: teams are identified by their players.
 
 
+class AltShotPartnerUpdate(BaseModel):
+    partner_name: str = ""
+
+
 class AltShotScoreSubmit(BaseModel):
     holes: list[int] = []
 
@@ -3607,6 +3611,27 @@ async def leave_altshot_tee_time(tt_id: str, user: CurrentUser) -> dict:
     await _altshot_or_404(tt_id)
     return await _enrich_altshot_tt(await db.leave_altshot_tee_time(
         DB_PATH, tt_id, user["discord_id"]))
+
+
+@app.post("/api/altshot-tee-times/{tt_id}/teams/{team_id}/partner")
+async def set_altshot_partner(tt_id: str, team_id: str,
+                              body: AltShotPartnerUpdate,
+                              user: CurrentUser) -> dict:
+    """Set the manual partner name for a team. Any team member may set it."""
+    team = await _altshot_team_or_404(tt_id, team_id)
+    try:
+        return await _enrich_altshot_tt(await db.set_altshot_partner_name(
+            DB_PATH, team["id"], user["discord_id"], body.partner_name or ""))
+    except db.AltShotError as e:
+        msg = str(e)
+        if msg == "not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Team not found.")
+        if msg == "not_member":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Only team members can set the partner name.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Could not update partner name.")
 
 
 @app.patch("/api/altshot-tee-times/{tt_id}/teams/{team_id}")

@@ -3426,6 +3426,38 @@ async def _add_altshot_member(db_path, team_id: str,
     )
 
 
+async def set_altshot_partner_name(db_path, team_id: str,
+                                   discord_id: str, name: str) -> dict:
+    """Set/update the manual partner name for a team.
+
+    Only a team member (the captain) may set it. Removes any existing
+    manual (discord_id IS NULL) members, then adds the new name.
+    Returns the updated tee-time JSON.
+    """
+    team = await _fetchone(
+        db_path, "SELECT * FROM altshot_teams WHERE id = ?", (team_id,))
+    if not team:
+        raise AltShotError("not_found")
+    # Caller must be on the team.
+    member = await _fetchone(
+        db_path, "SELECT * FROM altshot_team_members"
+        " WHERE team_id = ? AND discord_id = ?",
+        (team_id, discord_id))
+    if not member:
+        raise AltShotError("not_member")
+    # Remove existing manual names.
+    await _execute(
+        db_path, "DELETE FROM altshot_team_members"
+        " WHERE team_id = ? AND discord_id IS NULL",
+        (team_id,))
+    if (name or "").strip():
+        await _add_altshot_member(db_path, team_id, None, name.strip())
+    tt = await _fetchone(
+        db_path, "SELECT * FROM altshot_tee_times WHERE id = ?",
+        (team["tee_time_id"],))
+    return await get_altshot_tee_time(db_path, tt["id"])
+
+
 async def _altshot_member_names(db_path, members: list[dict]) -> list[str]:
     names = []
     for m in members:
@@ -3641,9 +3673,9 @@ async def join_altshot_tee_time(db_path, tt_id: str, discord_id: str,
                 display_name_of(player, discord_id))
         return await get_altshot_tee_time(db_path, tt_id)
     if tt["team_size"]:
-        # Fixed two teams: join the chosen team. Registered players only.
-        if extra_names and any((n or "").strip() for n in extra_names):
-            raise AltShotError("no_guests")
+        # Fixed two teams: join the chosen team. Captains may add a manual
+        # partner name (extra_names) — teams need 1 registered player + the
+        # partner name counts toward team_size.
         if not team_id:
             raise AltShotError("need_team")
         team = await _fetchone(
@@ -3652,12 +3684,21 @@ async def join_altshot_tee_time(db_path, tt_id: str, discord_id: str,
         if not team:
             raise AltShotError("not_found")
         members = await _altshot_members(db_path, team["id"])
+        # Count how many slots are left (registered + manual names count).
         if len(members) >= tt["team_size"]:
             raise AltShotError("full")
         player = await get_player(db_path, discord_id)
         await _add_altshot_member(
             db_path, team["id"], discord_id,
             display_name_of(player, discord_id))
+        # Add manual partner name(s) if provided.
+        for n in extra_names or []:
+            if (n or "").strip():
+                members = await _altshot_members(db_path, team["id"])
+                if len(members) >= tt["team_size"]:
+                    break
+                await _add_altshot_member(
+                    db_path, team["id"], None, n.strip())
         return await get_altshot_tee_time(db_path, tt_id)
     # Flexible (legacy): the caller starts their own team.
     existing = await _fetchone(
