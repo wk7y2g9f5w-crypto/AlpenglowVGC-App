@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
-import 'score_entry_screen.dart';
+import 'archived_tee_time_detail_screen.dart';
 
 /// Admin-only Archive: completed tee times, separated into Solo and Group.
 /// Tournament entries show when Start Round was pressed. Casual entries show
@@ -114,17 +114,15 @@ class _ArchiveScreenState extends State<ArchiveScreen>
           ],
         ),
         isThreeLine: true,
-        trailing: TextButton(
-          onPressed: () => _editTournamentScores(e),
-          child: const Text('Edit scores'),
-        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => _openTournamentDetail(e),
       ),
     );
   }
 
-  Future<void> _editTournamentScores(Map<String, dynamic> entry) async {
-    // Fetch the tournament, build the TeeTime, open the score editor.
-    // Admins can edit any player's card without being in the tee time.
+  Future<void> _openTournamentDetail(Map<String, dynamic> entry) async {
+    // Fetch the tournament, build the TeeTime, open the read-only detail.
+    // The detail screen has an "Edit scores" button for admins.
     try {
       final tournaments = await _api.getTournaments();
       final tid = entry['tournament_id']?.toString();
@@ -135,7 +133,7 @@ class _ArchiveScreenState extends State<ArchiveScreen>
       final teeTime = TeeTime.fromJson(entry);
       if (mounted) {
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => ScoreEntryScreen(
+          builder: (_) => ArchivedTeeTimeDetailScreen(
             auth: widget.auth,
             settings: widget.settings,
             tournament: tournament,
@@ -146,7 +144,7 @@ class _ArchiveScreenState extends State<ArchiveScreen>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to open editor: $e')),
+          SnackBar(content: Text('Failed to open: $e')),
         );
       }
     }
