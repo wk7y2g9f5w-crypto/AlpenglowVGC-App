@@ -214,6 +214,20 @@ async def post_score_highlight(bot: commands.Bot, payload: dict) -> bool:
 
     Best-effort: missing channel or tournament => skip silently.
     """
+    def _fmt_par(v) -> str:
+        if v is None:
+            return "–"
+        try:
+            v = int(v)
+        except (ValueError, TypeError):
+            return "–"
+        return "E" if v == 0 else f"{v:+d}"
+
+    def _fmt_top3_par(entry) -> str:
+        if isinstance(entry, dict):
+            return _fmt_par(entry.get("to_par"))
+        return "–"
+
     try:
         tid = int(payload.get("tournament_id", 0))
         t = await db.get_tournament(bot.db_path, tid)
@@ -241,9 +255,15 @@ async def post_score_highlight(bot: commands.Bot, payload: dict) -> bool:
                     f"hole **{payload.get('hole')}** at {course}!")
         elif event == "top3":
             names = payload.get("top3_names") or []
+            entries = payload.get("top3") or []
             title = "📊 Top 3 shake-up"
             medals = ["🥇", "🥈", "🥉"]
-            lines = [f"{medals[i]} {n}" for i, n in enumerate(names[:3])]
+            lines = []
+            for i, n in enumerate(names[:3]):
+                score = ""
+                if i < len(entries):
+                    score = f" ({_fmt_top3_par(entries[i])})"
+                lines.append(f"{medals[i]} {n}{score}")
             desc = "\n".join(lines) if lines else "Leaderboard updated."
         else:
             return False
