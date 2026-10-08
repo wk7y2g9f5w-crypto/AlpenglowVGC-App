@@ -25,6 +25,7 @@ COURSES = [
     "Bay Hill Club & Lodge",
     "Castle Pines Golf Club",
     "Lofoten Links",
+    "Medinah Country Club",
 ]
 
 
@@ -112,6 +113,9 @@ COURSE_PARS = {
     # Source: https://www.hole19golf.com/courses/lofoten-links (total par 71; par row identical on all four tee sets; official site lofotenlinks.no states Par 71 but publishes hole detail only as images)
     # Note: hole-by-hole numbers corroborated by three agreeing scorecard databases (Hole19, allsquaregolf, golftraxx); a garbled golfify.io par column was disregarded.
     "Lofoten Links": [4, 3, 4, 4, 4, 3, 5, 5, 4, 4, 4, 3, 5, 4, 4, 4, 3, 4],
+
+    # Source: Golf+ in-game GPS screenshots (total par 72), verified hole-by-hole 2026-10-08.
+    "Medinah Country Club": [4, 3, 4, 4, 5, 4, 5, 4, 4, 5, 3, 4, 3, 4, 4, 4, 3, 5],
 }
 
 
