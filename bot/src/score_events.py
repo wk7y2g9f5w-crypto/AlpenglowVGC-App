@@ -38,6 +38,19 @@ def _pars_of(tournament: dict) -> list[int]:
     return out
 
 
+def _fmt_to_par(to_par) -> str:
+    """Format a to-par value: E, -2, +3."""
+    if to_par is None:
+        return "–"
+    try:
+        v = int(to_par)
+    except (ValueError, TypeError):
+        return "–"
+    if v == 0:
+        return "E"
+    return f"{v:+d}"
+
+
 async def detect_score_events(
     db_path: str,
     tournament_id,
@@ -123,20 +136,30 @@ async def detect_score_events(
             await db.set_leaderboard_snapshot(db_path, tournament_id, top3)
             if prev and prev != top3 and len(top3) >= 2:
                 names = []
-                for pid in top3:
+                entries = []
+                for r in ranked[:3]:
+                    pid = r["player_discord_id"]
                     p = await db.get_player(db_path, pid)
-                    names.append(db.display_name_of(p, pid))
+                    name = db.display_name_of(p, pid)
+                    names.append(name)
+                    entries.append({
+                        "name": name,
+                        "to_par": r.get("to_par"),
+                    })
                 await db.notify_tournament_players(
                     db_path, tournament_id, "top3_changes",
                     title="📊 Top 3 shake-up",
-                    body=" → ".join(names[:3]),
+                    body=" → ".join(
+                        f"{n} ({_fmt_to_par(e['to_par'])})"
+                        for n, e in zip(names[:3], entries[:3])),
                     data={"type": "top3", "tournament_id": tournament_id,
                           "top3": top3},
                 )
                 await db.enqueue_outbox(
                     db_path, "score_highlight",
                     {"tournament_id": tournament_id, "event_type": "top3",
-                     "top3_names": names[:3], "course": course})
+                     "top3_names": names[:3], "top3": entries[:3],
+                     "course": course})
                 fired.append("top3")
     except Exception:
         import logging
