@@ -46,6 +46,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   String? _existingStatus;
   String? _witnessName;
   bool _isCrew = false;
+  bool _isAdmin = false;
 
   /// Scorecard id from the server (now included in card responses) — the
   /// key for the shots endpoints. Null until the card exists server-side.
@@ -102,7 +103,10 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     try {
       final me = await _api.getMe();
       if (mounted) {
-        setState(() => _isCrew = me.isCrew);
+        setState(() {
+          _isCrew = me.isCrew;
+          _isAdmin = me.isAdmin;
+        });
         _ensureSelectableRound();
       }
     } catch (_) {
@@ -335,6 +339,40 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       ),
     );
     if (val != null) _enterScore(val);
+  }
+
+  Future<void> _verify() async {
+    if (_cardId == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Verify round?'),
+        content: Text(
+          'This marks ${golferDisplayName(_player!.displayName, _player!.golfplusHandle)}\'s '
+          'round $_roundNumber as verified. It will count toward the leaderboard.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Verify'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _api.verifyScorecard(_cardId!);
+      if (mounted) {
+        setState(() => _existingStatus = 'verified');
+        showSnack(context, 'Round verified.');
+      }
+    } catch (e) {
+      if (mounted) showSnack(context, 'Verify failed: $e');
+    }
   }
 
   Future<void> _submit() async {
@@ -810,35 +848,63 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: Row(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                OutlinedButton(
-                  onPressed: _hole > 0 ? () => setState(() => _hole--) : null,
-                  child: const Text('Prev'),
+                Row(
+                  children: [
+                    OutlinedButton(
+                      onPressed:
+                          _hole > 0 ? () => setState(() => _hole--) : null,
+                      child: const Text('Prev'),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton(
+                      onPressed: _hole < _holeCount - 1
+                          ? () => setState(() => _hole++)
+                          : null,
+                      child: const Text('Next'),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: (complete && !_submitting && _player != null)
+                            ? _submit
+                            : null,
+                        child: _submitting
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2))
+                            : Text(complete
+                                ? 'Submit scorecard'
+                                : 'Enter all $_holeCount holes to submit'),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: _hole < _holeCount - 1
-                      ? () => setState(() => _hole++)
-                      : null,
-                  child: const Text('Next'),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: (complete && !_submitting && _player != null)
-                        ? _submit
-                        : null,
-                    child: _submitting
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2))
-                        : Text(complete
-                            ? 'Submit scorecard'
-                            : 'Enter all $_holeCount holes to submit'),
+                // Admin verify button for pending cards (e.g. solo rounds
+                // awaiting verification).
+                if (_isAdmin &&
+                    _existingStatus == 'pending' &&
+                    _cardId != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _verify,
+                        icon:
+                            const Icon(Icons.verified, color: Colors.green),
+                        label: const Text('Verify round (admin)',
+                            style: TextStyle(color: Colors.green)),
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Colors.green),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
               ],
             ),
           ),

@@ -389,6 +389,19 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       icon: const Icon(Icons.edit),
                       label: const Text('Edit scores (admin)'),
                     ),
+                  if (data.isAdmin && tt.isStarted)
+                    OutlinedButton.icon(
+                      onPressed: () => _act(
+                        () async {
+                          final r = await _api.verifyTeeTime(tt.id);
+                          final n = r['verified'] ?? 0;
+                          if (n == 0) throw Exception('No pending cards to verify.');
+                        },
+                        'Verified.',
+                      ),
+                      icon: const Icon(Icons.verified, color: Colors.green),
+                      label: const Text('Verify all (admin)'),
+                    ),
                   if (!inIt && !tt.isStarted)
                     const Padding(
                       padding: EdgeInsets.only(top: 4),
