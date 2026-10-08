@@ -173,7 +173,7 @@ const holeMapManifest = <String, Map<int, HoleMapAsset>>{
   },
   'Medinah Country Club': {
     1: HoleMapAsset(par: 4, map: 'assets/hole_maps/medinah-country-club/1.jpg', mask: 'assets/hole_maps/medinah-country-club/1_mask.png', tee: Offset(0.436, 0.835), pin: Offset(0.579, 0.160), source: 'osm'),
-    2: HoleMapAsset(par: 3, map: 'assets/hole_maps/medinah-country-club/2.jpg', mask: 'assets/hole_maps/medinah-country-club/2_mask.png', tee: Offset(0.412, 0.250), pin: Offset(0.412, 0.140), source: 'mixed'),
+    2: HoleMapAsset(par: 3, map: 'assets/hole_maps/medinah-country-club/2.jpg', mask: 'assets/hole_maps/medinah-country-club/2_mask.png', tee: Offset(0.471, 0.850), pin: Offset(0.471, 0.332), source: 'mixed'),
     3: HoleMapAsset(par: 4, map: 'assets/hole_maps/medinah-country-club/3.jpg', mask: 'assets/hole_maps/medinah-country-club/3_mask.png', tee: Offset(0.412, 0.924), pin: Offset(0.410, 0.170), source: 'osm'),
     4: HoleMapAsset(par: 4, map: 'assets/hole_maps/medinah-country-club/4.jpg', mask: 'assets/hole_maps/medinah-country-club/4_mask.png', tee: Offset(0.507, 0.845), pin: Offset(0.508, 0.124), source: 'osm'),
     5: HoleMapAsset(par: 5, map: 'assets/hole_maps/medinah-country-club/5.jpg', mask: 'assets/hole_maps/medinah-country-club/5_mask.png', tee: Offset(0.429, 0.920), pin: Offset(0.425, 0.091), source: 'osm'),
