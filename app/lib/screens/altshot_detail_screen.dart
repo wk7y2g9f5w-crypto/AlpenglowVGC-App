@@ -536,6 +536,108 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
     );
   }
 
+  /// Partner name row for fixed 2-team: shows "Player 2: [name]" or
+  /// "Player 2: (Enter Name)" with an edit button for team members.
+  Widget _partnerNameRow(_Detail d, AltShotTeam team) {
+    final myId = d.me.discordId;
+    final isMember = team.isMember(myId);
+    // Find the manual partner name (member with null discordId).
+    String? partnerName;
+    for (final m in team.members) {
+      if (m.discordId == null && m.displayName.trim().isNotEmpty) {
+        partnerName = m.displayName;
+        break;
+      }
+    }
+    // Find the captain (first registered member).
+    String captainName = '';
+    for (final m in team.members) {
+      if (m.discordId != null) {
+        captainName = m.handleName;
+        break;
+      }
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (captainName.isNotEmpty)
+            Text('Captain: $captainName',
+                style: const TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  partnerName != null
+                      ? 'Player 2: $partnerName'
+                      : 'Player 2: (Enter Name)',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: partnerName != null
+                        ? null
+                        : Colors.grey.shade600,
+                    fontStyle: partnerName != null
+                        ? FontStyle.normal
+                        : FontStyle.italic,
+                  ),
+                ),
+              ),
+              if (isMember && !d.tt.anyScoreSubmitted)
+                TextButton.icon(
+                  icon: const Icon(Icons.edit, size: 16),
+                  label: Text(partnerName != null ? 'Edit' : 'Set name'),
+                  onPressed: () => _editPartnerName(d, team, partnerName),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Dialog for the captain to set/update the manual partner name.
+  Future<void> _editPartnerName(
+      _Detail d, AltShotTeam team, String? current) async {
+    final ctrl = TextEditingController(text: current ?? '');
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Player 2 name'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Partner name',
+            hintText: 'Teammate not in the app — type their name',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel')),
+          ElevatedButton(
+              onPressed: () =>
+                  Navigator.of(ctx).pop(ctrl.text.trim()),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (result == null) return;
+    try {
+      _applyTeeTime(
+          d,
+          await _api.setAltShotPartnerName(
+              d.tt.id, team.id, result));
+      if (mounted) showSnack(context, 'Partner name updated.');
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, e.message, error: true);
+    }
+  }
+
   Widget _teamCard(_Detail d, AltShotTeam team) {
     final tt = d.tt;
     final myId = d.me.discordId;
@@ -594,6 +696,9 @@ class _AltShotDetailScreenState extends State<AltShotDetailScreen> {
                       TextStyle(fontSize: 12, color: Colors.orange.shade800),
                 ),
               ),
+            // Partner name (manual Player 2) for fixed 2-team: captain sets it.
+            if (fixed2)
+              _partnerNameRow(d, team),
             if (tt.isOneTeam && team.teamSize < (tt.teamSize ?? 99))
               Padding(
                 padding: const EdgeInsets.only(top: 4),

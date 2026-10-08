@@ -749,6 +749,15 @@ class ApiClient {
     return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
   }
 
+  /// Set the manual partner name for a team (captain sets Player 2's name).
+  Future<AltShotTeeTime> setAltShotPartnerName(
+      String teeTimeId, String teamId, String partnerName) async {
+    final body = await _post(
+        '/api/altshot-tee-times/$teeTimeId/teams/$teamId/partner',
+        {'partner_name': partnerName});
+    return AltShotTeeTime.fromJson(body as Map<String, dynamic>);
+  }
+
   Future<AltShotTeam> updateAltShotTeam(
       String ttId, String teamId, Map<String, dynamic> payload) async {
     final body = await _patch(
