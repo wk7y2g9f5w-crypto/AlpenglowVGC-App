@@ -4707,6 +4707,21 @@ async def player_rounds(key: str, user: CurrentUser) -> dict:
 
 _STATIC_WEB_DIR = Path(__file__).resolve().parent / "static_web"
 
+# Cache-busting: the PWA shell (index.html) and the Flutter service worker
+# must never be served stale — Safari aggressively heuristic-caches responses
+# with no Cache-Control header, which made deploys appear to "not land" until
+# the user cleared site data. no-cache forces a revalidation on every load
+# (cheap with etag/last-modified), while hashed/static assets stay as-is.
+_NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+_NO_CACHE_NAMES = ("index.html", "flutter_service_worker.js")
+
+
+def _web_file(target: Path) -> FileResponse:
+    return FileResponse(
+        target,
+        headers=_NO_CACHE if target.name in _NO_CACHE_NAMES else None,
+    )
+
 # In-memory PKCE verifiers for the web OAuth flow: state -> (verifier,
 # client_id, redirect_uri, expires_at). Short-lived; single-process only.
 _oauth_pkce_store: dict[str, tuple[str, str, str, float]] = {}
@@ -4806,7 +4821,7 @@ async def pwa_index() -> FileResponse:
     """Serve the PWA entry point (only when a web build was staged)."""
     if not _pwa_enabled():
         raise HTTPException(status_code=404, detail="web app not deployed")
-    return FileResponse(_STATIC_WEB_DIR / "index.html")
+    return _web_file(_STATIC_WEB_DIR / "index.html")
 
 
 @app.get("/{pwa_path:path}", include_in_schema=False)
@@ -4827,9 +4842,9 @@ async def pwa_frontend(pwa_path: str) -> FileResponse:
     if not str(target).startswith(str(_STATIC_WEB_DIR.resolve()) + os.sep):
         raise HTTPException(status_code=400, detail="bad path")
     if target.is_file():
-        return FileResponse(target)
+        return _web_file(target)
     # SPA fallback: Flutter uses hash routing, so deep links still land here.
-    return FileResponse(_STATIC_WEB_DIR / "index.html")
+    return _web_file(_STATIC_WEB_DIR / "index.html")
 
 
 # --------------------------------------------------------------------------
