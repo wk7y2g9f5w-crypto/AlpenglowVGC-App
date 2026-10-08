@@ -2058,6 +2058,62 @@ async def complete_casual_tee_time(tt_id: str, user: AdminUser) -> dict:
     return {"completed": True}
 
 
+@app.post("/api/admin/scorecards/{card_id}/verify")
+async def verify_scorecard(card_id: int, user: AdminUser) -> dict:
+    """Admin verifies a pending scorecard (e.g. a solo round awaiting
+    verification)."""
+    card = await db.get_scorecard(DB_PATH, card_id)
+    if card is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Scorecard not found.",
+        )
+    if card.get("status") == "verified":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "already_verified"},
+        )
+    if card.get("status") != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "not_pending",
+                "message": "Only pending scorecards can be verified — "
+                           "submit the card first.",
+            },
+        )
+    ok = await db.verify_scorecard(
+        DB_PATH, card_id, user["discord_id"])
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Scorecard not found.",
+        )
+    # Verifying may complete the tee time — archive it if so.
+    try:
+        tt_id = card.get("tee_time_id")
+        if tt_id:
+            await db.archive_tournament_tee_time_if_complete(
+                DB_PATH, tt_id)
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
+    return {"verified": True}
+
+
+@app.post("/api/admin/tee-times/{tee_time_id}/verify")
+async def verify_tee_time(tee_time_id: int, user: AdminUser) -> dict:
+    """Admin verifies all pending scorecards in a tournament tee time."""
+    tt = await db.get_tee_time(DB_PATH, tee_time_id)
+    if tt is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tee time not found.",
+        )
+    count = await db.verify_tee_time_scorecards(
+        DB_PATH, tee_time_id, user["discord_id"])
+    return {"verified": count}
+
+
 @app.post("/api/tee-times/{tee_time_id}/request")
 async def request_join(tee_time_id: int, user: CurrentUser) -> dict:
     tt, _ = await _tee_time_or_404(tee_time_id)

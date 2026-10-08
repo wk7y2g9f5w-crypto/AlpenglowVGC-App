@@ -2534,6 +2534,33 @@ async def get_scorecard(db_path, card_id) -> dict | None:
                            (card_id,))
 
 
+async def verify_tee_time_scorecards(db_path, tee_time_id: int,
+                                     verified_by: str) -> int:
+    """Admin verifies all pending scorecards in a tournament tee time.
+
+    Returns the number of cards verified.
+    """
+    tt = await get_tee_time(db_path, tee_time_id)
+    if tt is None:
+        return 0
+    cards = await get_scorecards(db_path, tt["tournament_id"])
+    count = 0
+    for c in cards:
+        if (c.get("tee_time_id") == tee_time_id
+                and c.get("status") == "pending"):
+            # Use the existing verify_scorecard (returns bool).
+            if await verify_scorecard(db_path, c["id"], verified_by):
+                count += 1
+    # Verifying may complete the tee time — archive it if so.
+    if count:
+        try:
+            await archive_tournament_tee_time_if_complete(
+                db_path, tee_time_id)
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+    return count
+
+
 # ------------------------------------------------------------ hole shots
 LIES = ("tee", "fairway", "rough", "sand", "green")
 

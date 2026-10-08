@@ -285,6 +285,15 @@ class ApiClient {
     await _post('/api/admin/casual-tee-times/$ttId/complete');
   }
 
+  Future<void> verifyScorecard(int cardId) async {
+    await _post('/api/admin/scorecards/$cardId/verify');
+  }
+
+  Future<Map<String, dynamic>> verifyTeeTime(String teeTimeId) async {
+    final r = await _post('/api/admin/tee-times/$teeTimeId/verify');
+    return r as Map<String, dynamic>;
+  }
+
   Future<void> leaveTeeTime(String teeTimeId) async {
     await _post('/api/tee-times/$teeTimeId/leave');
   }

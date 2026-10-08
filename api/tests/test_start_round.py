@@ -169,4 +169,60 @@ class StartRoundApiTestCase(_ApiTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertTrue(r.json()["started"])
 
+    def test_admin_verify_scorecard(self):
+        # Solo card stays pending.
+        tt_id = self._started_tt(self.t_open, creator="123")
+        run(db.register_player(self.db_path, self.t_open, "123"))
+        self.client.post(f"/api/tee-times/{tt_id}/start",
+                         headers=self.h("123"))
+        body = {"player_discord_id": "123", "scores": [4] * 18,
+                "round_number": 1, "complete": True}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        card_id = r.json()["card"]["id"]
+        self.assertEqual(r.json()["card"]["status"], "pending")
+        # Non-admin cannot verify: 403.
+        r = self.client.post(f"/api/admin/scorecards/{card_id}/verify",
+                             headers=self.h("456"))
+        self.assertEqual(r.status_code, 403, r.text)
+        # Admin verifies: 200.
+        self._admin(True)
+        r = self.client.post(f"/api/admin/scorecards/{card_id}/verify",
+                             headers=self.h("999"))
+        self.assertEqual(r.status_code, 200, r.text)
+        card = run(db.get_scorecard(self.db_path, card_id))
+        self.assertEqual(card["status"], "verified")
+        # Verifying again: 409.
+        r = self.client.post(f"/api/admin/scorecards/{card_id}/verify",
+                             headers=self.h("999"))
+        self.assertEqual(r.status_code, 409, r.text)
+
+    def test_admin_verify_tee_time(self):
+        tt_id = self._started_tt(self.t_open, creator="123",
+                                 extra=("456",))
+        run(db.register_player(self.db_path, self.t_open, "123"))
+        run(db.register_player(self.db_path, self.t_open, "456"))
+        self.client.post(f"/api/tee-times/{tt_id}/start",
+                         headers=self.h("123"))
+        # Both submit solo-style (force pending via db to simulate).
+        for pid in ("123", "456"):
+            body = {"player_discord_id": pid, "scores": [4] * 18,
+                    "round_number": 1, "complete": True}
+            r = self.client.put(
+                f"/api/tee-times/{tt_id}/scorecard",
+                headers=self.h(pid), json=body)
+            self.assertEqual(r.status_code, 200, r.text)
+        # Force both to pending (they auto-verified as 2-player).
+        run(db._execute(
+            self.db_path,
+            "UPDATE scorecards SET status = 'pending'"
+            " WHERE tee_time_id = ?",
+            (tt_id,)))
+        self._admin(True)
+        r = self.client.post(f"/api/admin/tee-times/{tt_id}/verify",
+                             headers=self.h("999"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["verified"], 2)
+
 del _ApiTestCase
