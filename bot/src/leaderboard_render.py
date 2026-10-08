@@ -114,7 +114,8 @@ def _partial_round_score(scores: list, pars: list[int] | None
 
 
 async def _stroke_ranked(db_path: str, t: dict,
-                         include_in_progress: bool = False
+                         include_in_progress: bool = False,
+                         include_pending: bool = True,
                          ) -> tuple[list[dict], list[dict]]:
     """Multi-round stroke leaderboard: (ranked, pending).
 
@@ -129,6 +130,10 @@ async def _stroke_ranked(db_path: str, t: dict,
     actually played, and a per-round "thru" count; rows carry on_course=True
     while any counted round is live. With the flag off, behavior is
     exactly as before: live cards stay out of the standings.
+
+    Pending (submitted, awaiting verification) cards keep their leaderboard
+    place by default (include_pending=True). Season-points/final standings
+    pass include_pending=False so unverified cards don't earn points.
     """
     rounds = await db.list_rounds(db_path, t["id"])
     cards = await db.get_scorecards(db_path, t["id"])
@@ -156,7 +161,16 @@ async def _stroke_ranked(db_path: str, t: dict,
             live = {r: c for r, c in by_round.items()
                     if (c["status"] == "in_progress" and r not in verified
                         and _holes_played(c) > 0)}
-        counted = {**verified, **live}
+        # Pending (submitted, awaiting verification) cards keep their
+        # leaderboard place — they count like verified for ranking so
+        # verification itself never causes a false "shake-up".
+        # (Disabled for season-points via include_pending=False.)
+        awaiting: dict[int, dict] = {}
+        if include_pending:
+            awaiting = {r: c for r, c in by_round.items()
+                        if (c["status"] == "pending" and r not in verified
+                            and r not in live)}
+        counted = {**verified, **live, **awaiting}
         if not counted:
             pending.append(max(by_round.values(),
                                key=lambda c: c["submitted_at"]))
@@ -174,6 +188,15 @@ async def _stroke_ranked(db_path: str, t: dict,
                     "to_par": (c["total"] - par_round
                                if par_round is not None else None),
                     "status": "verified",
+                    "thru": t["holes"],
+                })
+            elif rn in awaiting:
+                ac = awaiting[rn]
+                detail.append({
+                    "round_number": rn, "total": ac["total"],
+                    "to_par": (ac["total"] - par_round
+                               if par_round is not None else None),
+                    "status": "pending",
                     "thru": t["holes"],
                 })
             elif rn in live:
@@ -197,6 +220,10 @@ async def _stroke_ranked(db_path: str, t: dict,
                     "thru": 0,
                 })
         for rn, c in verified.items():
+            total += c["total"]
+            if par_round is not None:
+                pars_entered += par_round
+        for rn, c in awaiting.items():
             total += c["total"]
             if par_round is not None:
                 pars_entered += par_round
@@ -608,7 +635,7 @@ async def final_standings_points(db_path: str, tournament_id: int) -> list[dict]
                              "position": pos, "points": pts})
 
     if fmt == "stroke":
-        ranked, _ = await _stroke_ranked(db_path, t)
+        ranked, _ = await _stroke_ranked(db_path, t, include_pending=False)
         award([(_rank_key(c), [c["player_discord_id"]]) for c in ranked])
     elif fmt in ("best_ball", "alt_shot", "scramble"):
         team_rows, _ = await _team_rows(db_path, t)

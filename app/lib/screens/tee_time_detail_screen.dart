@@ -6,6 +6,7 @@ import '../services/auth.dart';
 import '../widgets/common.dart';
 import '../widgets/course_art.dart';
 import 'score_entry_screen.dart';
+import 'verify_scorecards_screen.dart';
 
 /// Tee time detail: player list, join/leave/request, pending requests for
 /// the creator, and the "Enter scores" button.
@@ -391,14 +392,16 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                     ),
                   if (data.isAdmin && tt.isStarted)
                     OutlinedButton.icon(
-                      onPressed: () => _act(
-                        () async {
-                          final r = await _api.verifyTeeTime(tt.id);
-                          final n = r['verified'] ?? 0;
-                          if (n == 0) throw Exception('No pending cards to verify.');
-                        },
-                        'Verified.',
-                      ),
+                      onPressed: () {
+                        Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => VerifyScorecardsScreen(
+                            auth: widget.auth,
+                            settings: widget.settings,
+                            tournament: widget.tournament,
+                            teeTime: tt,
+                          ),
+                        ));
+                      },
                       icon: const Icon(Icons.verified, color: Colors.green),
                       label: const Text('Verify all (admin)'),
                     ),

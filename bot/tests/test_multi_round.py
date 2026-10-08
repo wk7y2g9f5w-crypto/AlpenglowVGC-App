@@ -123,11 +123,20 @@ class MultiRoundDbTest(unittest.IsolatedAsyncioTestCase):
         await db.register_player(self.db_path, tid, "p1")
         await db.upsert_scorecard(self.db_path, tid, "p1", None, None,
                                   [4] * 18, "pending", round_number=1)
+        # Pending cards keep their leaderboard place by default.
         ranked, pending = await lr._stroke_ranked(
             self.db_path, await db.get_tournament(self.db_path, tid))
-        self.assertEqual(ranked, [])
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["player_discord_id"], "p1")
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["player_discord_id"], "p1")
+        self.assertEqual(pending, [])
+        # ...but season-points mode still excludes them.
+        ranked2, pending2 = await lr._stroke_ranked(
+            self.db_path, await db.get_tournament(self.db_path, tid),
+            include_pending=False)
+        self.assertEqual(ranked2, [])
+        self.assertEqual(len(pending2), 1)
+        self.assertEqual(pending2[0]["player_discord_id"], "p1")
+
 
     async def test_best_ball_aggregates_per_round(self):
         tid = await db.create_tournament(
