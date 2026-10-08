@@ -207,7 +207,7 @@ class ProDifficultyDisclaimer extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              'Each round must be played on PRO difficulty for the rounds to be valid!',
+              'Each round must be played on PRO difficulty for the rounds to be valid! Make sure round "Affect Handicap" is enabled!',
               style: TextStyle(
                   fontSize: 13,
                   color: Colors.amber.shade900,
