@@ -119,6 +119,14 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     if (mounted) setState(() => _loading = false);
   }
 
+  /// First hole with no score entered, or 0 when the card is blank or
+  /// fully scored. Used so switching players lands on their next
+  /// unscored hole instead of always resetting to hole 1.
+  int _firstUnscoredHole(List<int?> scores) {
+    final idx = scores.indexWhere((s) => s == null);
+    return idx >= 0 ? idx : 0;
+  }
+
   /// Load the saved card (if any) for [playerDiscordId] (null = me) + round.
   /// The displayed card always belongs to the selected player. Only the
   /// latest load applies, so a slow response can't clobber a newer one.
@@ -135,7 +143,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           _witnessName = card.witnessName;
           _witnessCtrl.text = card.witnessName ?? '';
           _cardId = card.id;
-          _hole = 0;
+          _hole = _firstUnscoredHole(_scores);
           final match = widget.teeTime.players
               .where((p) => p.discordId == card.playerDiscordId);
           if (match.isNotEmpty) _player = match.first;
@@ -253,6 +261,22 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     if (tp == null) return '';
     if (tp == 0) return 'E';
     return tp > 0 ? '+$tp' : '$tp';
+  }
+
+  /// Front-nine (holes 1-9) running total. Null until all nine are scored.
+  int? get _outTotal {
+    if (_holeCount < 9) return null;
+    final nine = _scores.take(9);
+    if (nine.any((s) => s == null)) return null;
+    return nine.fold<int>(0, (a, b) => a + (b ?? 0));
+  }
+
+  /// Back-nine (holes 10-18) running total. Null until all nine are scored.
+  int? get _inTotal {
+    if (_holeCount < 18) return null;
+    final nine = _scores.skip(9).take(9);
+    if (nine.any((s) => s == null)) return null;
+    return nine.fold<int>(0, (a, b) => a + (b ?? 0));
   }
 
   void _enterScore(int score) {
@@ -701,6 +725,14 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                           color: (_toPar ?? 0) <= 0
                               ? Colors.green.shade700
                               : Colors.red.shade700)),
+                  if (_outTotal != null || _inTotal != null)
+                    Text(
+                      'Out ${_outTotal ?? '–'} · In ${_inTotal ?? '–'}',
+                      style: TextStyle(
+                          fontSize: 13,
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant),
+                    ),
                 ],
               ),
             ],
@@ -814,7 +846,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
                   const Text('⛳ Live — scores are on the leaderboard',
                       style: TextStyle(fontSize: 12, color: Colors.green)),
                 const SizedBox(height: 16),
-                if (par != null) _parRelativeButtons(par) else _numericButtons(),
+                _scoreButtons(par),
                 const SizedBox(height: 12),
                 OutlinedButton.icon(
                   onPressed: _customScore,
@@ -913,53 +945,10 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     );
   }
 
-  /// Quick buttons relative to par: Albatross(-3), Eagle(-2), Birdie(-1),
-  /// Par(0), Bogey(+1), Double(+2), Triple(+3).
-  Widget _parRelativeButtons(int par) {
-    const deltas = [-3, -2, -1, 0, 1, 2, 3];
-    const names = {
-      -3: 'Albatross',
-      -2: 'Eagle',
-      -1: 'Birdie',
-      0: 'Par',
-      1: 'Bogey',
-      2: 'Double',
-      3: 'Triple',
-    };
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      alignment: WrapAlignment.center,
-      children: deltas.map((d) {
-        final score = par + d;
-        final selected = _scores[_hole] == score;
-        return ElevatedButton(
-          onPressed: score >= 1 ? () => _enterScore(score) : null,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: selected
-                ? Theme.of(context).colorScheme.primary
-                : d <= 0
-                    ? Colors.green.shade100
-                    : Colors.red.shade100,
-            foregroundColor: selected ? Colors.white : Colors.black87,
-            padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(names[d] ?? '$d',
-                  style: const TextStyle(fontWeight: FontWeight.bold)),
-              Text('$score', style: const TextStyle(fontSize: 12)),
-            ],
-          ),
-        );
-      }).toList(),
-    );
-  }
-
-  /// Numeric entry fallback when hole pars are unknown.
-  Widget _numericButtons() {
+  /// Fixed numeric quick buttons (1-10) that never move. The button
+  /// matching par stays off-white; under-par tints green and over-par
+  /// tints red, darkening with distance from par.
+  Widget _scoreButtons(int? par) {
     return GridView.count(
       crossAxisCount: 5,
       shrinkWrap: true,
@@ -972,9 +961,10 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         return ElevatedButton(
           onPressed: () => _enterScore(score),
           style: ElevatedButton.styleFrom(
-            backgroundColor:
-                selected ? Theme.of(context).colorScheme.primary : null,
-            foregroundColor: selected ? Colors.white : null,
+            backgroundColor: selected
+                ? Theme.of(context).colorScheme.primary
+                : _scoreTint(score, par),
+            foregroundColor: selected ? Colors.white : Colors.black87,
           ),
           child: Text('$score',
               style:
@@ -982,5 +972,16 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         );
       }).toList(),
     );
+  }
+
+  /// Tint for a fixed score button: par is off-white, under-par goes
+  /// green and over-par goes red, darkening with distance from par.
+  /// Null par (unknown) leaves the default button color.
+  Color? _scoreTint(int score, int? par) {
+    if (par == null) return null;
+    if (score == par) return const Color(0xFFF5F5F0); // off-white
+    final dist = (score - par).abs().clamp(1, 4);
+    final shade = 100 * dist; // 100, 200, 300, 400
+    return score < par ? Colors.green[shade] : Colors.red[shade];
   }
 }
