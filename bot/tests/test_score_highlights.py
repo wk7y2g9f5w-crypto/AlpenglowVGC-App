@@ -62,7 +62,7 @@ class TestPostScoreHighlight(unittest.IsolatedAsyncioTestCase):
         return FakeBot(self.db_path, FakeGuild(channels)), channels
 
     async def test_top3_posts_with_to_par(self):
-        bot, channels = self._bot("tournament-notifications")
+        bot, channels = self._bot("🔔tournament-notifications")
         ok = await tc.post_score_highlight(bot, {
             "tournament_id": self.tid, "event_type": "top3",
             "top3_names": ["Cayden", "Kristian"],
@@ -78,7 +78,7 @@ class TestPostScoreHighlight(unittest.IsolatedAsyncioTestCase):
         self.assertIn("🥈 Kristian (-2)", embed.description)
 
     async def test_ace_post(self):
-        bot, channels = self._bot("tournament-notifications")
+        bot, channels = self._bot("🔔tournament-notifications")
         ok = await tc.post_score_highlight(bot, {
             "tournament_id": self.tid, "event_type": "ace",
             "player_name": "Cayden", "hole": 7, "course": "Pebble"})
@@ -87,13 +87,21 @@ class TestPostScoreHighlight(unittest.IsolatedAsyncioTestCase):
         self.assertIn("HOLE-IN-ONE", channels[0].sent[0].title)
 
     async def test_albatross_post(self):
-        bot, channels = self._bot("tournament-notifications")
+        bot, channels = self._bot("🔔tournament-notifications")
         ok = await tc.post_score_highlight(bot, {
             "tournament_id": self.tid, "event_type": "albatross",
             "player_name": "Cayden", "hole": 7, "course": "Pebble",
             "under": 3})
         self.assertTrue(ok)
         self.assertIn("ALBATROSS", channels[0].sent[0].title)
+
+    async def test_plain_name_fallback_still_works(self):
+        bot, channels = self._bot("tournament-notifications")
+        ok = await tc.post_score_highlight(bot, {
+            "tournament_id": self.tid, "event_type": "top3",
+            "top3_names": ["Cayden"], "top3": [{"to_par": 0}]})
+        self.assertTrue(ok)
+        self.assertEqual(len(channels[0].sent), 1)
 
     async def test_missing_channel_skips(self):
         bot, _ = self._bot("general")
@@ -103,14 +111,14 @@ class TestPostScoreHighlight(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
 
     async def test_missing_tournament_skips(self):
-        bot, _ = self._bot("tournament-notifications")
+        bot, _ = self._bot("🔔tournament-notifications")
         ok = await tc.post_score_highlight(bot, {
             "tournament_id": 99999, "event_type": "ace",
             "player_name": "Cayden", "hole": 7, "course": "Pebble"})
         self.assertFalse(ok)
 
     async def test_unknown_event_skips(self):
-        bot, channels = self._bot("tournament-notifications")
+        bot, channels = self._bot("🔔tournament-notifications")
         ok = await tc.post_score_highlight(bot, {
             "tournament_id": self.tid, "event_type": "bogus"})
         self.assertFalse(ok)
