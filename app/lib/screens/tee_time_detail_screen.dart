@@ -429,6 +429,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                             settings: widget.settings,
                             tournament: widget.tournament,
                             teeTime: tt,
+                            myDiscordId: widget.myDiscordId,
                           ),
                         ));
                       },
@@ -444,6 +445,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                             settings: widget.settings,
                             tournament: widget.tournament,
                             teeTime: tt,
+                            myDiscordId: widget.myDiscordId,
                           ),
                         ));
                       },

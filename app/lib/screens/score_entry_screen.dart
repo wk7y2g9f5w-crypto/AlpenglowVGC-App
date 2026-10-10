@@ -23,6 +23,7 @@ class ScoreEntryScreen extends StatefulWidget {
   final SettingsService settings;
   final Tournament tournament;
   final TeeTime teeTime;
+  final String myDiscordId;
 
   const ScoreEntryScreen({
     super.key,
@@ -30,6 +31,7 @@ class ScoreEntryScreen extends StatefulWidget {
     required this.settings,
     required this.tournament,
     required this.teeTime,
+    required this.myDiscordId,
   });
 
   @override
@@ -86,8 +88,13 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     // Default to the tee time's assigned round.
     _roundNumber = widget.teeTime.roundNumber;
     _scores = List<int?>.filled(_holeCount, null);
-    _player =
-        widget.teeTime.players.isNotEmpty ? widget.teeTime.players.first : null;
+    // Select my own chip when I'm in the tee time, otherwise the first
+    // player — the card loaded below always belongs to the selected chip.
+    final players = widget.teeTime.players;
+    _player = players.isNotEmpty
+        ? players.firstWhere((p) => p.discordId == widget.myDiscordId,
+            orElse: () => players.first)
+        : null;
     _loadExisting();
     _loadCrew();
   }
@@ -115,7 +122,11 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   }
 
   Future<void> _loadExisting() async {
-    await _loadCard(null, _roundNumber); // null = my own card
+    // Load the selected player's card explicitly (never "my card" by
+    // default) so the scores shown always belong to the highlighted chip.
+    // Admins opening from outside the tee time have no card of their own —
+    // previously this loaded a blank card under another player's chip.
+    await _loadCard(_player?.discordId, _roundNumber);
     if (mounted) setState(() => _loading = false);
   }
 

@@ -20,12 +20,14 @@ class CasualScoreEntryScreen extends StatefulWidget {
   final AuthService auth;
   final SettingsService settings;
   final CasualTeeTime teeTime;
+  final String myDiscordId;
 
   const CasualScoreEntryScreen({
     super.key,
     required this.auth,
     required this.settings,
     required this.teeTime,
+    required this.myDiscordId,
   });
 
   @override
@@ -76,10 +78,14 @@ class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
   void initState() {
     super.initState();
     _scores = List<int?>.filled(_holeCount, null);
-    _player = widget.teeTime.players.isNotEmpty
-        ? widget.teeTime.players.first
+    // Select my own chip when I'm in the round, otherwise the first
+    // player — the card loaded below always belongs to the selected chip.
+    final players = widget.teeTime.players;
+    _player = players.isNotEmpty
+        ? players.firstWhere((p) => p.discordId == widget.myDiscordId,
+            orElse: () => players.first)
         : null;
-    _loadCard(null).then((_) {
+    _loadCard(_player?.discordId).then((_) {
       if (mounted) setState(() => _loading = false);
     });
   }
