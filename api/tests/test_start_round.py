@@ -281,4 +281,26 @@ class StartRoundApiTestCase(_ApiTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertTrue(r.json()["started"])
 
+    def test_member_can_enter_scores_for_other_player(self):
+        # A non-admin in the tee time may enter scores on another player's
+        # in-progress card (until it's submitted — then crew-only applies).
+        tt_id = self._started_tt(self.t_open, creator="123", extra=("456",))
+        run(db.register_player(self.db_path, self.t_open, "123"))
+        run(db.register_player(self.db_path, self.t_open, "456"))
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        body = {"player_discord_id": "456", "scores": [4] * 18,
+                "round_number": 1}
+        r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
+                            headers=self.h("123"), json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        # The scores land on 456's card.
+        r = self.client.get(
+            f"/api/tee-times/{tt_id}/scorecard?round_number=1"
+            "&player_discord_id=456",
+            headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["card"]["scores"], [4] * 18)
+
 del _ApiTestCase

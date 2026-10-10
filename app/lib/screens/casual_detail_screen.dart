@@ -126,6 +126,7 @@ class _CasualDetailScreenState extends State<CasualDetailScreen> {
                       auth: widget.auth,
                       settings: widget.settings,
                       teeTime: d.tt,
+                      myDiscordId: d.me.discordId,
                     ),
                   ));
                   if (saved == true) _refresh();

@@ -41,6 +41,7 @@ class _ArchivedTeeTimeDetailScreenState
   List<_PlayerCard> _cards = [];
   bool _isAdmin = false;
   int? _expandedIndex;
+  String _myDiscordId = '';
 
   @override
   void initState() {
@@ -67,6 +68,7 @@ class _ArchivedTeeTimeDetailScreenState
       if (mounted) {
         setState(() {
           _isAdmin = me.isAdmin;
+          _myDiscordId = me.discordId;
           _cards = cards;
           _loading = false;
         });
@@ -177,6 +179,7 @@ class _ArchivedTeeTimeDetailScreenState
                     settings: widget.settings,
                     tournament: widget.tournament,
                     teeTime: widget.teeTime,
+                    myDiscordId: _myDiscordId,
                   ),
                 ));
               },
