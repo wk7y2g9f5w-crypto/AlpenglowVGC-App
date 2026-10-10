@@ -956,11 +956,11 @@ class Tournaments(commands.Cog):
     @tournament.command(name="shakeup",
                         description="Post the current top 3 to "
                                     "#tournament-notifications (crew)")
-    @app_commands.autocomplete(tournament=active_tournament_autocomplete)
+    @app_commands.autocomplete(tournament=any_tournament_autocomplete)
     @app_commands.describe(
         tournament="Defaults to the single active tournament")
     async def tournament_shakeup(self, interaction: discord.Interaction,
-                                 tournament: str | None = None):
+                                 tournament: Optional[int] = None):
         """Crew-only manual top-3 post. Doubles as a diagnostic: it says
         exactly why automatic shake-up posts aren't appearing (missing
         channel, not enough scores, ...)."""
@@ -972,7 +972,8 @@ class Tournaments(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         t, err = await resolve_tournament(
-            interaction, tournament, ["registration_open", "in_progress"])
+            interaction, tournament,
+            ["registration_open", "in_progress", "completed"])
         if err:
             await interaction.followup.send(err, ephemeral=True)
             return
