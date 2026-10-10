@@ -225,4 +225,60 @@ class StartRoundApiTestCase(_ApiTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["verified"], 2)
 
+    def _tt_at_offset(self, tournament, creator="123", minutes_from_now=0,
+                      extra=()):
+        from datetime import datetime, timedelta, timezone
+        starts_at = (datetime.now(timezone.utc) +
+                     timedelta(minutes=minutes_from_now)).isoformat()
+        tt_id = run(db.create_tee_time(
+            self.db_path, tournament, "flight",
+            starts_at, 4, creator, None))
+        run(db.join_tee_time(self.db_path, tt_id, creator))
+        for pid in extra:
+            run(db.join_tee_time(self.db_path, tt_id, pid))
+        return tt_id
+
+    def test_start_round_non_creator_player_403(self):
+        # "456" is in the tee time but not the creator: still 403.
+        tt_id = self._tt_at_offset(self.t_open, creator="123",
+                                   minutes_from_now=-60, extra=("456",))
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h("456"))
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.json()["code"], "not_creator")
+
+    def test_start_round_creator_too_early_403(self):
+        tt_id = self._tt_at_offset(self.t_open, creator="123",
+                                   minutes_from_now=10)
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h("123"))
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.json()["code"], "too_early")
+
+    def test_start_round_creator_in_window_200(self):
+        tt_id = self._tt_at_offset(self.t_open, creator="123",
+                                   minutes_from_now=3)
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["started"])
+
+    def test_start_round_creator_after_tee_time_200(self):
+        # No upper bound — groups running late can still start.
+        tt_id = self._tt_at_offset(self.t_open, creator="123",
+                                   minutes_from_now=-60)
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h("123"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["started"])
+
+    def test_start_round_admin_bypasses_time_window(self):
+        tt_id = self._tt_at_offset(self.t_open, creator="123",
+                                   minutes_from_now=120)
+        self._admin(True)
+        r = self.client.post(f"/api/tee-times/{tt_id}/start",
+                             headers=self.h("999"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["started"])
+
 del _ApiTestCase
