@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS scorecards(
   verified_by TEXT,
   submitted_by TEXT,
   witness_name TEXT,
+  hole_times_json TEXT,
   CHECK((tournament_id IS NULL) != (casual_tee_time_id IS NULL))
 );
 -- Shot-by-shot tracking (optional): where each shot landed on the hole,
@@ -557,6 +558,10 @@ async def _migrate(db_path: str) -> None:
         if "witness_name" not in card_cols:
             await con.execute(
                 "ALTER TABLE scorecards ADD COLUMN witness_name TEXT")
+            await con.commit()
+        if "hole_times_json" not in card_cols:
+            await con.execute(
+                "ALTER TABLE scorecards ADD COLUMN hole_times_json TEXT")
             await con.commit()
 
         # hole_shots.putts — putt count on a green shot instead of one
@@ -2314,6 +2319,30 @@ async def set_leader(db_path, tournament_id, leader_key, leader_sort) -> None:
 
 
 # ---------------------------------------------------------------- scorecards
+def _merge_hole_times(old_scores: list, old_times: list | None,
+                     new_scores: list, now: str) -> list:
+    """Per-hole entry timestamps for a scorecard write.
+
+    Each hole is stamped with ``now`` when its incoming score is non-null
+    and either has no stamp yet or its score changed; otherwise the
+    existing stamp is kept. Final submits therefore preserve live-entry
+    times instead of clobbering them.
+    """
+    n = len(new_scores)
+    old_times = list(old_times or [])
+    old_times = (old_times + [None] * n)[:n]
+    old_scores = list(old_scores or [])
+    out = []
+    for i, s in enumerate(new_scores):
+        if s is not None and (old_times[i] is None
+                              or (i < len(old_scores)
+                                  and s != old_scores[i])):
+            out.append(now)
+        else:
+            out.append(old_times[i])
+    return out
+
+
 async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_id,
                            scores: list[int | None], status: str,
                            submitted_by: str | None = None,
@@ -2343,7 +2372,7 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
         # best_ball: each member has their own card.
         existing = await _fetchone(
             db_path,
-            "SELECT id FROM scorecards WHERE " + scope_where +
+            "SELECT id, holes_json, hole_times_json FROM scorecards WHERE " + scope_where +
             " AND player_discord_id = ? AND team_id = ?"
             " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
             " AND round_number = ?"
@@ -2353,7 +2382,7 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
     elif team_id is not None:
         existing = await _fetchone(
             db_path,
-            "SELECT id FROM scorecards WHERE " + scope_where +
+            "SELECT id, holes_json, hole_times_json FROM scorecards WHERE " + scope_where +
             " AND team_id = ?"
             " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
             " AND round_number = ?"
@@ -2363,7 +2392,7 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
     else:
         existing = await _fetchone(
             db_path,
-            "SELECT id FROM scorecards WHERE " + scope_where +
+            "SELECT id, holes_json, hole_times_json FROM scorecards WHERE " + scope_where +
             " AND player_discord_id = ?"
             " AND IFNULL(tee_time_id, -1) = IFNULL(?, -1)"
             " AND team_id IS NULL AND round_number = ?"
@@ -2371,25 +2400,30 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
             scope_params + (player_id, tee_time_id, round_number),
         )
     if existing:
+        old_times = (json.loads(existing["hole_times_json"])
+                     if existing.get("hole_times_json") else None)
+        new_times = _merge_hole_times(json.loads(existing["holes_json"]),
+                                      old_times, scores, now)
         await _execute(
             db_path,
             "UPDATE scorecards SET holes_json = ?, total = ?, status = ?,"
             " submitted_at = ?, verified_by = NULL, submitted_by = ?,"
-            " witness_name = ? WHERE id = ?",
+            " witness_name = ?, hole_times_json = ? WHERE id = ?",
             (holes_json, total, status, now, submitted_by, witness_name,
-             existing["id"]),
+             json.dumps(new_times), existing["id"]),
         )
         return existing["id"]
+    new_times = [now if s is not None else None for s in scores]
     lastrowid, _ = await _execute(
         db_path,
         "INSERT INTO scorecards (tournament_id, casual_tee_time_id,"
         " round_number, player_discord_id,"
         " team_id, tee_time_id, holes_json, total, status, submitted_at,"
-        " submitted_by, witness_name)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        " submitted_by, witness_name, hole_times_json)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tournament_id, casual_tee_time_id, round_number, player_id, team_id,
          tee_time_id, holes_json, total, status, now, submitted_by,
-         witness_name),
+         witness_name, json.dumps(new_times)),
     )
     return lastrowid
 
@@ -2451,30 +2485,40 @@ async def save_partial_scorecard(db_path, tournament_id, player_id, team_id,
                 new if new is not None else old
                 for old, new in zip(cur_scores, scores)
             ]
+            old_times = (json.loads(existing["hole_times_json"])
+                         if existing.get("hole_times_json") else None)
+            merged_times = _merge_hole_times(cur_scores, old_times, scores,
+                                             now)
+            norm_old_times = ((list(old_times or []) + [None] * holes_count)
+                              [:holes_count])
             keep_status = (existing["status"]
                            if existing["status"] != "in_progress"
                            else "in_progress")
-            if merged == cur_scores and existing["status"] == keep_status:
+            if (merged == cur_scores and merged_times == norm_old_times
+                    and existing["status"] == keep_status):
                 await con.execute("ROLLBACK")
                 return existing["id"]
             total = sum(s for s in merged if s is not None)
             await con.execute(
                 "UPDATE scorecards SET holes_json = ?, total = ?, status = ?,"
-                " submitted_at = ?, submitted_by = ? WHERE id = ?",
+                " submitted_at = ?, submitted_by = ?, hole_times_json = ?"
+                " WHERE id = ?",
                 (json.dumps(merged), total, keep_status, now,
                  submitted_by or existing.get("submitted_by"),
-                 existing["id"]),
+                 json.dumps(merged_times), existing["id"]),
             )
             await con.commit()
             return existing["id"]
         total = sum(s for s in scores if s is not None)
+        new_times = [now if s is not None else None for s in scores]
         cur = await con.execute(
             "INSERT INTO scorecards (tournament_id, round_number,"
             " player_discord_id, team_id, tee_time_id, holes_json, total,"
-            " status, submitted_at, submitted_by)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " status, submitted_at, submitted_by, hole_times_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (tournament_id, round_number, player_id, team_id, tee_time_id,
-             json.dumps(scores), total, "in_progress", now, submitted_by),
+             json.dumps(scores), total, "in_progress", now, submitted_by,
+             json.dumps(new_times)),
         )
         await con.commit()
         return cur.lastrowid

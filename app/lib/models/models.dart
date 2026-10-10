@@ -314,6 +314,9 @@ class Scorecard {
   final String? submittedBy;
   final int roundNumber;
   final String? witnessName;
+  /// Per-hole entry timestamps (ISO-8601 UTC), parallel to [scores].
+  /// Null entries = hole scored before time tracking existed.
+  final List<String?> holeTimes;
 
   Scorecard({
     this.id,
@@ -326,6 +329,7 @@ class Scorecard {
     this.submittedBy,
     this.roundNumber = 1,
     this.witnessName,
+    this.holeTimes = const [],
   });
 
   /// True while the card is still being entered hole by hole.
@@ -344,6 +348,9 @@ class Scorecard {
         submittedBy: j['submitted_by']?.toString(),
         roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
         witnessName: j['witness_name']?.toString(),
+        holeTimes: ((j['hole_times'] as List?) ?? [])
+            .map((e) => e?.toString())
+            .toList(),
       );
 }
 

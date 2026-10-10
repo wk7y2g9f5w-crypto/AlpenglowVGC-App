@@ -93,6 +93,18 @@ class _ArchivedTeeTimeDetailScreenState
     }
   }
 
+  /// Local HH:MM when the hole's score was entered, or '–' when untracked
+  /// (holes scored before time tracking existed).
+  String _holeTimeLabel(Scorecard card, int i) {
+    if (i >= card.holeTimes.length) return '–';
+    final t = card.holeTimes[i];
+    if (t == null) return '–';
+    final dt = DateTime.tryParse(t)?.toLocal();
+    if (dt == null) return '–';
+    return '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
+  }
+
   Widget _holeGrid(Scorecard card) {
     final pars = widget.tournament.pars ?? [];
     return Padding(
@@ -159,6 +171,27 @@ class _ArchivedTeeTimeDetailScreenState
               ),
             ],
           ),
+          if (card.holeTimes.any((t) => t != null))
+            TableRow(
+              children: [
+                const Padding(
+                  padding: EdgeInsets.all(4),
+                  child: Text('Time',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 11)),
+                ),
+                ...List.generate(
+                  card.scores.length,
+                  (i) => Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Text(_holeTimeLabel(card, i),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            fontSize: 10, color: Colors.grey)),
+                  ),
+                ),
+              ],
+            ),
         ],
       ),
     );
