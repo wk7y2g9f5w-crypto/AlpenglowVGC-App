@@ -636,6 +636,11 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
     scores = json.loads(card["holes_json"])
     pars = _parse_pars(pars_csv)
     thru = sum(1 for s in scores if s is not None)
+    try:
+        hole_times = json.loads(card.get("hole_times_json") or "[]")
+    except (ValueError, TypeError):
+        hole_times = []
+    hole_times = (list(hole_times) + [None] * len(scores))[:len(scores)]
     return {
         "id": card["id"],
         "player_discord_id": card["player_discord_id"],
@@ -647,6 +652,7 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
         "status": card["status"],
         "submitted_by": card.get("submitted_by"),
         "witness_name": card.get("witness_name"),
+        "hole_times": hole_times,
     }
 
 
