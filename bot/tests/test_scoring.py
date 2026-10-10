@@ -243,7 +243,7 @@ class TestLiveScoring(unittest.IsolatedAsyncioTestCase):
         pars = ",".join(["4"] * holes)
         tid = await db.create_tournament(
             self.db_path, "g1", "Live", fmt, holes, "Course", pars, None,
-            "admin", start_date="2026-10-03", end_date="2026-10-04",
+            "admin", start_date="2026-10-03", end_date="2026-12-31",
         )
         tt = await db.create_tee_time(
             self.db_path, tid, "TT1", "2026-10-03T19:00:00+00:00", 4,

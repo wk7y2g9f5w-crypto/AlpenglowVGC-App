@@ -375,6 +375,22 @@ async def _decide_join_request_flow(interaction: discord.Interaction, accept: bo
             ephemeral=True,
         )
         return
+    # Play-in-order: the requester needs a submitted card for the previous
+    # round, unless the decider is an admin (admin override).
+    rnd_num = tt.get("round_number") or 1
+    if rnd_num > 1 and not await db.has_completed_round_card(
+        db_path, t["id"], req["player_discord_id"], rnd_num - 1
+    ):
+        if not await is_admin(interaction):
+            await db.decide_join_request(
+                db_path, request_id, "declined", decider_id)
+            await _disable_request_buttons(interaction, "Declined ❌")
+            await interaction.response.send_message(
+                f"❌ **{requester_name}** hasn't submitted Round {rnd_num - 1} "
+                f"— rounds are played in order. Request declined.",
+                ephemeral=True,
+            )
+            return
     join_result = await db.join_tee_time(db_path, tt["id"], req["player_discord_id"])
     if join_result == "round_conflict":
         await db.decide_join_request(db_path, request_id, "declined", decider_id)

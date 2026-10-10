@@ -581,6 +581,32 @@ async def _tee_time_or_404(tee_time_id: int) -> tuple[dict, dict]:
     return tt, t
 
 
+async def _require_previous_round_played(tournament_id: int,
+                                         player_discord_id: str,
+                                         round_number: int) -> None:
+    """Play-in-order gate: Round N needs a submitted previous-round card.
+
+    "Submitted" = pending or verified — the round was actually played.
+    Raises 403 previous_round_incomplete otherwise. Round 1 is always open.
+    """
+    if round_number <= 1:
+        return
+    prev = round_number - 1
+    if not await db.has_completed_round_card(DB_PATH, tournament_id,
+                                             player_discord_id, prev):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "previous_round_incomplete",
+                "message": (
+                    f"Round {prev} must be submitted before playing "
+                    f"Round {round_number} — tournament rounds are played "
+                    "in order."
+                ),
+            },
+        )
+
+
 def _player_json(p: dict) -> dict:
     return {
         "discord_id": p.get("discord_id"),
@@ -1472,6 +1498,18 @@ async def create_tee_time(
                 ),
             },
         )
+    # Play-in-order: non-admins need a submitted card for the previous
+    # round before creating a later-round tee time. Admins bypass this —
+    # they can set up tee times and add players freely.
+    is_admin = await fetch_admin_status(user["discord_id"])
+    if is_admin is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify admin status — try again shortly.",
+        )
+    if not is_admin:
+        await _require_previous_round_played(
+            t["id"], user["discord_id"], body.round_number)
     tt_id = await db.create_tee_time(
         DB_PATH,
         t["id"],
@@ -1508,6 +1546,17 @@ async def join_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
                 ),
             },
         )
+    # Play-in-order: non-admins need a submitted card for the previous
+    # round. Admins bypass (they can place players freely).
+    is_admin = await fetch_admin_status(user["discord_id"])
+    if is_admin is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify admin status — try again shortly.",
+        )
+    if not is_admin:
+        await _require_previous_round_played(
+            t["id"], user["discord_id"], tt.get("round_number") or 1)
     result = await db.join_tee_time(DB_PATH, tt["id"], user["discord_id"])
     if result == "missing":  # pragma: no cover - checked above
         raise HTTPException(
@@ -2224,6 +2273,22 @@ async def _decide(tee_time_id: int, req_id: int, accept: bool, user: CurrentUser
         if other is not None:
             updated = await db.decide_join_request(DB_PATH, req_id, "declined", decider)
             return _join_request_json(updated)
+        # Play-in-order: the requester needs a submitted card for the
+        # previous round, unless the approver is an admin (admin override).
+        rnd_num = tt.get("round_number") or 1
+        if rnd_num > 1 and not await db.has_completed_round_card(
+            DB_PATH, t["id"], requester, rnd_num - 1
+        ):
+            is_admin = await fetch_admin_status(user["discord_id"])
+            if is_admin is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Could not verify admin status — try again shortly.",
+                )
+            if not is_admin:
+                updated = await db.decide_join_request(
+                    DB_PATH, req_id, "declined", decider)
+                return _join_request_json(updated)
         join_result = await db.join_tee_time(DB_PATH, tt["id"], requester)
         if join_result in ("full", "round_conflict"):
             updated = await db.decide_join_request(DB_PATH, req_id, "declined", decider)
@@ -2391,6 +2456,31 @@ async def put_scorecard(
                 ),
             },
         )
+    # Gate 3f: rounds are played in order — the card owner needs a submitted
+    # (pending or verified) card for the previous round. Crew submitting on
+    # someone's behalf bypass this (admin override after the fact).
+    if body.round_number > 1 and not await db.has_completed_round_card(
+        DB_PATH, t["id"], body.player_discord_id, body.round_number - 1
+    ):
+        if is_crew is None:
+            is_crew = await fetch_crew_status(user["discord_id"])
+            if is_crew is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Could not verify crew status with Discord — try again shortly.",
+                )
+        if not is_crew:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "previous_round_incomplete",
+                    "message": (
+                        f"Round {body.round_number - 1} must be submitted "
+                        f"before playing Round {body.round_number} — "
+                        "tournament rounds are played in order."
+                    ),
+                },
+            )
     # Gate 4: the tee time must have started (bot's tee-time gate).
     if not sl.tee_time_passed(tt.get("starts_at") or ""):
         raise HTTPException(
@@ -4148,12 +4238,15 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
         # Live in-progress cards are included so the board moves hole by hole.
         ranked, pending = await lr._stroke_ranked(
             DB_PATH, t, include_in_progress=True)
+        # Players who missed a closed round: shown in a DNF section, never
+        # ranked (and excluded from season points via the ranked filter).
+        dnf = await lr.dnf_rows(DB_PATH, t)
 
         # Golf+ handles for the app's handle-first display rule. Fetched
         # here (api layer) rather than in leaderboard_render, which is
         # shared with the Discord bot and must stay untouched.
         handle_by_pid: dict[str, str | None] = {}
-        for c in list(ranked) + list(pending):
+        for c in list(ranked) + list(pending) + list(dnf):
             pid = c.get("player_discord_id")
             if pid and pid not in handle_by_pid:
                 p = await db.get_player(DB_PATH, pid)
@@ -4197,6 +4290,17 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
             "standings": [_row(i, c, True)
                           for i, c in enumerate(ranked, 1)],
             "pending": [await _pending_row(c) for c in pending],
+            "dnf": [
+                {
+                    "discord_id": d["player_discord_id"],
+                    "display_name": d["name"],
+                    "golfplus_handle": handle_by_pid.get(
+                        d["player_discord_id"]),
+                    "missed_round": d["missed_round"],
+                    "status": "dnf",
+                }
+                for d in dnf
+            ],
         }
     if fmt in ("best_ball", "alt_shot", "scramble"):
         # Same ranking the bot uses (lr._team_rows aggregates per round,

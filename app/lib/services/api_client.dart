@@ -55,6 +55,9 @@ String friendlyApiMessage(ApiException e) {
       return 'You\'re already in another tee time for that round — leave it first to join this one.';
     case 'round_already_submitted':
       return 'A card for that round was already submitted — one scorecard per round per player.';
+    case 'previous_round_incomplete':
+      // The server names the blocking round; surface it as-is.
+      return e.message;
     case 'active_season_exists':
       return 'A season is already active — end it before starting a new one.';
     default:
@@ -382,15 +385,23 @@ class ApiClient {
     return Tournament.fromJson(body);
   }
 
-  Future<List<LeaderboardEntry>> getLeaderboard(String tournamentId) async {
+  Future<LeaderboardData> getLeaderboard(String tournamentId) async {
     final body = await _get('/api/tournaments/$tournamentId/leaderboard');
-    if (body is! Map<String, dynamic>) return [];
+    if (body is! Map<String, dynamic>) {
+      return const LeaderboardData(entries: [], dnf: []);
+    }
     // Ranked standings first, then pending (unverified solo) cards.
     final standings = (body['standings'] as List? ?? []);
     final pending = (body['pending'] as List? ?? []);
-    return [...standings, ...pending]
-        .map((e) => LeaderboardEntry(e as Map<String, dynamic>))
-        .toList();
+    final dnf = (body['dnf'] as List? ?? []);
+    return LeaderboardData(
+      entries: [...standings, ...pending]
+          .map((e) => LeaderboardEntry(e as Map<String, dynamic>))
+          .toList(),
+      dnf: dnf
+          .map((e) => LeaderboardEntry(e as Map<String, dynamic>))
+          .toList(),
+    );
   }
 
   /// Tournament players list: every account with a Golf+ username, each

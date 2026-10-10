@@ -113,6 +113,52 @@ def _partial_round_score(scores: list, pars: list[int] | None
     return total, to_par, thru
 
 
+async def dnf_rows(db_path: str, t: dict) -> list[dict]:
+    """Players who missed a closed round (did not finish).
+
+    A player is DNF when their lowest round without a submitted
+    (pending/verified) card has its end date passed. Covers registered
+    players and anyone holding a card — so a no-show for Round 1 shows up
+    here, as does someone who played Round 1 then missed Round 2. Rows
+    carry player_discord_id, name, and missed_round. A round with no end
+    date never closes, so it can never DNF anyone.
+    """
+    rounds = await db.list_rounds(db_path, t["id"])
+    if not rounds:
+        return []
+    completed: set[tuple[str, int]] = set()
+    card_holders: set[str] = set()
+    for c in await db.get_scorecards(db_path, t["id"]):
+        pid = c["player_discord_id"]
+        if pid is None:
+            continue
+        card_holders.add(pid)
+        if c["status"] in ("pending", "verified"):
+            completed.add((pid, c.get("round_number") or 1))
+    pids = set(card_holders)
+    for r in await db.get_roster(db_path, t["id"]):
+        pids.add(r["discord_id"])
+    rows = []
+    for pid in sorted(pids):
+        missed = None
+        for r in rounds:
+            rn = r["round_number"]
+            if (pid, rn) in completed:
+                continue
+            if sl.round_has_ended(r.get("end_date")):
+                missed = rn
+                break
+        if missed is None:
+            continue
+        player = await db.get_player(db_path, pid)
+        rows.append({
+            "player_discord_id": pid,
+            "name": db.display_name_of(player, pid),
+            "missed_round": missed,
+        })
+    return rows
+
+
 async def _stroke_ranked(db_path: str, t: dict,
                          include_in_progress: bool = False,
                          include_pending: bool = True,
@@ -151,7 +197,12 @@ async def _stroke_ranked(db_path: str, t: dict,
         by_player.setdefault(pid, {})[rnd] = c
 
     ranked, pending = [], []
+    # DNF players leave the ranked board entirely — they appear in the
+    # DNF section instead (and earn no season points).
+    dnf_ids = {d["player_discord_id"] for d in await dnf_rows(db_path, t)}
     for pid, by_round in by_player.items():
+        if pid in dnf_ids:
+            continue
         player = await db.get_player(db_path, pid)
         name = db.display_name_of(player, pid)
         verified = {r: c for r, c in by_round.items()
@@ -255,8 +306,9 @@ async def _render_stroke(embed: discord.Embed, t: dict,
                          include_in_progress: bool = False) -> None:
     ranked, pending = await _stroke_ranked(db_path, t,
                                            include_in_progress=include_in_progress)
+    dnf = await dnf_rows(db_path, t)
 
-    if not ranked and not pending:
+    if not ranked and not pending and not dnf:
         embed.add_field(name="No scores yet",
                         value="Scores will appear here as players enter them.",
                         inline=False)
@@ -305,6 +357,16 @@ async def _render_stroke(embed: discord.Embed, t: dict,
         embed.add_field(
             name="Awaiting verification (not ranked)",
             value="\n".join(plines[:10]),
+            inline=False,
+        )
+    if dnf:
+        dlines = [
+            f"• {d['name']} — **DNF** (missed Round {d['missed_round']})"
+            for d in dnf
+        ]
+        embed.add_field(
+            name="Did not finish",
+            value="\n".join(dlines[:10]),
             inline=False,
         )
 

@@ -2532,6 +2532,24 @@ async def save_partial_scorecard(db_path, tournament_id, player_id, team_id,
         await con.close()
 
 
+async def has_completed_round_card(db_path, tournament_id, player_discord_id,
+                                   round_number) -> bool:
+    """True when the player has a submitted card for the round.
+
+    "Submitted" = status pending or verified — the round was actually
+    played. An in-progress (live) card doesn't count: the round isn't
+    finished yet. Backs the play-in-order rule.
+    """
+    row = await _fetchone(
+        db_path,
+        "SELECT 1 FROM scorecards WHERE tournament_id = ?"
+        " AND player_discord_id = ? AND round_number = ?"
+        " AND status IN ('pending', 'verified') LIMIT 1",
+        (tournament_id, player_discord_id, round_number),
+    )
+    return row is not None
+
+
 async def find_scorecard(db_path, tournament_id, *, player_discord_id=None,
                          team_id=None, tee_time_id=None,
                          round_number=1) -> dict | None:
