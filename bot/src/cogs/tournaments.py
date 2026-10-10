@@ -14,6 +14,7 @@ from src import teesheet as ts
 from src.cogs.common import (
     active_tournament_autocomplete,
     any_tournament_autocomplete,
+    is_crew,
     require_admin,
     require_strict_admin,
     resolve_tournament,
@@ -239,6 +240,8 @@ async def post_score_highlight(bot: commands.Bot, payload: dict) -> bool:
         channel = discord.utils.get(
             guild.text_channels, name=NOTIFICATIONS_CHANNEL)
         if channel is None:
+            print(f"score highlight skipped: #{NOTIFICATIONS_CHANNEL} not "
+                  f"found (guild {guild.id}, tournament {tid})")
             return False
         event = payload.get("event_type")
         course = payload.get("course") or "the course"
@@ -949,6 +952,80 @@ class Tournaments(commands.Cog):
             "Note: already-posted announcement messages still carry the old "
             "IDs in their buttons — delete and re-post those if needed.")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    @tournament.command(name="shakeup",
+                        description="Post the current top 3 to "
+                                    "#tournament-notifications (crew)")
+    @app_commands.autocomplete(tournament=active_tournament_autocomplete)
+    @app_commands.describe(
+        tournament="Defaults to the single active tournament")
+    async def tournament_shakeup(self, interaction: discord.Interaction,
+                                 tournament: str | None = None):
+        """Crew-only manual top-3 post. Doubles as a diagnostic: it says
+        exactly why automatic shake-up posts aren't appearing (missing
+        channel, not enough scores, ...)."""
+        if not await is_crew(interaction):
+            await interaction.response.send_message(
+                "⛔ Crew members only (admin, mod, or tournament director).",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        t, err = await resolve_tournament(
+            interaction, tournament, ["registration_open", "in_progress"])
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+        if (t.get("format") or "stroke") != "stroke":
+            await interaction.followup.send(
+                "❌ Top-3 shake-ups only apply to stroke-play tournaments.",
+                ephemeral=True,
+            )
+            return
+        ranked, _ = await leaderboard_render._stroke_ranked(
+            self.bot.db_path, t, include_in_progress=True)
+        if len(ranked) < 2:
+            await interaction.followup.send(
+                f"❌ Not enough scores yet for **{t['name']}** — need at "
+                "least 2 players on the board.",
+                ephemeral=True,
+            )
+            return
+        names = []
+        entries = []
+        for r in ranked[:3]:
+            pid = r["player_discord_id"]
+            p = await db.get_player(self.bot.db_path, pid)
+            name = db.display_name_of(p, pid)
+            names.append(name)
+            entries.append({"name": name, "to_par": r.get("to_par")})
+        guild = interaction.guild
+        channel = (discord.utils.get(guild.text_channels,
+                                    name=NOTIFICATIONS_CHANNEL)
+                   if guild else None)
+        if channel is None:
+            await interaction.followup.send(
+                f"❌ Channel #{NOTIFICATIONS_CHANNEL} not found — create it "
+                "first, then run this again. (This is also why automatic "
+                "shake-up posts haven't been appearing.)",
+                ephemeral=True,
+            )
+            return
+        posted = await post_score_highlight(self.bot, {
+            "tournament_id": t["id"], "event_type": "top3",
+            "top3_names": names[:3], "top3": entries[:3],
+            "course": t.get("course") or "the course"})
+        if posted:
+            await interaction.followup.send(
+                f"✅ Top 3 for **{t['name']}** posted in {channel.mention}.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "❌ Couldn't post — check the bot's send permissions in "
+                f"#{NOTIFICATIONS_CHANNEL}.",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):
