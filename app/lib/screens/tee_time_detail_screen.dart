@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/models.dart';
@@ -32,6 +34,8 @@ class TeeTimeDetailScreen extends StatefulWidget {
 
 class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
   late Future<_DetailData> _future;
+  bool _showGolfPlusWarning = false;
+  Timer? _warningTimer;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -40,6 +44,12 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
   void initState() {
     super.initState();
     _future = _load();
+  }
+
+  @override
+  void dispose() {
+    _warningTimer?.cancel();
+    super.dispose();
   }
 
   Future<_DetailData> _load() async {
@@ -80,6 +90,30 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
       await call();
       await _refresh();
       if (mounted) showSnack(context, okMsg);
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+    } catch (e) {
+      if (mounted) showSnack(context, 'Failed: $e', error: true);
+    }
+  }
+
+  /// True when Start Round is unlocked for non-admins: from 5 minutes
+  /// before the scheduled tee time onward.
+  bool _startUnlocked(TeeTime tt) => DateTime.now().isAfter(
+      tt.startsAtUtc.subtract(const Duration(minutes: 5)));
+
+  /// Press Start Round, then flash the Golf+ warning for 5 minutes.
+  Future<void> _startRound(String teeTimeId) async {
+    try {
+      await _api.startTeeTime(teeTimeId);
+      await _refresh();
+      if (!mounted) return;
+      setState(() => _showGolfPlusWarning = true);
+      _warningTimer?.cancel();
+      _warningTimer = Timer(const Duration(minutes: 5), () {
+        if (mounted) setState(() => _showGolfPlusWarning = false);
+      });
+      showSnack(context, 'Round started! You can now enter scores.');
     } on ApiException catch (e) {
       if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
     } catch (e) {
@@ -264,6 +298,23 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
             children: [
               const ScorecardDeadlineWarning(),
               const ProDifficultyDisclaimer(),
+              if (_showGolfPlusWarning)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.amber.shade700),
+                  ),
+                  child: const Text(
+                    '⚠️ Start your Golf+ round within 5 minutes!',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 14),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
               CourseArtHeader(
                 course: widget.tournament.course,
                 children: [
@@ -338,12 +389,11 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       icon: const Icon(Icons.remove),
                       label: const Text('Leave'),
                     ),
-                  if (inIt && !tt.isStarted)
+                  if (!tt.isStarted && isCreator) ...[
                     ElevatedButton.icon(
-                      onPressed: () => _act(
-                        () => _api.startTeeTime(tt.id),
-                        'Round started! You can now enter scores.',
-                      ),
+                      onPressed: (data.isAdmin || _startUnlocked(tt))
+                          ? () => _startRound(tt.id)
+                          : null,
                       icon: const Icon(Icons.play_arrow),
                       label: const Text('Start Round'),
                       style: ElevatedButton.styleFrom(
@@ -351,6 +401,16 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                         foregroundColor: Colors.white,
                       ),
                     ),
+                    if (!data.isAdmin && !_startUnlocked(tt))
+                      const Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text(
+                          'Unlocks 5 minutes before your tee time.',
+                          style:
+                              TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                      ),
+                  ],
                   if (!inIt && data.isAdmin && !tt.isStarted)
                     OutlinedButton.icon(
                       onPressed: () => _act(

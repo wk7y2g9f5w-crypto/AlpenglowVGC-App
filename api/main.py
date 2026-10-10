@@ -1532,25 +1532,42 @@ async def join_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
 async def start_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
     """Press Start Round on a tournament tee time.
 
-    Any player in the tee time (or an admin) may start it. Locks joining
-    and unlocks scorecard entry. The press time is recorded for the archive.
+    Only the tee time creator (or an admin) may start it. Non-admins can
+    only start from 5 minutes before the scheduled tee time; admins may
+    start any round at any time. Starting locks joining and unlocks
+    scorecard entry. The press time is recorded for the archive.
     """
     tt, t = await _tee_time_or_404(tee_time_id)
-    players = await db.get_tee_time_players(DB_PATH, tee_time_id)
-    is_player = any(
-        p["discord_id"] == user["discord_id"] for p in players)
-    # Admins may start any round without being in the tee time.
+    # Admins may start any round at any time without being in the tee time.
     is_admin = await fetch_admin_status(user["discord_id"])
     if is_admin is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not verify admin status — try again shortly.",
         )
-    if not is_player and not is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only players in this tee time (or admins) can start the round.",
-        )
+    if not is_admin:
+        if str(tt.get("created_by")) != str(user["discord_id"]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "not_creator",
+                    "message": "Only the tee time creator (or an admin) "
+                               "can start the round.",
+                },
+            )
+        unix = sl.tee_time_unix(tt.get("starts_at") or "")
+        if unix is not None:
+            unlock_at = datetime.fromtimestamp(
+                unix, tz=timezone.utc) - _dt.timedelta(minutes=5)
+            if datetime.now(timezone.utc) < unlock_at:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "too_early",
+                        "message": "Start Round unlocks 5 minutes before "
+                                   "the tee time.",
+                    },
+                )
     result = await db.start_tournament_tee_time(
         DB_PATH, tee_time_id, user["discord_id"], is_admin=is_admin)
     if result == "missing":  # pragma: no cover - checked above
@@ -1563,10 +1580,14 @@ async def start_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
             detail={"code": "already_started",
                     "message": "This round has already started."},
         )
-    if result == "not_player":  # pragma: no cover - checked above
+    if result == "not_creator":  # pragma: no cover - checked above
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only players in this tee time can start the round.",
+            detail={
+                "code": "not_creator",
+                "message": "Only the tee time creator (or an admin) "
+                           "can start the round.",
+            },
         )
     tt = await db.get_tee_time(DB_PATH, tee_time_id)
     return {"started": True, "started_at": tt.get("started_at")}

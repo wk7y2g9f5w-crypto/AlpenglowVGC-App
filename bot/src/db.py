@@ -1838,8 +1838,8 @@ async def start_tournament_tee_time(db_path, tee_time_id, discord_id,
                                    is_admin=False) -> str:
     """Press Start Round on a tournament tee time.
 
-    Any player in the tee time (or a server admin/owner) may start it.
-    Returns 'ok', 'missing', 'not_player', or 'already_started'.
+    Only the tee time creator (or a server admin/owner) may start it.
+    Returns 'ok', 'missing', 'not_creator', or 'already_started'.
     Sets started_at to the press time (UTC ISO); joining locks at this point.
     """
     tt = await get_tee_time(db_path, tee_time_id)
@@ -1848,9 +1848,8 @@ async def start_tournament_tee_time(db_path, tee_time_id, discord_id,
     if tt.get("started_at"):
         return "already_started"
     if not is_admin:
-        players = await get_tee_time_players(db_path, tee_time_id)
-        if not any(p["discord_id"] == discord_id for p in players):
-            return "not_player"
+        if str(tt.get("created_by")) != str(discord_id):
+            return "not_creator"
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     await _execute(
         db_path,
