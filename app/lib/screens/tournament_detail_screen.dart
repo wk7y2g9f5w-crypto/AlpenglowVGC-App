@@ -1004,7 +1004,7 @@ class _LeaderboardTab extends StatefulWidget {
 }
 
 class _LeaderboardTabState extends State<_LeaderboardTab> {
-  late Future<List<LeaderboardEntry>> _future;
+  late Future<LeaderboardData> _future;
 
   /// 0 = tournament leaderboard, 1 = season points standings.
   int _view = 0;
@@ -1079,11 +1079,13 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
   Widget _seasonView() => SeasonStandingsView(api: _api);
 
   Widget _tournamentView() {
-    return AsyncBody<List<LeaderboardEntry>>(
+    return AsyncBody<LeaderboardData>(
       future: _future,
       onRefresh: _refresh,
-      builder: (context, entries) {
-        if (entries.isEmpty) {
+      builder: (context, data) {
+        final entries = data.entries;
+        final dnf = data.dnf;
+        if (entries.isEmpty && dnf.isEmpty) {
           return ListView(
             physics: const AlwaysScrollableScrollPhysics(),
             children: const [
@@ -1092,11 +1094,41 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
             ],
           );
         }
-        return ListView.builder(
+        return ListView(
           physics: const AlwaysScrollableScrollPhysics(),
-          itemCount: entries.length,
-          itemBuilder: (context, i) {
-            final e = entries[i];
+          children: [
+            ...List.generate(
+                entries.length, (i) => _rankedRow(entries[i], i)),
+            if (dnf.isNotEmpty)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 20, 16, 4),
+                child: Text('Did not finish',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 14)),
+              ),
+            ...dnf.map((e) => ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: Colors.red.shade50,
+                    child: const Text('DNF',
+                        style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.red)),
+                  ),
+                  title: Text(e.name,
+                      style:
+                          const TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle:
+                      Text('Missed Round ${e['missed_round'] ?? '–'}'),
+                )),
+          ],
+        );
+      },
+    );
+  }
+
+  /// One ranked leaderboard row.
+  Widget _rankedRow(LeaderboardEntry e, int i) {
             final rank = e.rank ?? '${i + 1}';
             final rp = e.roundsPlayed;
             final nr = e.numRounds;
@@ -1179,10 +1211,6 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
                       ),
                     ],
             );
-          },
-        );
-      },
-    );
   }
 }
 

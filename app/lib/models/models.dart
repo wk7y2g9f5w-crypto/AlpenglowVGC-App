@@ -676,6 +676,15 @@ class LeaderboardEntry {
   bool get isPending => status == 'pending';
 }
 
+/// Tournament leaderboard payload: ranked entries plus the DNF section
+/// (players who missed a closed round).
+class LeaderboardData {
+  final List<LeaderboardEntry> entries;
+  final List<LeaderboardEntry> dnf;
+
+  const LeaderboardData({required this.entries, required this.dnf});
+}
+
 /// One row of the season points standings
 /// (GET /api/seasons/standings -> standings[]).
 class SeasonStandingEntry {

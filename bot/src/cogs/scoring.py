@@ -778,6 +778,22 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     # Verification: 2+ players in the tee time = partners present.
     player_count = await db.tee_time_player_count(db_path, tt["id"])
     status = "verified" if player_count >= 2 else "pending"
+    # Play-in-order: the card owner's previous round must be submitted
+    # (pending or verified). Crew submitting on someone's behalf bypass
+    # this (admin override after the fact).
+    if round_number > 1:
+        owner_for_gate = card_player_id or submitter_id
+        if not await db.has_completed_round_card(
+            db_path, t["id"], owner_for_gate, round_number - 1
+        ):
+            if not await is_crew(interaction):
+                await interaction.followup.send(
+                    f"❌ Round {round_number - 1} must be submitted before "
+                    f"playing Round {round_number} — tournament rounds are "
+                    "played in order.",
+                    ephemeral=True,
+                )
+                return
     # One scorecard per round per member: a card already submitted for this
     # round (in any tee time — own card or a team card covering the player)
     # blocks a second one.

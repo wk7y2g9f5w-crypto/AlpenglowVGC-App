@@ -1409,12 +1409,15 @@ class ApiTestCase(unittest.TestCase):
             "2026-01-02T15:30:00+00:00", 4, "123", None))
         run(db.join_tee_time(self.db_path, tt_id, "123"))
         run(db.start_tournament_tee_time(self.db_path, tt_id, "123"))
+        # Submitted (not just in-progress): round 2's order gate below
+        # needs a completed round-1 card.
         body = {"player_discord_id": "123", "scores": [4] * 18,
-                "round_number": 1}
+                "round_number": 1, "complete": True}
         # Crew bypasses the cutoff.
         self._crew(True)
         r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
-                            headers=self.h("123"), json=body)
+                            headers=self.h("123"), json={**body,
+                                                         "complete": True})
         self.assertEqual(r.status_code, 200, r.text)
         # Non-crew is locked out with a clear code.
         self._crew(False)
@@ -1467,16 +1470,16 @@ class ApiTestCase(unittest.TestCase):
                   "max_players": 4, "round_number": 1})
         self.assertEqual(r.status_code, 409, r.text)
         self.assertEqual(r.json()["code"], "round_conflict")
-        # A different round is fine.
-        make_tt("123", "R2 flight", 2)
-        # Submit 123's round-1 card in tt1.
+        # A different round is fine — once Round 1 is submitted, since
+        # tournament rounds are played in order.
         run(db.register_player(self.db_path, tid, "123"))
         self._start_tee_time(tt1, "123")
         body = {"player_discord_id": "123", "scores": [4] * 18,
-                "round_number": 1}
+                "round_number": 1, "complete": True}
         r = self.client.put(f"/api/tee-times/{tt1}/scorecard",
                             headers=self.h("123"), json=body)
         self.assertEqual(r.status_code, 200, r.text)
+        make_tt("123", "R2 flight", 2)
         # A submitted card does NOT free the round: joining the second
         # round-1 tee time still refuses.
         r = self.client.post(f"/api/tee-times/{tt2}/join",
@@ -1545,6 +1548,9 @@ class ApiTestCase(unittest.TestCase):
              "start_date": "2026-09-20", "end_date": "2026-10-10"},
         ]
         self._crew(True)
+        # Admins bypass the play-in-order gate when creating/joining later
+        # rounds (the point here is the cross-tee-time submit, not the gate).
+        self._admin(True)
         r = self.client.post("/api/tournaments", headers=self.h("123"),
                              json=self._create_body(rounds=rounds,
                                                     start_date="2026-09-20"))
@@ -1556,6 +1562,14 @@ class ApiTestCase(unittest.TestCase):
             json={"label": "R1", "date": "2026-01-02", "time": "15:30",
                   "max_players": 4, "round_number": 1})
         tt1 = r.json()["id"]
+        # 123 completes Round 1 first (rounds are played in order).
+        run(db.register_player(self.db_path, tid, "123"))
+        self._start_tee_time(tt1, "123")
+        r = self.client.put(
+            f"/api/tee-times/{tt1}/scorecard", headers=self.h("123"),
+            json={"player_discord_id": "123", "scores": [4] * 18,
+                  "round_number": 1, "complete": True})
+        self.assertEqual(r.status_code, 200, r.text)
         r = self.client.post(
             f"/api/tournaments/{tid}/tee-times", headers=self.h("456"),
             json={"label": "R2", "date": "2026-01-03", "time": "15:30",
@@ -1567,7 +1581,6 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         # Submitting the round-2 card to the round-2 tee time works even
         # though tt1 was joined first.
-        run(db.register_player(self.db_path, tid, "123"))
         self._start_tee_time(tt2, "456")
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "round_number": 2}
@@ -1624,7 +1637,10 @@ class ApiTestCase(unittest.TestCase):
         tt_id = self._past_tee_time(tid, creator="123", extra_players=["456"])
         for rn, score in ((1, 4), (2, 5)):
             body = {"player_discord_id": "123", "scores": [score] * 18,
-                    "round_number": rn}
+                    "round_number": rn,
+                    # Round 1 must be submitted (not just saved) before the
+                    # round-2 save passes the play-in-order gate.
+                    "complete": rn == 1}
             r = self.client.put(f"/api/tee-times/{tt_id}/scorecard",
                                 headers=self.h("123"), json=body)
             self.assertEqual(r.status_code, 200, r.text)
