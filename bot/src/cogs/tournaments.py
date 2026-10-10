@@ -28,9 +28,22 @@ FORMAT_LABELS = {
     "scramble": "Scramble",
 }
 
-# Discord channel for score highlight notifications (aces, albatrosses,
-# top-3 shake-ups). Missing channel => skipped silently.
-NOTIFICATIONS_CHANNEL = "tournament-notifications"
+# Discord channel(s) for score highlight notifications (aces, albatrosses,
+# top-3 shake-ups). Tried in order; the emoji-prefixed name is current.
+# Missing channel => skipped silently (logged).
+NOTIFICATIONS_CHANNEL_NAMES: tuple[str, ...] = (
+    "🔔tournament-notifications",
+    "tournament-notifications",
+)
+
+
+def _find_notifications_channel(guild):
+    """First matching #tournament-notifications channel, or None."""
+    for name in NOTIFICATIONS_CHANNEL_NAMES:
+        channel = discord.utils.get(guild.text_channels, name=name)
+        if channel is not None:
+            return channel
+    return None
 
 
 async def course_autocomplete(interaction: discord.Interaction, current: str):
@@ -237,11 +250,10 @@ async def post_score_highlight(bot: commands.Bot, payload: dict) -> bool:
         guild = bot.get_guild(int(t["guild_id"]))
         if guild is None:
             return False
-        channel = discord.utils.get(
-            guild.text_channels, name=NOTIFICATIONS_CHANNEL)
+        channel = _find_notifications_channel(guild)
         if channel is None:
-            print(f"score highlight skipped: #{NOTIFICATIONS_CHANNEL} not "
-                  f"found (guild {guild.id}, tournament {tid})")
+            print(f"score highlight skipped: no {NOTIFICATIONS_CHANNEL_NAMES} "
+                  f"channel found (guild {guild.id}, tournament {tid})")
             return False
         event = payload.get("event_type")
         course = payload.get("course") or "the course"
@@ -1001,14 +1013,12 @@ class Tournaments(commands.Cog):
             names.append(name)
             entries.append({"name": name, "to_par": r.get("to_par")})
         guild = interaction.guild
-        channel = (discord.utils.get(guild.text_channels,
-                                    name=NOTIFICATIONS_CHANNEL)
-                   if guild else None)
+        channel = _find_notifications_channel(guild) if guild else None
         if channel is None:
             await interaction.followup.send(
-                f"❌ Channel #{NOTIFICATIONS_CHANNEL} not found — create it "
-                "first, then run this again. (This is also why automatic "
-                "shake-up posts haven't been appearing.)",
+                f"❌ Channel #{NOTIFICATIONS_CHANNEL_NAMES[0]} not found — "
+                "create it first, then run this again. (This is also why "
+                "automatic shake-up posts haven't been appearing.)",
                 ephemeral=True,
             )
             return
@@ -1024,7 +1034,7 @@ class Tournaments(commands.Cog):
         else:
             await interaction.followup.send(
                 "❌ Couldn't post — check the bot's send permissions in "
-                f"#{NOTIFICATIONS_CHANNEL}.",
+                f"#{NOTIFICATIONS_CHANNEL_NAMES[0]}.",
                 ephemeral=True,
             )
 
