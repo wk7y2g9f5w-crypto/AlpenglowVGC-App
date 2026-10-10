@@ -1114,7 +1114,7 @@ class ApiTestCase(unittest.TestCase):
         r = self.client.get("/api/courses", headers=self.h("123"))
         self.assertEqual(r.status_code, 200, r.text)
         courses = r.json()
-        self.assertEqual(len(courses), 18)
+        self.assertEqual(len(courses), 19)
         pebble = next(
             c for c in courses if c["name"] == "Pebble Beach Golf Links")
         self.assertEqual(len(pebble["pars"]), 18)
