@@ -39,6 +39,14 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
 
   Future<List<Tournament>> _load() => _api.getTournaments();
 
+  /// Newest completed tournament first: end date, then start date, then id.
+  static int _newestFirst(Tournament a, Tournament b) {
+    final ka = a.endDate ?? a.startDate ?? '';
+    final kb = b.endDate ?? b.startDate ?? '';
+    if (ka != kb) return kb.compareTo(ka);
+    return (int.tryParse(b.id) ?? 0).compareTo(int.tryParse(a.id) ?? 0);
+  }
+
   Future<void> _loadCrewFlag() async {
     try {
       final me = await _api.getMe();
@@ -126,14 +134,9 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
               ],
             );
           }
-          return ListView.builder(
-            physics: const AlwaysScrollableScrollPhysics(),
-            itemCount: tournaments.length + 1,
-            itemBuilder: (context, i) {
-              if (i == 0) return const ProDifficultyDisclaimer();
-              final t = tournaments[i - 1];
-              final art = courseArtAsset(t.course);
-              return Card(
+          Widget card(Tournament t) {
+            final art = courseArtAsset(t.course);
+            return Card(
                 margin:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 clipBehavior: Clip.antiAlias,
@@ -236,7 +239,36 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
                   ),
                 ),
               );
-            },
+          }
+
+          final active =
+              tournaments.where((t) => t.status != 'completed').toList();
+          final completed =
+              tournaments.where((t) => t.status == 'completed').toList()
+                ..sort(_newestFirst);
+          final items = <Widget>[
+            const ProDifficultyDisclaimer(),
+            ...active.map(card),
+          ];
+          if (completed.isNotEmpty) {
+            items.add(
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 16, 12, 4),
+                child: ExpansionTile(
+                  leading: const Icon(Icons.emoji_events_outlined),
+                  title: Text(
+                    'Completed Tournaments (${completed.length})',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  children: completed.map(card).toList(),
+                ),
+              ),
+            );
+            items.add(const SizedBox(height: 12));
+          }
+          return ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: items,
           );
         },
       ),
