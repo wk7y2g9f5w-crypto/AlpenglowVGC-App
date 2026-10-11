@@ -1854,7 +1854,7 @@ async def _finish_tournament(t: dict, award_points: bool) -> dict:
 
 @app.post("/api/tournaments/{tournament_id}/complete")
 async def complete_tournament(tournament_id: int, user: CrewUser) -> dict:
-    """Finalize a tournament: final standings post in #event-signups +
+    """Finalize a tournament: final standings post in #✍️event-signups +
     season points. The bot's outbox drain posts the leaderboard."""
     t = await _tournament_or_404(tournament_id)
     result = await _finish_tournament(t, award_points=True)

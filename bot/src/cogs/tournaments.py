@@ -37,6 +37,15 @@ NOTIFICATIONS_CHANNEL_NAMES: tuple[str, ...] = (
 )
 
 
+# Discord channel(s) for tournament signup announcements (registration
+# boards, final standings). Tried in order; the emoji-prefixed name is
+# current. Missing channel => falls back to the invoking channel (logged).
+SIGNUP_CHANNEL_NAMES: tuple[str, ...] = (
+    "✍️event-signups",
+    "event-signups",
+)
+
+
 def _find_notifications_channel(guild):
     """First matching #tournament-notifications channel, or None."""
     for name in NOTIFICATIONS_CHANNEL_NAMES:
@@ -173,17 +182,21 @@ def announcement_view(tournament_id: int) -> discord.ui.View:
 
 
 def signup_channel(bot: commands.Bot, guild_id: str):
-    """The #event-signups channel, or None when the guild lacks one."""
+    """The #✍️event-signups channel, or None when the guild lacks one."""
     guild = bot.get_guild(int(guild_id))
     if guild is None:
         return None
-    return discord.utils.get(guild.text_channels, name="event-signups")
+    for name in SIGNUP_CHANNEL_NAMES:
+        channel = discord.utils.get(guild.text_channels, name=name)
+        if channel is not None:
+            return channel
+    return None
 
 
 async def post_signup_announcement(
     bot: commands.Bot, guild_id: str, tournament_id: int
 ) -> bool:
-    """Post a tournament's announcement in #event-signups.
+    """Post a tournament's announcement in #✍️event-signups.
 
     Used for app-created tournaments (via the outbox drain). Returns True
     when the message was posted.
@@ -295,7 +308,7 @@ async def post_score_highlight(bot: commands.Bot, payload: dict) -> bool:
 async def post_final_standings(
     bot: commands.Bot, guild_id: str, tournament_id: int
 ) -> bool:
-    """Post a tournament's final standings in #event-signups.
+    """Post a tournament's final standings in #✍️event-signups.
 
     Used for app-completed tournaments (via the outbox drain). Returns True
     when the message was posted.
@@ -336,9 +349,9 @@ class Tournaments(commands.Cog):
         """Pick up tournaments created/completed via the companion app API.
 
         The API can't touch Discord, so it enqueues events here:
-        - tournament_created -> announcement in #event-signups, persistent
+        - tournament_created -> announcement in #✍️event-signups, persistent
           Register button, Tee Sheet refresh.
-        - tournament_completed -> final standings post in #event-signups.
+        - tournament_completed -> final standings post in #✍️event-signups.
         - tournament_ended -> Tee Sheet refresh (silent close, no post).
         - scorecard_submitted -> leaderboard board re-render (app/API
           submissions AND live hole-by-hole saves; bot submissions refresh
@@ -367,7 +380,7 @@ class Tournaments(commands.Cog):
                         posted = await post_signup_announcement(
                             self.bot, t["guild_id"], tid)
                         if not posted:
-                            # No #event-signups channel (or lookup failed);
+                            # No #✍️event-signups channel (or lookup failed);
                             # the Tee Sheet board still shows the tournament.
                             await ts.maybe_refresh(self.bot, t["guild_id"])
                 elif row["kind"] == "tournament_completed":
@@ -542,13 +555,13 @@ class Tournaments(commands.Cog):
         view = announcement_view(tid)
         if channel is not None:
             await channel.send(content="@everyone", embed=embed, view=view)
-            where = "announced in #event-signups"
+            where = "announced in #✍️event-signups"
         else:
-            # No #event-signups channel - fall back to the invoking channel.
+            # No #✍️event-signups channel - fall back to the invoking channel.
             await interaction.channel.send(
                 content="@everyone", embed=embed, view=view
             )
-            where = "announced here (#event-signups not found)"
+            where = "announced here (#✍️event-signups not found)"
         await ts.maybe_refresh(self.bot, str(interaction.guild_id))
         await interaction.followup.send(
             f"\u2705 **{name.strip()}** created - {where}.", ephemeral=True
