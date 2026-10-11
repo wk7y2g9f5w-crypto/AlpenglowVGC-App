@@ -465,6 +465,19 @@ class ApiClient {
     return (body as Map<String, dynamic>?) ?? {};
   }
 
+  /// Adjust the active season's date window. Null clears that end.
+  Future<Map<String, dynamic>> updateSeasonDates(
+    int seasonId, {
+    String? startDate,
+    String? endDate,
+  }) async {
+    final body = await _patch('/api/seasons/$seasonId', {
+      'start_date': startDate,
+      'end_date': endDate,
+    });
+    return (body as Map<String, dynamic>?) ?? {};
+  }
+
   // --- Players -------------------------------------------------------------
 
   Future<PlayerMe> getMe() async {

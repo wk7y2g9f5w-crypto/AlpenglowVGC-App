@@ -2231,6 +2231,33 @@ async def complete_season(db_path, season_id) -> bool:
     return rowcount > 0
 
 
+_UNSET = object()
+
+
+async def update_season_dates(db_path, season_id, *, start_date=_UNSET,
+                              end_date=_UNSET) -> bool:
+    """Update an active season's date window. Only the provided fields are
+    changed (explicit None clears that end). False when the season is
+    missing or not active."""
+    sets, params = [], []
+    if start_date is not _UNSET:
+        sets.append("start_date = ?")
+        params.append(start_date)
+    if end_date is not _UNSET:
+        sets.append("end_date = ?")
+        params.append(end_date)
+    if not sets:
+        return True
+    params.append(season_id)
+    _, rowcount = await _execute(
+        db_path,
+        f"UPDATE seasons SET {', '.join(sets)}"
+        " WHERE id = ? AND status = 'active'",
+        tuple(params),
+    )
+    return rowcount > 0
+
+
 async def add_tournament_to_season(db_path, season_id, tournament_id) -> bool:
     """Link a tournament to a season. False when already linked."""
     _, rowcount = await _execute(

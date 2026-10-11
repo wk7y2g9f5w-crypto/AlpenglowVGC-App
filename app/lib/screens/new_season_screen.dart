@@ -123,8 +123,47 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
     }
   }
 
-  Future<void> _confirmEndSeason(SeasonStandings s) async {
+  /// Adjust the active season's date window via the edit-dates dialog.
+  Future<void> _editSeasonDates(SeasonStandings s) async {
     final seasonId = s.seasonId;
+    if (seasonId == null) return;
+    DateTime? parse(String? iso) {
+      if (iso == null || iso.isEmpty) return null;
+      return DateTime.tryParse(iso);
+    }
+
+    final result = await showDialog<_SeasonDateEdit>(
+      context: context,
+      builder: (dialogContext) => _EditSeasonDatesDialog(
+        initialStart: parse(s.seasonStartDate),
+        initialEnd: parse(s.seasonEndDate),
+      ),
+    );
+    if (result == null) return;
+    if (result.start != null &&
+        result.end != null &&
+        result.start!.isAfter(result.end!)) {
+      if (mounted) {
+        showSnack(context, 'Start date must not be after the end date.',
+            error: true);
+      }
+      return;
+    }
+    try {
+      await _api.updateSeasonDates(
+        seasonId,
+        startDate: result.start != null ? _iso(result.start!) : null,
+        endDate: result.end != null ? _iso(result.end!) : null,
+      );
+      if (!mounted) return;
+      showSnack(context, 'Season dates updated.');
+      await _refresh();
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+    }
+  }
+
+  Future<void> _confirmEndSeason(SeasonStandings s) async {    final seasonId = s.seasonId;
     if (seasonId == null) return;
     final seasonName = s.seasonName;
     final confirmController = TextEditingController();
@@ -167,9 +206,18 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
                     title: Text(s.seasonName,
                         style: const TextStyle(fontWeight: FontWeight.bold)),
                     subtitle: Text(_activeRangeLabel(s)),
-                    trailing: TextButton(
-                      onPressed: () => _confirmEndSeason(s),
-                      child: const Text('End season'),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextButton(
+                          onPressed: () => _editSeasonDates(s),
+                          child: const Text('Edit dates'),
+                        ),
+                        TextButton(
+                          onPressed: () => _confirmEndSeason(s),
+                          child: const Text('End season'),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -331,6 +379,116 @@ class _EndSeasonDialogState extends State<_EndSeasonDialog> {
           style: FilledButton.styleFrom(
               backgroundColor: Colors.red.shade700),
           child: const Text('End'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Result of the edit-dates dialog: the chosen window (null clears that end).
+class _SeasonDateEdit {
+  final DateTime? start;
+  final DateTime? end;
+
+  const _SeasonDateEdit(this.start, this.end);
+}
+
+/// Dialog for adjusting the active season's date window. Either date can
+/// be cleared back to "not set".
+class _EditSeasonDatesDialog extends StatefulWidget {
+  final DateTime? initialStart;
+  final DateTime? initialEnd;
+
+  const _EditSeasonDatesDialog({this.initialStart, this.initialEnd});
+
+  @override
+  State<_EditSeasonDatesDialog> createState() => _EditSeasonDatesDialogState();
+}
+
+class _EditSeasonDatesDialogState extends State<_EditSeasonDatesDialog> {
+  DateTime? _start;
+  DateTime? _end;
+
+  @override
+  void initState() {
+    super.initState();
+    _start = widget.initialStart;
+    _end = widget.initialEnd;
+  }
+
+  String _label(DateTime? d) {
+    if (d == null) return 'Not set';
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    return '${months[d.month - 1]} ${d.day}, ${d.year}';
+  }
+
+  Future<void> _pick(bool isStart) async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: (isStart ? _start : _end) ?? now,
+      firstDate: DateTime(now.year - 1),
+      lastDate: DateTime(now.year + 2),
+    );
+    if (picked != null) {
+      setState(() {
+        if (isStart) {
+          _start = picked;
+        } else {
+          _end = picked;
+        }
+      });
+    }
+  }
+
+  Widget _dateRow(String label, DateTime? value, bool isStart) {
+    return Row(
+      children: [
+        Expanded(child: Text(label)),
+        TextButton.icon(
+          icon: const Icon(Icons.calendar_today, size: 18),
+          label: Text(_label(value)),
+          onPressed: () => _pick(isStart),
+        ),
+        if (value != null)
+          IconButton(
+            tooltip: 'Clear',
+            icon: const Icon(Icons.clear, size: 18),
+            onPressed: () => setState(() {
+              if (isStart) {
+                _start = null;
+              } else {
+                _end = null;
+              }
+            }),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit season dates'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _dateRow('Start', _start, true),
+          _dateRow('End', _end, false),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context)
+              .pop(_SeasonDateEdit(_start, _end)),
+          child: const Text('Save'),
         ),
       ],
     );

@@ -4407,6 +4407,37 @@ class SeasonCreate(BaseModel):
         return self
 
 
+class SeasonDateUpdate(BaseModel):
+    """Adjust an active season's date window (admin-only). Either date may
+    be cleared by passing null."""
+
+    start_date: str | None = None  # YYYY-MM-DD
+    end_date: str | None = None  # YYYY-MM-DD
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _iso_date(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = (v or "").strip()
+        if not v:
+            return None
+        try:
+            _dt.date.fromisoformat(v)
+        except ValueError:
+            raise ValueError("must be a valid YYYY-MM-DD date")
+        return v
+
+    @model_validator(mode="after")
+    def _date_order(self) -> "SeasonDateUpdate":
+        if self.start_date and self.end_date:
+            if _dt.date.fromisoformat(self.start_date) > _dt.date.fromisoformat(
+                self.end_date
+            ):
+                raise ValueError("start_date must not be after end_date")
+        return self
+
+
 @app.get("/api/seasons/standings")
 async def season_standings(user: CurrentUser) -> dict:
     season = await db.get_active_season(DB_PATH, GUILD_ID)
@@ -4477,6 +4508,58 @@ async def complete_season(season_id: int, user: AdminUser) -> dict:
             detail={"code": "season_not_active"},
         )
     await db.complete_season(DB_PATH, season_id)
+    season = await db.get_season(DB_PATH, season_id)
+    return {
+        "id": season["id"],
+        "name": season["name"],
+        "status": season["status"],
+        "start_date": season.get("start_date"),
+        "end_date": season.get("end_date"),
+    }
+
+
+@app.patch("/api/seasons/{season_id}")
+async def update_season_dates(
+    season_id: int, body: SeasonDateUpdate, user: AdminUser
+) -> dict:
+    """Adjust the active season's date window. Only provided fields change
+    (explicit null clears that end). Completed seasons are historical
+    record and can't be edited."""
+    season = await db.get_season(DB_PATH, season_id)
+    if not season or str(season["guild_id"]) != str(GUILD_ID):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "season_not_found"},
+        )
+    if season["status"] != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "season_not_active",
+                "message": "Only the active season's dates can be adjusted.",
+            },
+        )
+    # Validate the merged window (a single provided date is checked
+    # against the stored other end).
+    fields = body.model_fields_set
+    new_start = (body.start_date if "start_date" in fields
+                 else season.get("start_date"))
+    new_end = (body.end_date if "end_date" in fields
+               else season.get("end_date"))
+    if new_start and new_end and new_start > new_end:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "invalid_dates",
+                "message": "start_date must not be after end_date",
+            },
+        )
+    kwargs: dict = {}
+    if "start_date" in fields:
+        kwargs["start_date"] = body.start_date
+    if "end_date" in fields:
+        kwargs["end_date"] = body.end_date
+    await db.update_season_dates(DB_PATH, season_id, **kwargs)
     season = await db.get_season(DB_PATH, season_id)
     return {
         "id": season["id"],
