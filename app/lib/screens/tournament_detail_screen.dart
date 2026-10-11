@@ -126,17 +126,21 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
   @override
   Widget build(BuildContext context) {
     final t = _tournament;
+    final isTeamFormat = const {'best_ball', 'alt_shot', 'scramble'}
+        .contains(t.format);
+    final tabs = <Widget>[
+      const Tab(text: 'Tee Times'),
+      const Tab(text: 'Leaderboard'),
+      const Tab(text: 'Players'),
+      if (isTeamFormat) const Tab(text: 'Teams'),
+    ];
     return DefaultTabController(
-      length: 3,
+      length: tabs.length,
       child: Scaffold(
         appBar: AppBar(
           title: Text(t.name),
           actions: [if (_isCrew) _crewMenu(t)],
-          bottom: const TabBar(tabs: [
-            Tab(text: 'Tee Times'),
-            Tab(text: 'Leaderboard'),
-            Tab(text: 'Players'),
-          ]),
+          bottom: TabBar(tabs: tabs),
         ),
         body: Column(
           children: [
@@ -159,6 +163,12 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
                     settings: widget.settings,
                     tournament: t,
                   ),
+                  if (isTeamFormat)
+                    _TeamsTab(
+                      auth: widget.auth,
+                      settings: widget.settings,
+                      tournament: t,
+                    ),
                 ],
               ),
             ),
@@ -752,6 +762,7 @@ class _TeeTimesTab extends StatefulWidget {
 
 class _TeeTimesTabState extends State<_TeeTimesTab> {
   late Future<_TeeTimesData> _future;
+  _TeeTimesData? _lastData;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -765,7 +776,9 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
   Future<_TeeTimesData> _load() async {
     final me = await _api.getMe();
     final times = await _api.getTeeTimes(widget.tournament.id);
-    return _TeeTimesData(me: me, teeTimes: times);
+    final data = _TeeTimesData(me: me, teeTimes: times);
+    _lastData = data;
+    return data;
   }
 
   Future<void> _refresh() async {
@@ -774,13 +787,16 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
     await f;
   }
 
-  Future<void> _showCreateForm() async {
+  Future<void> _showCreateForm(_TeeTimesData data) async {
     final labelCtrl = TextEditingController();
     DateTime date = DateTime.now().add(const Duration(days: 1));
     TimeOfDay time = const TimeOfDay(hour: 18, minute: 0);
     int maxPlayers = 4;
     int roundNumber = 1;
     final rounds = widget.tournament.rounds;
+    final isTeamFormat = const {'best_ball', 'alt_shot', 'scramble'}
+        .contains(widget.tournament.format);
+    int? pickedTeamId;
 
     final created = await showDialog<bool>(
       context: context,
@@ -818,6 +834,52 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                     },
                   ),
                 if (rounds.length > 1) const SizedBox(height: 12),
+                if (isTeamFormat)
+                  FutureBuilder<List<Map<String, dynamic>>>(
+                    future:
+                        _api.getTeams(widget.tournament.id),
+                    builder: (ctx2, snap) {
+                      if (snap.connectionState ==
+                          ConnectionState.waiting) {
+                        return const Center(
+                            child: CircularProgressIndicator());
+                      }
+                      final mine = (snap.data ?? [])
+                          .where((tm) =>
+                              ((tm['members'] as List?) ?? [])
+                                  .whereType<Map<String, dynamic>>()
+                                  .any((m) =>
+                                      m['discord_id']?.toString() ==
+                                      data.me.discordId))
+                          .toList();
+                      if (mine.isEmpty) {
+                        return const Text(
+                          'Form a team first (Teams tab) — then book a tee time for it.',
+                          style: TextStyle(color: Colors.grey),
+                        );
+                      }
+                      return DropdownButtonFormField<int>(
+                        initialValue: pickedTeamId,
+                        decoration: const InputDecoration(
+                          labelText: 'Your team',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        items: mine
+                            .map((tm) => DropdownMenuItem<int>(
+                                  value: (tm['id'] as num).toInt(),
+                                  child: Text(
+                                      tm['name']?.toString() ?? 'Team',
+                                      overflow:
+                                          TextOverflow.ellipsis),
+                                ))
+                            .toList(),
+                        onChanged: (v) =>
+                            setDlg(() => pickedTeamId = v),
+                      );
+                    },
+                  ),
+                if (isTeamFormat) const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
@@ -851,31 +913,39 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                   ],
                 ),
                 const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text('Max players'),
-                    Row(
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.remove),
-                          onPressed: maxPlayers > 1
-                              ? () => setDlg(() => maxPlayers--)
-                              : null,
-                        ),
-                        Text('$maxPlayers',
-                            style:
-                                const TextStyle(fontWeight: FontWeight.bold)),
-                        IconButton(
-                          icon: const Icon(Icons.add),
-                          onPressed: maxPlayers < 4
-                              ? () => setDlg(() => maxPlayers++)
-                              : null,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                if (!isTeamFormat)
+                  Row(
+                    mainAxisAlignment:
+                        MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Max players'),
+                      Row(
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.remove),
+                            onPressed: maxPlayers > 1
+                                ? () => setDlg(() => maxPlayers--)
+                                : null,
+                          ),
+                          Text('$maxPlayers',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold)),
+                          IconButton(
+                            icon: const Icon(Icons.add),
+                            onPressed: maxPlayers < 4
+                                ? () => setDlg(() => maxPlayers++)
+                                : null,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                if (isTeamFormat)
+                  const Text(
+                    'One rep per team · up to 2 teams per tee time.',
+                    style: TextStyle(
+                        color: Colors.grey, fontSize: 12),
+                  ),
               ],
             ),
           ),
@@ -885,6 +955,11 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                 child: const Text('Cancel')),
             ElevatedButton(
               onPressed: () async {
+                if (isTeamFormat && pickedTeamId == null) {
+                  showSnack(ctx, 'Pick which team you\'re repping.',
+                      error: true);
+                  return;
+                }
                 try {
                   final dateStr =
                       '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
@@ -899,6 +974,7 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                     time: timeStr,
                     maxPlayers: maxPlayers,
                     roundNumber: roundNumber,
+                    teamId: pickedTeamId,
                   );
                   if (ctx.mounted) Navigator.of(ctx).pop(true);
                 } on ApiException catch (e) {
@@ -973,7 +1049,10 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
         },
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showCreateForm,
+        onPressed: () {
+          final d = _lastData;
+          if (d != null) _showCreateForm(d);
+        },
         icon: const Icon(Icons.add),
         label: const Text('New tee time'),
       ),
@@ -1152,6 +1231,10 @@ class _LeaderboardTabState extends State<_LeaderboardTab> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (e.teamMembers.isNotEmpty)
+                    Text(e.teamMembers.join('  &  '),
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.green)),
                   if (progress != null) Text(progress),
                   if (e.onCourse)
                     Text('⛳ thru ${e.thru ?? '–'}',
@@ -1346,6 +1429,355 @@ class _PlayersTabState extends State<_PlayersTab> {
               backgroundColor: Color(0xFFF0F0F0),
               visualDensity: VisualDensity.compact,
             ),
+    );
+  }
+}
+
+/// Teams tab for team-format tournaments (alt-shot / best ball / scramble).
+/// Teams are tournament-level and persist across rounds. Forming a team:
+/// pick a registered partner from the dropdown, or type a name for a
+/// partner who isn't in the app.
+class _TeamsTab extends StatefulWidget {
+  final AuthService auth;
+  final SettingsService settings;
+  final Tournament tournament;
+
+  const _TeamsTab({
+    required this.auth,
+    required this.settings,
+    required this.tournament,
+  });
+
+  @override
+  State<_TeamsTab> createState() => _TeamsTabState();
+}
+
+class _TeamsTabState extends State<_TeamsTab> {
+  Future<List<Map<String, dynamic>>>? _future;
+  String? _myDiscordId;
+  bool _isAdmin = false;
+
+  ApiClient get _api => ApiClient(
+      baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _api.getTeams(widget.tournament.id);
+    _loadMe();
+  }
+
+  Future<void> _loadMe() async {
+    try {
+      final me = await _api.getMe();
+      if (mounted) {
+        setState(() {
+          _myDiscordId = me.discordId;
+          _isAdmin = me.isAdmin;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _refresh() async {
+    final f = _api.getTeams(widget.tournament.id);
+    setState(() => _future = f);
+    await f;
+  }
+
+  String _memberLabel(Map<String, dynamic> m) {
+    final handle = (m['golfplus_handle']?.toString() ?? '').trim();
+    if (handle.isNotEmpty) return handle;
+    return (m['display_name']?.toString() ?? '?').trim();
+  }
+
+  Future<void> _formTeam() async {
+    final result = await showDialog<_TeamPartner>(
+      context: context,
+      builder: (ctx) => _FormTeamDialog(
+        api: _api,
+        tournamentId: widget.tournament.id,
+        myDiscordId: _myDiscordId ?? '',
+      ),
+    );
+    if (result == null) return;
+    try {
+      await _api.createTeam(
+        widget.tournament.id,
+        partnerDiscordId: result.discordId,
+        partnerName: result.typedName,
+      );
+      if (!mounted) return;
+      showSnack(context, 'Team formed — good luck!');
+      await _refresh();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      showSnack(context, friendlyApiMessage(e), error: true);
+    }
+  }
+
+  Future<void> _deleteTeam(Map<String, dynamic> team) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Disband team?'),
+        content: Text(
+            'Remove team "${team['name']}"? This only works before the team has submitted any scorecards.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(
+                backgroundColor: Colors.red.shade700),
+            child: const Text('Disband'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _api.deleteTeam(
+          widget.tournament.id, (team['id'] as num).toInt());
+      if (!mounted) return;
+      showSnack(context, 'Team disbanded.');
+      await _refresh();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      showSnack(context, friendlyApiMessage(e), error: true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _formTeam,
+        icon: const Icon(Icons.group_add),
+        label: const Text('Form a team'),
+      ),
+      body: FutureBuilder<List<Map<String, dynamic>>>(
+        future: _future,
+        builder: (context, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError) {
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Could not load teams.'),
+                  const SizedBox(height: 8),
+                  TextButton(
+                      onPressed: _refresh, child: const Text('Retry')),
+                ],
+              ),
+            );
+          }
+          final teams = snap.data ?? [];
+          if (teams.isEmpty) {
+            return const Center(
+              child: Padding(
+                padding: EdgeInsets.all(32),
+                child: Text(
+                  'No teams yet. Tap "Form a team" and pick your partner.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey),
+                ),
+              ),
+            );
+          }
+          return RefreshIndicator(
+            onRefresh: _refresh,
+            child: ListView.builder(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 80),
+              itemCount: teams.length,
+              itemBuilder: (context, i) {
+                final team = teams[i];
+                final members =
+                    (team['members'] as List?)?.whereType<Map<String, dynamic>>().toList() ??
+                        [];
+                final partnerName =
+                    (team['partner_name']?.toString() ?? '').trim();
+                final labels = members.map(_memberLabel).toList();
+                if (partnerName.isNotEmpty) labels.add(partnerName);
+                final canDelete = _isAdmin ||
+                    team['created_by']?.toString() == _myDiscordId;
+                return Card(
+                  margin: const EdgeInsets.symmetric(vertical: 6),
+                  child: ListTile(
+                    leading: const Icon(Icons.groups,
+                        color: Colors.green),
+                    title: Text(team['name']?.toString() ?? 'Team',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold)),
+                    subtitle: Text(labels.join('  &  ')),
+                    trailing: canDelete
+                        ? IconButton(
+                            tooltip: 'Disband team',
+                            icon: const Icon(Icons.delete_outline,
+                                color: Colors.red),
+                            onPressed: () => _deleteTeam(team),
+                          )
+                        : null,
+                  ),
+                );
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Partner choice from the form-team dialog: either a registered player
+/// (discordId) or a typed name.
+class _TeamPartner {
+  final String? discordId;
+  final String? typedName;
+
+  const _TeamPartner({this.discordId, this.typedName});
+}
+
+/// Dialog to form a team: pick a registered partner from the dropdown, or
+/// type a partner name for someone not in the app.
+class _FormTeamDialog extends StatefulWidget {
+  final ApiClient api;
+  final String tournamentId;
+  final String myDiscordId;
+
+  const _FormTeamDialog({
+    required this.api,
+    required this.tournamentId,
+    required this.myDiscordId,
+  });
+
+  @override
+  State<_FormTeamDialog> createState() => _FormTeamDialogState();
+}
+
+class _FormTeamDialogState extends State<_FormTeamDialog> {
+  bool _typed = false;
+  String? _pickedId;
+  final _nameCtrl = TextEditingController();
+  Future<List<TournamentPlayer>>? _playersFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _playersFuture = widget.api.getTournamentPlayers(widget.tournamentId);
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Form a team'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(
+                    value: false,
+                    label: Text('Pick a player'),
+                    icon: Icon(Icons.person_search)),
+                ButtonSegment(
+                    value: true,
+                    label: Text('Type a name'),
+                    icon: Icon(Icons.edit)),
+              ],
+              selected: {_typed},
+              onSelectionChanged: (s) =>
+                  setState(() => _typed = s.first),
+            ),
+            const SizedBox(height: 12),
+            if (_typed)
+              TextField(
+                controller: _nameCtrl,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(
+                  labelText: "Partner's name",
+                  hintText: 'As it should appear on the leaderboard',
+                  border: OutlineInputBorder(),
+                ),
+              )
+            else
+              FutureBuilder<List<TournamentPlayer>>(
+                future: _playersFuture,
+                builder: (context, snap) {
+                  if (snap.connectionState ==
+                      ConnectionState.waiting) {
+                    return const Center(
+                        child: CircularProgressIndicator());
+                  }
+                  final options = (snap.data ?? [])
+                      .where((p) =>
+                          p.registered &&
+                          p.discordId != widget.myDiscordId)
+                      .toList();
+                  if (options.isEmpty) {
+                    return const Text(
+                        'No other registered players yet.',
+                        style: TextStyle(color: Colors.grey));
+                  }
+                  return DropdownButtonFormField<String>(
+                    initialValue: _pickedId,
+                    decoration: const InputDecoration(
+                      labelText: 'Partner',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: options
+                        .map((p) => DropdownMenuItem(
+                              value: p.discordId,
+                              child: Text(
+                                p.golfplusHandle.isNotEmpty
+                                    ? p.golfplusHandle
+                                    : p.displayName,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ))
+                        .toList(),
+                    onChanged: (v) =>
+                        setState(() => _pickedId = v),
+                  );
+                },
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            if (_typed) {
+              final name = _nameCtrl.text.trim();
+              if (name.isEmpty) return;
+              Navigator.of(context)
+                  .pop(_TeamPartner(typedName: name));
+            } else {
+              if (_pickedId == null) return;
+              Navigator.of(context)
+                  .pop(_TeamPartner(discordId: _pickedId));
+            }
+          },
+          child: const Text('Form team'),
+        ),
+      ],
     );
   }
 }

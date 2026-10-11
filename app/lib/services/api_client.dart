@@ -235,18 +235,57 @@ class ApiClient {
       required String date,
       required String time,
       required int maxPlayers,
-      int roundNumber = 1}) async {
-    final body = await _post('/api/tournaments/$tournamentId/tee-times', {
+      int roundNumber = 1,
+      int? teamId}) async {
+    final payload = <String, dynamic>{
       'label': label,
       'date': date,
       'time': time,
       'max_players': maxPlayers,
       'round_number': roundNumber,
-    });
+    };
+    if (teamId != null) payload['team_id'] = teamId;
+    final body =
+        await _post('/api/tournaments/$tournamentId/tee-times', payload);
     final m = (body is Map && body['tee_time'] is Map)
         ? body['tee_time'] as Map<String, dynamic>
         : (body as Map<String, dynamic>);
     return TeeTime.fromJson(m);
+  }
+
+  /// Join a tournament tee time. For alt-shot, pass the team being repped.
+  Future<Map<String, dynamic>> joinTeeTime(String teeTimeId,
+      {int? teamId}) async {
+    final payload = <String, dynamic>{};
+    if (teamId != null) payload['team_id'] = teamId;
+    final body = await _post('/api/tee-times/$teeTimeId/join', payload);
+    return (body as Map<String, dynamic>?) ?? {};
+  }
+
+  // --- Tournament teams (alt-shot / best ball / scramble) -------------------
+
+  Future<List<Map<String, dynamic>>> getTeams(String tournamentId) async {
+    final body = await _get('/api/tournaments/$tournamentId/teams');
+    final list = (body as Map<String, dynamic>)['teams'] as List?;
+    return (list ?? []).whereType<Map<String, dynamic>>().toList();
+  }
+
+  /// Form a 2-player team. Exactly one of partnerDiscordId (registered
+  /// player) or partnerName (typed name) is required.
+  Future<Map<String, dynamic>> createTeam(String tournamentId,
+      {String? partnerDiscordId, String? partnerName}) async {
+    final payload = <String, dynamic>{};
+    if (partnerDiscordId != null) {
+      payload['partner_discord_id'] = partnerDiscordId;
+    }
+    if (partnerName != null) payload['partner_name'] = partnerName;
+    final body =
+        await _post('/api/tournaments/$tournamentId/teams', payload);
+    return (body as Map<String, dynamic>?) ?? {};
+  }
+
+  Future<void> deleteTeam(String tournamentId, int teamId) async {
+    await _delete('/api/tournaments/$tournamentId/teams/$teamId');
   }
 
   /// Edit a tee time (creator or crew). Only include keys that changed:
@@ -264,9 +303,6 @@ class ApiClient {
   /// Delete a tee time (creator or crew). Refused when scores exist.
   Future<void> deleteTeeTime(String teeTimeId) async {
     await _delete('/api/tee-times/$teeTimeId');
-  }
-
-  Future<void> joinTeeTime(String teeTimeId) async {    await _post('/api/tee-times/$teeTimeId/join');
   }
 
   Future<Map<String, dynamic>> startTeeTime(String teeTimeId) async {
@@ -301,8 +337,10 @@ class ApiClient {
     await _post('/api/tee-times/$teeTimeId/leave');
   }
 
-  Future<void> requestTeeTime(String teeTimeId) async {
-    await _post('/api/tee-times/$teeTimeId/request');
+  Future<void> requestTeeTime(String teeTimeId, {int? teamId}) async {
+    final payload = <String, dynamic>{};
+    if (teamId != null) payload['team_id'] = teamId;
+    await _post('/api/tee-times/$teeTimeId/request', payload);
   }
 
   Future<List<TeeTimeRequest>> getTeeTimeRequests(String teeTimeId) async {
@@ -322,12 +360,13 @@ class ApiClient {
   }
 
   Future<Scorecard?> getScorecard(String teeTimeId,
-      {int? roundNumber, String? playerDiscordId}) async {
+      {int? roundNumber, String? playerDiscordId, int? teamId}) async {
     final params = <String>[];
     if (roundNumber != null) params.add('round_number=$roundNumber');
     if (playerDiscordId != null) {
       params.add('player_discord_id=$playerDiscordId');
     }
+    if (teamId != null) params.add('team_id=$teamId');
     final path = params.isEmpty
         ? '/api/tee-times/$teeTimeId/scorecard'
         : '/api/tee-times/$teeTimeId/scorecard?${params.join('&')}';
@@ -339,16 +378,25 @@ class ApiClient {
   }
 
   Future<Scorecard> submitScorecard(
-      String teeTimeId, String playerDiscordId, List<int?> scores,
-      {int roundNumber = 1, String? witnessName, bool complete = false}) async {
-    final body = await _put('/api/tee-times/$teeTimeId/scorecard', {
-      'player_discord_id': playerDiscordId,
+      String teeTimeId, String? playerDiscordId, List<int?> scores,
+      {int roundNumber = 1,
+      String? witnessName,
+      bool complete = false,
+      int? teamId}) async {
+    final payload = <String, dynamic>{
       'scores': scores,
       'round_number': roundNumber,
       'complete': complete,
-      if (witnessName != null && witnessName.trim().isNotEmpty)
-        'witness_name': witnessName.trim(),
-    });
+    };
+    if (playerDiscordId != null) {
+      payload['player_discord_id'] = playerDiscordId;
+    }
+    if (teamId != null) payload['team_id'] = teamId;
+    if (witnessName != null && witnessName.trim().isNotEmpty) {
+      payload['witness_name'] = witnessName.trim();
+    }
+    final body =
+        await _put('/api/tee-times/$teeTimeId/scorecard', payload);
     return Scorecard.fromJson(
         (body as Map<String, dynamic>)['card'] as Map<String, dynamic>);
   }

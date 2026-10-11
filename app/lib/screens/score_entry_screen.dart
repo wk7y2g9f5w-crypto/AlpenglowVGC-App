@@ -24,6 +24,10 @@ class ScoreEntryScreen extends StatefulWidget {
   final Tournament tournament;
   final TeeTime teeTime;
   final String myDiscordId;
+  // Team mode (alt-shot / scramble): enter the shared team card instead of
+  // a player card.
+  final int? teamId;
+  final String? teamName;
 
   const ScoreEntryScreen({
     super.key,
@@ -32,6 +36,8 @@ class ScoreEntryScreen extends StatefulWidget {
     required this.tournament,
     required this.teeTime,
     required this.myDiscordId,
+    this.teamId,
+    this.teamName,
   });
 
   @override
@@ -49,6 +55,18 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   String? _witnessName;
   bool _isCrew = false;
   bool _isAdmin = false;
+
+  bool get _isTeamMode => widget.teamId != null;
+
+  /// Card identity for API calls: (playerDiscordId, teamId).
+  /// Shared team cards file under the team only; best ball files
+  /// player + team (player picker still applies there).
+  String? get _cardPlayerId =>
+      _isTeamMode && _isSharedCard ? null : _player?.discordId;
+  int? get _cardTeamId => widget.teamId;
+
+  bool get _isSharedCard =>
+      const {'alt_shot', 'scramble'}.contains(widget.tournament.format);
 
   /// Scorecard id from the server (now included in card responses) — the
   /// key for the shots endpoints. Null until the card exists server-side.
@@ -138,14 +156,19 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     return idx >= 0 ? idx : 0;
   }
 
-  /// Load the saved card (if any) for [playerDiscordId] (null = me) + round.
-  /// The displayed card always belongs to the selected player. Only the
+  /// Load the saved card (if any) for the selected scope + round.
+  /// Team mode loads the shared team card; otherwise the selected player's.
+  /// The displayed card always belongs to the current selection. Only the
   /// latest load applies, so a slow response can't clobber a newer one.
   Future<void> _loadCard(String? playerDiscordId, int roundNumber) async {
     final seq = ++_loadSeq;
     try {
       final card = await _api.getScorecard(widget.teeTime.id,
-          roundNumber: roundNumber, playerDiscordId: playerDiscordId);
+          roundNumber: roundNumber,
+          playerDiscordId: _isTeamMode && _isSharedCard
+              ? null
+              : playerDiscordId,
+          teamId: widget.teamId);
       if (!mounted || seq != _loadSeq) return;
       if (card != null && card.scores.length == _holeCount) {
         setState(() {
@@ -155,9 +178,11 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           _witnessCtrl.text = card.witnessName ?? '';
           _cardId = card.id;
           _hole = _firstUnscoredHole(_scores);
-          final match = widget.teeTime.players
-              .where((p) => p.discordId == card.playerDiscordId);
-          if (match.isNotEmpty) _player = match.first;
+          if (!_isTeamMode) {
+            final match = widget.teeTime.players
+                .where((p) => p.discordId == card.playerDiscordId);
+            if (match.isNotEmpty) _player = match.first;
+          }
         });
       } else {
         setState(() {
@@ -310,7 +335,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
 
   Future<void> _liveSave() async {
     final player = _player;
-    if (player == null || _locked || _submitting) return;
+    if ((player == null && !_isTeamMode) || _locked || _submitting) return;
     if (!_scores.any((s) => s != null)) return;
     setState(() {
       _saving = true;
@@ -319,9 +344,10 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     try {
       final card = await _api.submitScorecard(
         widget.teeTime.id,
-        player.discordId,
+        _cardPlayerId,
         List<int?>.from(_scores),
         roundNumber: _roundNumber,
+        teamId: _cardTeamId,
       );
       if (!mounted) return;
       setState(() {
@@ -455,11 +481,12 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     try {
       final card = await _api.submitScorecard(
         widget.teeTime.id,
-        _player!.discordId,
+        _cardPlayerId,
         _scores.map((s) => s!).toList(),
         roundNumber: _roundNumber,
         witnessName: _witnessCtrl.text,
         complete: true,
+        teamId: _cardTeamId,
       );
       if (mounted) {
         setState(() {
@@ -484,13 +511,16 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   /// entered score. Returns the card id, or null on failure.
   Future<int?> _ensureCard() async {
     final player = _player;
-    if (player == null || _locked || _submitting) return null;
+    if ((player == null && !_isTeamMode) || _locked || _submitting) {
+      return null;
+    }
     try {
       final card = await _api.submitScorecard(
         widget.teeTime.id,
-        player.discordId,
+        _cardPlayerId,
         List<int?>.from(_scores),
         roundNumber: _roundNumber,
+        teamId: _cardTeamId,
       );
       if (!mounted) return null;
       setState(() {
@@ -697,30 +727,53 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           ),
         // Header: player chips (every player in the tee time, always
         // visible) + running total / to-par. Tapping a chip switches to
-        // that player's scorecard instantly.
+        // that player's scorecard instantly. Team mode (shared card) shows
+        // the team name instead — one shared card.
         Container(
           padding: const EdgeInsets.all(12),
           color: Theme.of(context).colorScheme.surfaceContainerHighest,
           child: Row(
             children: [
               Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: widget.teeTime.players.map((p) {
-                      final selected = p.discordId == _player?.discordId;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(golferDisplayName(
-                              p.displayName, p.golfplusHandle)),
-                          selected: selected,
-                          onSelected: (_) => _pickPlayer(p),
+                child: _isTeamMode && _isSharedCard
+                    ? Row(
+                        children: [
+                          const Icon(Icons.groups,
+                              color: Colors.green),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              widget.teamName ?? 'Team card',
+                              style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      )
+                    : SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children:
+                              widget.teeTime.players.map((p) {
+                            final selected =
+                                p.discordId == _player?.discordId;
+                            return Padding(
+                              padding:
+                                  const EdgeInsets.only(right: 8),
+                              child: ChoiceChip(
+                                label: Text(golferDisplayName(
+                                    p.displayName,
+                                    p.golfplusHandle)),
+                                selected: selected,
+                                onSelected: (_) =>
+                                    _pickPlayer(p),
+                              ),
+                            );
+                          }).toList(),
                         ),
-                      );
-                    }).toList(),
-                  ),
-                ),
+                      ),
               ),
               const SizedBox(width: 12),
               Column(

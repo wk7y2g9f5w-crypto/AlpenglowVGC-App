@@ -97,6 +97,138 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
     }
   }
 
+  bool get _isTeamFormat => const {'best_ball', 'alt_shot', 'scramble'}
+      .contains(widget.tournament.format);
+
+  /// Join (or request to join) a tee time. Team formats ask which team the
+  /// player is repping first.
+  Future<void> _joinOrRequest(TeeTime tt, {required bool request}) async {
+    int? teamId;
+    if (_isTeamFormat) {
+      teamId = await _pickTeam();
+      if (teamId == null) return;
+    }
+    if (request) {
+      await _act(() => _api.requestTeeTime(tt.id, teamId: teamId),
+          'Request sent. The creator will approve it.');
+    } else {
+      await _act(() => _api.joinTeeTime(tt.id, teamId: teamId), 'Joined.');
+    }
+  }
+
+  /// Team picker dialog: the user's teams for this tournament.
+  Future<int?> _pickTeam() async {    List<Map<String, dynamic>> teams;
+    try {
+      teams = await _api.getTeams(widget.tournament.id);
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+      return null;
+    }
+    final mine = teams
+        .where((tm) => ((tm['members'] as List?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .any((m) => m['discord_id']?.toString() == widget.myDiscordId))
+        .toList();
+    if (!mounted) return null;
+    if (mine.isEmpty) {
+      showSnack(context, 'Form a team first (Teams tab on the tournament).',
+          error: true);
+      return null;
+    }
+    if (mine.length == 1) return (mine.first['id'] as num).toInt();
+    return showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Which team are you repping?'),
+        children: mine
+            .map((tm) => SimpleDialogOption(
+                  onPressed: () =>
+                      Navigator.of(ctx).pop((tm['id'] as num).toInt()),
+                  child: Text(tm['name']?.toString() ?? 'Team'),
+                ))
+            .toList(),
+      ),
+    );
+  }
+
+  /// Launch score entry. Team formats open the shared team card for the
+  /// team the viewer is repping on this sheet.
+  void _enterScores(TeeTime tt) {
+    int? teamId;
+    String? teamName;
+    if (_isTeamFormat) {
+      final me = tt.players.where(
+          (p) => p.discordId == widget.myDiscordId);
+      if (me.isNotEmpty) {
+        teamId = me.first.teamId;
+        teamName = me.first.teamName;
+      }
+      if (teamId == null) {
+        showSnack(context, 'No team found for you on this tee time.',
+            error: true);
+        return;
+      }
+    }
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ScoreEntryScreen(
+        auth: widget.auth,
+        settings: widget.settings,
+        tournament: widget.tournament,
+        teeTime: tt,
+        myDiscordId: widget.myDiscordId,
+        teamId: teamId,
+        teamName: teamName,
+      ),
+    ));
+  }
+
+  /// Admin editing scores: pick which team's shared card (team formats) or
+  /// open the player picker (other formats).
+  Future<void> _adminEditScores(TeeTime tt) async {
+    int? teamId;
+    String? teamName;
+    if (_isTeamFormat) {
+      final teams = tt.players
+          .where((p) => p.teamId != null)
+          .map((p) => MapEntry(p.teamId!, p.teamName ?? 'Team'))
+          .toList();
+      if (teams.isEmpty) {
+        showSnack(context, 'No teams on this tee time yet.', error: true);
+        return;
+      }
+      final picked = teams.length == 1
+          ? teams.first
+          : await showDialog<MapEntry<int, String>>(
+              context: context,
+              builder: (ctx) => SimpleDialog(
+                title: const Text('Which team\u2019s card?'),
+                children: teams
+                    .map((e) => SimpleDialogOption(
+                          onPressed: () =>
+                              Navigator.of(ctx).pop(e),
+                          child: Text(e.value),
+                        ))
+                    .toList(),
+              ),
+            );
+      if (picked == null) return;
+      teamId = picked.key;
+      teamName = picked.value;
+    }
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ScoreEntryScreen(
+        auth: widget.auth,
+        settings: widget.settings,
+        tournament: widget.tournament,
+        teeTime: tt,
+        myDiscordId: widget.myDiscordId,
+        teamId: teamId,
+        teamName: teamName,
+      ),
+    ));
+  }
+
   /// True when Start Round is unlocked for non-admins: from 5 minutes
   /// before the scheduled tee time onward.
   bool _startUnlocked(TeeTime tt) => DateTime.now().isAfter(
@@ -347,6 +479,12 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                     leading: const Icon(Icons.person),
                     title: Text(
                         golferDisplayName(p.displayName, p.golfplusHandle)),
+                    subtitle: (p.teamName != null &&
+                            p.teamName!.isNotEmpty)
+                        ? Text('Team: ${p.teamName}',
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.green))
+                        : null,
                     trailing: p.discordId == tt.createdBy
                         ? const Chip(
                             label:
@@ -361,16 +499,13 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                 children: [
                   if (!inIt && !tt.isFull && !tt.isStarted)
                     ElevatedButton.icon(
-                      onPressed: () =>
-                          _act(() => _api.joinTeeTime(tt.id), 'Joined.'),
+                      onPressed: () => _joinOrRequest(tt, request: false),
                       icon: const Icon(Icons.add),
                       label: const Text('Join'),
                     ),
                   if (!inIt && tt.isFull && !tt.isStarted)
                     OutlinedButton.icon(
-                      onPressed: () => _act(
-                          () => _api.requestTeeTime(tt.id),
-                          'Request sent. The creator will approve it.'),
+                      onPressed: () => _joinOrRequest(tt, request: true),
                       icon: const Icon(Icons.send),
                       label: const Text('Request to join'),
                     ),
@@ -422,33 +557,13 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                     ),
                   if (inIt && tt.isStarted)
                     ElevatedButton.icon(
-                      onPressed: () {
-                        Navigator.of(context).push(MaterialPageRoute(
-                          builder: (_) => ScoreEntryScreen(
-                            auth: widget.auth,
-                            settings: widget.settings,
-                            tournament: widget.tournament,
-                            teeTime: tt,
-                            myDiscordId: widget.myDiscordId,
-                          ),
-                        ));
-                      },
+                      onPressed: () => _enterScores(tt),
                       icon: const Icon(Icons.scoreboard),
                       label: const Text('Enter scores'),
                     ),
                   if (!inIt && data.isAdmin && tt.isStarted)
                     OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.of(context).push(MaterialPageRoute(
-                          builder: (_) => ScoreEntryScreen(
-                            auth: widget.auth,
-                            settings: widget.settings,
-                            tournament: widget.tournament,
-                            teeTime: tt,
-                            myDiscordId: widget.myDiscordId,
-                          ),
-                        ));
-                      },
+                      onPressed: () => _adminEditScores(tt),
                       icon: const Icon(Icons.edit),
                       label: const Text('Edit scores (admin)'),
                     ),

@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS teams(
   tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   created_by TEXT NOT NULL,
+  partner_name TEXT,
   UNIQUE(tournament_id, name)
 );
 CREATE TABLE IF NOT EXISTS team_members(
@@ -100,6 +101,7 @@ CREATE TABLE IF NOT EXISTS tee_times(
 CREATE TABLE IF NOT EXISTS tee_time_players(
   tee_time_id INTEGER NOT NULL REFERENCES tee_times(id) ON DELETE CASCADE,
   player_discord_id TEXT NOT NULL,
+  team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
   UNIQUE(tee_time_id, player_discord_id)
 );
 CREATE TABLE IF NOT EXISTS boards(
@@ -164,6 +166,7 @@ CREATE TABLE IF NOT EXISTS join_requests(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tee_time_id INTEGER NOT NULL REFERENCES tee_times(id) ON DELETE CASCADE,
   player_discord_id TEXT NOT NULL,
+  team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK(status IN ('pending','accepted','declined')),
   created_at TEXT NOT NULL,
@@ -508,6 +511,9 @@ async def _migrate(db_path: str) -> None:
       linked games stay out of the dedicated tabs).
     - Adds players.golfplus_handle / timezone / stats_private when missing.
     - Adds scorecards.submitted_by when missing.
+    - Adds tee_time_players.team_id (which tournament team the rep is
+      playing for) and teams.partner_name (typed non-app partner) when
+      missing (alt-shot team play).
     New tables (join_requests, side_quests) are handled by the idempotent
     CREATE TABLE IF NOT EXISTS in SCHEMA.
     """
@@ -573,6 +579,29 @@ async def _migrate(db_path: str) -> None:
                 "ALTER TABLE hole_shots ADD COLUMN putts INTEGER"
                 " NOT NULL DEFAULT 0 CHECK(putts >= 0 AND putts <= 10)"
             )
+            await con.commit()
+
+        # tee_time_players.team_id / teams.partner_name (alt-shot team play):
+        # which tournament team the rep is playing for; typed non-app
+        # partner name when the partner isn't a registered player.
+        cur = await con.execute("PRAGMA table_info(tee_time_players)")
+        ttp_cols = [r[1] for r in await cur.fetchall()]
+        if "team_id" not in ttp_cols:
+            await con.execute(
+                "ALTER TABLE tee_time_players ADD COLUMN team_id INTEGER")
+            await con.commit()
+        cur = await con.execute("PRAGMA table_info(teams)")
+        team_cols = [r[1] for r in await cur.fetchall()]
+        if "partner_name" not in team_cols:
+            await con.execute(
+                "ALTER TABLE teams ADD COLUMN partner_name TEXT")
+            await con.commit()
+        # join_requests.team_id: which team the requester reps (alt-shot).
+        cur = await con.execute("PRAGMA table_info(join_requests)")
+        jr_cols = [r[1] for r in await cur.fetchall()]
+        if "team_id" not in jr_cols:
+            await con.execute(
+                "ALTER TABLE join_requests ADD COLUMN team_id INTEGER")
             await con.commit()
 
         # tee_times.round_number (defaults to 1 for existing tee times).
@@ -1466,11 +1495,13 @@ async def get_tournament_players(db_path, tournament_id) -> list[dict]:
 
 
 # --------------------------------------------------------------------- teams
-async def create_team(db_path, tournament_id, name, created_by) -> int:
+async def create_team(db_path, tournament_id, name, created_by,
+                      partner_name: str | None = None) -> int:
     lastrowid, _ = await _execute(
         db_path,
-        "INSERT INTO teams (tournament_id, name, created_by) VALUES (?,?,?)",
-        (tournament_id, name, created_by),
+        "INSERT INTO teams (tournament_id, name, created_by, partner_name)"
+        " VALUES (?,?,?,?)",
+        (tournament_id, name, created_by, partner_name),
     )
     return lastrowid
 
@@ -1530,6 +1561,138 @@ async def get_player_teams(db_path, tournament_id, discord_id) -> list[dict]:
         " WHERE t.tournament_id = ? AND tm.player_discord_id = ?",
         (tournament_id, discord_id),
     )
+
+
+def _pair_key(discord_ids: list[str],
+              partner_name: str | None) -> tuple[tuple[str, ...], str]:
+    """Normalized identity of a 2-player pairing for uniqueness checks."""
+    return (tuple(sorted(discord_ids)), (partner_name or "").strip().lower())
+
+
+async def find_team_by_pair(db_path, tournament_id, discord_ids: list[str],
+                            partner_name: str | None = None,
+                            exclude_team_id=None) -> dict | None:
+    """The existing team with the same pairing, if any.
+
+    Cayden's rule: the same two players can't form a second team in a
+    tournament — the pairing itself is unique (not just the name). Either
+    player may still team up with someone else.
+    """
+    want = _pair_key(discord_ids, partner_name)
+    for team in await get_teams(db_path, tournament_id):
+        if exclude_team_id is not None and team["id"] == exclude_team_id:
+            continue
+        members = await get_team_members(db_path, team["id"])
+        got = _pair_key([m["discord_id"] for m in members],
+                        team.get("partner_name"))
+        if got == want:
+            return team
+    return None
+
+
+async def delete_team(db_path, team_id) -> bool:
+    """Delete a team (members cascade; tee-time rep rows keep the player but
+    lose the team link via ON DELETE SET NULL)."""
+    _, rowcount = await _execute(
+        db_path, "DELETE FROM teams WHERE id = ?", (team_id,))
+    return rowcount > 0
+
+
+async def team_has_submitted_cards(db_path, team_id) -> bool:
+    """True when the team has any pending/verified scorecard — such teams
+    can't be deleted (leaderboard history must stay intact)."""
+    row = await _fetchone(
+        db_path,
+        "SELECT 1 FROM scorecards WHERE team_id = ?"
+        " AND status IN ('pending','verified') LIMIT 1",
+        (team_id,),
+    )
+    return row is not None
+
+
+async def has_completed_round_team_card(db_path, tournament_id, team_id,
+                                        round_number) -> bool:
+    """Team-level play-in-order gate: a submitted (pending/verified) shared
+    team card for the round. In-progress cards don't count."""
+    row = await _fetchone(
+        db_path,
+        "SELECT 1 FROM scorecards WHERE tournament_id = ? AND team_id = ?"
+        " AND round_number = ? AND status IN ('pending','verified') LIMIT 1",
+        (tournament_id, team_id, round_number),
+    )
+    return row is not None
+
+
+async def count_player_round_tee_times(db_path, tournament_id, discord_id,
+                                       round_number,
+                                       exclude_tee_time_id=None) -> int:
+    """How many tee times the player is in for a tournament round.
+
+    Backs the alt-shot multi-team cap (up to 3 teams per round).
+    """
+    sql = ("SELECT COUNT(*) AS c FROM tee_time_players tp"
+           " JOIN tee_times tt ON tt.id = tp.tee_time_id"
+           " WHERE tt.tournament_id = ? AND tp.player_discord_id = ?"
+           " AND tt.round_number = ?")
+    params: list = [tournament_id, discord_id, round_number]
+    if exclude_tee_time_id is not None:
+        sql += " AND tp.tee_time_id != ?"
+        params.append(exclude_tee_time_id)
+    row = await _fetchone(db_path, sql, tuple(params))
+    return row["c"] if row else 0
+
+
+async def join_tee_time_as_team(db_path, tee_time_id, discord_id,
+                                team_id) -> str:
+    """Join a tournament tee time repping a tournament team (alt-shot).
+
+    One player per team per sheet; up to 2 teams per tee time; a player may
+    rep up to 3 different teams in one round. Returns 'ok', 'missing',
+    'started', 'already', 'not_on_team', 'team_taken' (team already repped
+    on this sheet), 'full' (2 teams), or 'round_cap' (3 teams this round).
+    """
+    tt = await get_tee_time(db_path, tee_time_id)
+    if tt is None:
+        return "missing"
+    if tt.get("started_at"):
+        return "started"
+    rn = tt.get("round_number") or 1
+    team = await get_team(db_path, team_id)
+    if team is None or team["tournament_id"] != tt["tournament_id"]:
+        return "missing"
+    members = await get_team_members(db_path, team_id)
+    if not any(m["discord_id"] == discord_id for m in members):
+        return "not_on_team"
+    players = await get_tee_time_players(db_path, tee_time_id)
+    if any(p["discord_id"] == discord_id for p in players):
+        return "already"
+    if any(p.get("team_id") == team_id for p in players):
+        return "team_taken"
+    # One sheet per team per round: the team can't be repped in two tee
+    # times for the same round (one shared card per team per round).
+    other = await _fetchone(
+        db_path,
+        "SELECT tt.id FROM tee_time_players tp"
+        " JOIN tee_times tt ON tt.id = tp.tee_time_id"
+        " WHERE tt.tournament_id = ? AND tp.team_id = ?"
+        " AND tt.round_number = ? AND tp.tee_time_id != ? LIMIT 1",
+        (tt["tournament_id"], team_id, rn, tee_time_id),
+    )
+    if other is not None:
+        return "team_round_conflict"
+    if len(players) >= 2:
+        return "full"
+    if await count_player_round_tee_times(db_path, tt["tournament_id"],
+                                         discord_id, rn,
+                                         exclude_tee_time_id=tee_time_id) >= 3:
+        return "round_cap"
+    await _execute(
+        db_path,
+        "INSERT OR IGNORE INTO tee_time_players"
+        " (tee_time_id, player_discord_id, team_id) VALUES (?,?,?)",
+        (tee_time_id, discord_id, team_id),
+    )
+    return "ok"
 
 
 # ----------------------------------------------------------------- tee times
@@ -1792,8 +1955,9 @@ async def get_tee_time_players(db_path, tee_time_id) -> list[dict]:
         db_path,
         "SELECT tp.player_discord_id AS discord_id,"
         " COALESCE(p.display_name, tp.player_discord_id) AS display_name,"
-        " p.golfplus_handle"
+        " p.golfplus_handle, tp.team_id, tm.name AS team_name"
         " FROM tee_time_players tp LEFT JOIN players p ON p.discord_id = tp.player_discord_id"
+        " LEFT JOIN teams tm ON tm.id = tp.team_id"
         " WHERE tp.tee_time_id = ?",
         (tee_time_id,),
     )
@@ -1867,7 +2031,8 @@ async def start_tournament_tee_time(db_path, tee_time_id, discord_id,
 async def archive_tournament_tee_time_if_complete(db_path, tee_time_id) -> bool:
     """Archive a tournament tee time once every player has a verified card.
 
-    Returns True if the tee time was newly archived.
+    Team formats (alt_shot/scramble): every repped team needs a verified
+    shared team card instead. Returns True if newly archived.
     """
     tt = await get_tee_time(db_path, tee_time_id)
     if tt is None or tt.get("archived_at"):
@@ -1875,14 +2040,26 @@ async def archive_tournament_tee_time_if_complete(db_path, tee_time_id) -> bool:
     players = await get_tee_time_players(db_path, tee_time_id)
     if not players:
         return False
-    for p in players:
-        card = await find_scorecard(
-            db_path, tt["tournament_id"],
-            player_discord_id=p["discord_id"],
-            tee_time_id=tee_time_id,
-            round_number=tt.get("round_number") or 1)
-        if card is None or card.get("status") != "verified":
+    t = await get_tournament(db_path, tt["tournament_id"])
+    rn = tt.get("round_number") or 1
+    if t is not None and t.get("format") in ("alt_shot", "scramble"):
+        team_ids = {p["team_id"] for p in players if p.get("team_id")}
+        if not team_ids:
             return False
+        for tid in team_ids:
+            card = await get_latest_team_card(db_path, tt["tournament_id"],
+                                              tid, rn)
+            if card is None or card.get("status") != "verified":
+                return False
+    else:
+        for p in players:
+            card = await find_scorecard(
+                db_path, tt["tournament_id"],
+                player_discord_id=p["discord_id"],
+                tee_time_id=tee_time_id,
+                round_number=rn)
+            if card is None or card.get("status") != "verified":
+                return False
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     await _execute(
         db_path,
@@ -1965,6 +2142,39 @@ async def find_round_card(db_path, tournament_id, discord_id,
     )
 
 
+async def find_team_round_card(db_path, tournament_id, team_id,
+                               round_number) -> dict | None:
+    """The team's shared scorecard for a tournament round, in any tee time.
+
+    Enforces one team card per round per team for alt-shot/scramble.
+    """
+    round_number = max(1, min(5, int(round_number or 1)))
+    return await _fetchone(
+        db_path,
+        "SELECT s.*, tt.label AS tee_time_label"
+        " FROM scorecards s JOIN tee_times tt ON tt.id = s.tee_time_id"
+        " WHERE s.tournament_id = ? AND s.team_id = ? AND s.round_number = ?"
+        " ORDER BY s.submitted_at DESC LIMIT 1",
+        (tournament_id, team_id, round_number),
+    )
+
+
+async def find_team_round_tee_time(db_path, tournament_id, team_id,
+                                   round_number) -> dict | None:
+    """The tee time repping this team for a tournament round, if any.
+
+    Backs the one-sheet-per-team-per-round rule.
+    """
+    return await _fetchone(
+        db_path,
+        "SELECT tt.* FROM tee_time_players tp"
+        " JOIN tee_times tt ON tt.id = tp.tee_time_id"
+        " WHERE tt.tournament_id = ? AND tp.team_id = ?"
+        " AND tt.round_number = ? LIMIT 1",
+        (tournament_id, team_id, max(1, min(5, int(round_number or 1)))),
+    )
+
+
 async def leave_all_tee_times(db_path, tournament_id, discord_id) -> int:
     """Remove a player from every tee time they're in for this tournament.
     Returns the number of tee times left."""
@@ -2012,11 +2222,13 @@ async def mark_reminded(db_path, tee_time_id, kind: str) -> None:
 
 
 # ------------------------------------------------------------ join requests
-async def create_join_request(db_path, tee_time_id, discord_id) -> str:
+async def create_join_request(db_path, tee_time_id, discord_id,
+                              team_id=None) -> str:
     """Create a PENDING join request for someone else's tee time.
 
-    Returns 'ok', 'pending' (already has a pending request for this tee
-    time), 'already' (already in the tee time), 'full' (tee time is full),
+    team_id: the tournament team the requester reps (alt-shot). Returns
+    'ok', 'pending' (already has a pending request for this tee time),
+    'already' (already in the tee time), 'full' (tee time is full),
     or 'missing' (no such tee time).
     """
     tt = await get_tee_time(db_path, tee_time_id)
@@ -2038,9 +2250,9 @@ async def create_join_request(db_path, tee_time_id, discord_id) -> str:
     try:
         await _execute(
             db_path,
-            "INSERT INTO join_requests (tee_time_id, player_discord_id, status, created_at)"
-            " VALUES (?, ?, 'pending', ?)",
-            (tee_time_id, discord_id, utcnow_iso()),
+            "INSERT INTO join_requests (tee_time_id, player_discord_id, team_id, status, created_at)"
+            " VALUES (?, ?, ?, 'pending', ?)",
+            (tee_time_id, discord_id, team_id, utcnow_iso()),
         )
     except Exception:
         # Partial unique index race: treat as already pending.

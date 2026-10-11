@@ -130,11 +130,20 @@ async def dnf_rows(db_path: str, t: dict) -> list[dict]:
     card_holders: set[str] = set()
     for c in await db.get_scorecards(db_path, t["id"]):
         pid = c["player_discord_id"]
+        rn = c.get("round_number") or 1
         if pid is None:
+            # Shared team card: credit every team member for the round.
+            tid = c.get("team_id")
+            if tid is None:
+                continue
+            for m in await db.get_team_members(db_path, tid):
+                card_holders.add(m["discord_id"])
+                if c["status"] in ("pending", "verified"):
+                    completed.add((m["discord_id"], rn))
             continue
         card_holders.add(pid)
         if c["status"] in ("pending", "verified"):
-            completed.add((pid, c.get("round_number") or 1))
+            completed.add((pid, rn))
     pids = set(card_holders)
     for r in await db.get_roster(db_path, t["id"]):
         pids.add(r["discord_id"])
@@ -671,7 +680,10 @@ async def final_standings_points(db_path: str, tournament_id: int) -> list[dict]
 
     Returns [{"player_discord_id", "position", "points"}]. Ties share the
     position's points (competition ranking — no averaging). Team formats:
-    every team member earns the team's position points.
+    each team member earns half the team's position points (integer
+    division); a player on multiple teams banks only their best (highest)
+    position. Typed (non-registered) partners earn nothing — their half is
+    forfeited.
     """
     t = await db.get_tournament(db_path, tournament_id)
     if t is None:
@@ -701,11 +713,23 @@ async def final_standings_points(db_path: str, tournament_id: int) -> list[dict]
         award([(_rank_key(c), [c["player_discord_id"]]) for c in ranked])
     elif fmt in ("best_ball", "alt_shot", "scramble"):
         team_rows, _ = await _team_rows(db_path, t)
-        ranked: list[tuple[int, list[str]]] = []
-        for r in team_rows:
+        best: dict[str, tuple[int, int]] = {}
+        prev = None
+        pos = 0
+        for i, r in enumerate(team_rows):
+            key = _rank_key(r)
+            if key != prev:
+                pos = i + 1
+                prev = key
+            pts = sl.points_for_position(pos) // 2
             members = await db.get_team_members(db_path, r["team_id"])
-            ranked.append((_rank_key(r), [m["discord_id"] for m in members]))
-        award(ranked)
+            for m in members:
+                pid = m["discord_id"]
+                if pid not in best or pos < best[pid][0]:
+                    best[pid] = (pos, pts)
+        for pid, (pos, pts) in best.items():
+            rows.append({"player_discord_id": pid, "position": pos,
+                         "points": pts})
     elif fmt == "match":
         matches = await db.list_matches(db_path, t["id"], status="confirmed")
         ranked_records = sl.rank_match_records(sl.match_records(matches))

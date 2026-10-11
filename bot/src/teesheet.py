@@ -183,8 +183,14 @@ def _tee_time_value(tt: dict, players: list[dict], pending: list[dict]) -> str:
         status += f" — ⏳ {len(pending)} request(s) awaiting approval"
     value = f"{_when_line(tt.get('starts_at'))}{status}"
     if players:
-        names = ", ".join(db.display_name_of(p, p["discord_id"])
-                           for p in players[:8])
+        # Team formats (alt-shot): show the team name instead of just the
+        # rep — one player per team per sheet.
+        def _label(p):
+            tn = (p.get("team_name") or "").strip()
+            if tn:
+                return f"{db.display_name_of(p, p['discord_id'])} ({tn})"
+            return db.display_name_of(p, p["discord_id"])
+        names = ", ".join(_label(p) for p in players[:8])
         if len(players) > 8:
             names += f" (+{len(players) - 8} more)"
         value += f"\n{names}"

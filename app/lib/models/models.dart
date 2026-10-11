@@ -200,17 +200,23 @@ class TeeTimePlayer {
   final String discordId;
   final String displayName;
   final String? golfplusHandle;
+  final int? teamId;
+  final String? teamName;
 
   TeeTimePlayer({
     required this.discordId,
     required this.displayName,
     this.golfplusHandle,
+    this.teamId,
+    this.teamName,
   });
 
   factory TeeTimePlayer.fromJson(Map<String, dynamic> j) => TeeTimePlayer(
         discordId: j['discord_id'].toString(),
         displayName: (j['display_name'] ?? j['discord_id']).toString(),
         golfplusHandle: j['golfplus_handle']?.toString(),
+        teamId: (j['team_id'] as num?)?.toInt(),
+        teamName: j['team_name']?.toString(),
       );
 }
 
@@ -647,11 +653,26 @@ class LeaderboardEntry {
   dynamic operator [](String key) => raw[key];
 
   String get name {
+    // Team formats: the team name (already handle-derived server-side).
+    final teamName = (raw['team_name']?.toString() ?? '').trim();
+    if (teamName.isNotEmpty) return teamName;
     // Handle-first display rule: Golf+ username only, never real names.
     final handle = (raw['golfplus_handle']?.toString() ?? '').trim();
     if (handle.isNotEmpty) return handle;
     return (raw['display_name'] ?? raw['name'] ?? raw['player'] ?? '?')
         .toString();
+  }
+
+  /// Team members for team-format entries (handles), empty otherwise.
+  List<String> get teamMembers {
+    final members = raw['members'];
+    if (members is! List) return const [];
+    return members
+        .whereType<Map<String, dynamic>>()
+        .map((m) => ((m['golfplus_handle']?.toString() ?? '').trim().isNotEmpty
+                ? m['golfplus_handle'].toString()
+                : (m['display_name']?.toString() ?? '?').trim()))
+        .toList();
   }
   String? get rank => raw['rank']?.toString();
   String? get total => raw['total']?.toString();

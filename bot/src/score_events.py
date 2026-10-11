@@ -57,11 +57,13 @@ async def detect_score_events(
     player_discord_id: str,
     old_card: dict | None,
     new_card: dict,
+    display_name: str | None = None,
 ) -> list[str]:
     """Compare old/new cards; enqueue pushes for newsworthy events.
 
     Returns the list of event kinds fired ('ace', 'albatross', 'top3').
-    Never raises — push must not break scoring.
+    Never raises — push must not break scoring. display_name overrides the
+    player-derived name (used for shared team cards).
     """
     fired: list[str] = []
     try:
@@ -73,8 +75,11 @@ async def detect_score_events(
         old_holes = _holes_of(old_card, n)
         new_holes = _holes_of(new_card, n)
 
-        player = await db.get_player(db_path, player_discord_id)
-        name = db.display_name_of(player, player_discord_id)
+        if display_name is not None:
+            name = display_name
+        else:
+            player = await db.get_player(db_path, player_discord_id)
+            name = db.display_name_of(player, player_discord_id)
         course = t.get("course") or "the course"
 
         for i, (old, new) in enumerate(zip(old_holes, new_holes)):

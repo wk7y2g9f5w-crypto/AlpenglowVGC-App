@@ -249,8 +249,15 @@ class ScoreEntryView(discord.ui.View):
                     round_number=self.round_number,
                 )
                 if new_card is not None:
+                    team_name = next(
+                        (tm["name"] for tm in self.teams
+                         if str(tm["id"]) == str(self.team_id)),
+                        None,
+                    )
                     await score_events.detect_score_events(
                         self.db_path, self.t["id"], pid, existing, new_card,
+                        display_name=team_name
+                        if pid is None else None,
                     )
             except Exception:
                 pass
@@ -841,6 +848,8 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     if new_card is not None:
         await score_events.detect_score_events(
             db_path, t["id"], card_player_id, existing, new_card,
+            display_name=(team_name or None)
+            if card_player_id is None else None,
         )
     await leaderboard_render.refresh_leaderboard(bot, db_path, t["id"])
 
@@ -1287,6 +1296,22 @@ class Scoring(commands.Cog):
             )
             return
         new = await db.add_team_member(self.bot.db_path, team["id"], str(member.id))
+        if new:
+            # Cayden's rule: the same two players can't form a second team.
+            # If this add recreated an existing pairing, roll it back.
+            members = await db.get_team_members(self.bot.db_path, team["id"])
+            dup = await db.find_team_by_pair(
+                self.bot.db_path, t["id"],
+                [m["discord_id"] for m in members],
+                exclude_team_id=team["id"])
+            if dup is not None:
+                await db.remove_team_member(self.bot.db_path, team["id"],
+                                            str(member.id))
+                await interaction.response.send_message(
+                    f"❌ You're already teamed with {member.display_name} as "
+                    f"**{dup['name']}** — same pair, one team.", ephemeral=True
+                )
+                return
         await interaction.response.send_message(
             f"✅ {member.display_name} {'joined' if new else 'is already on'} "
             f"team **{team['name']}** ({len(members) + (1 if new else 0)}/{cap}).",

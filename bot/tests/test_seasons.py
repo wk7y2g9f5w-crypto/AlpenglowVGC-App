@@ -159,7 +159,8 @@ class SeasonDbTest(unittest.IsolatedAsyncioTestCase):
 
 @requires_aiosqlite
 class AwardLogicTest(unittest.IsolatedAsyncioTestCase):
-    """final_standings_points: ties share points, teams award every member."""
+    """final_standings_points: ties share points, team members get half
+    each (best position only for multi-team players)."""
 
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -225,8 +226,9 @@ class AwardLogicTest(unittest.IsolatedAsyncioTestCase):
         rows = await lr.final_standings_points(self.db_path, tid)
         by_pid = {r["player_discord_id"]: r for r in rows}
         self.assertEqual(set(by_pid), {"p1", "p2"})
-        self.assertEqual(by_pid["p1"]["points"], 100)
-        self.assertEqual(by_pid["p2"]["points"], 100)
+        # Half points each (1st = 100 -> 50).
+        self.assertEqual(by_pid["p1"]["points"], 50)
+        self.assertEqual(by_pid["p2"]["points"], 50)
         self.assertEqual(by_pid["p1"]["position"], 1)
 
     async def test_match_format_award(self):
