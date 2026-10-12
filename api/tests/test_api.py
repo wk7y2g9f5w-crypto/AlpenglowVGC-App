@@ -239,12 +239,14 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()["code"], "registration_closed")
 
-    def test_register_409_timezone_required(self):
-        # Fresh user 888 never set a timezone.
+    def test_register_no_timezone_ok(self):
+        # Fresh user 888 never set a timezone — registration is not
+        # gated on it anymore (Cayden 2026-10-12; unset defaults to
+        # Eastern wherever a timezone is needed).
         r = self.client.post(f"/api/tournaments/{self.t_open}/register",
                              headers=self.h("888"))
-        self.assertEqual(r.status_code, 409)
-        self.assertEqual(r.json()["code"], "timezone_required")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"registered": True, "already": False})
 
     def test_unregister(self):
         self.with_tz("123")
@@ -286,10 +288,12 @@ class ApiTestCase(unittest.TestCase):
         players = [p["discord_id"] for p in tt["players"]]
         self.assertEqual(players, ["123"])  # creator auto-joined
 
-    def test_create_tee_time_409_timezone_required(self):
-        r = self._create("888")  # no timezone set
-        self.assertEqual(r.status_code, 409)
-        self.assertEqual(r.json()["code"], "timezone_required")
+    def test_create_tee_time_no_timezone_defaults_eastern(self):
+        # No timezone set: the tee time's wall clock is read as Eastern
+        # (Cayden 2026-10-12). 2026-10-03 09:30 EDT = 13:30 UTC.
+        r = self._create("888")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["starts_at"], "2026-10-03T13:30:00+00:00")
 
     def test_create_tee_time_bad_date(self):
         self.with_tz("123")

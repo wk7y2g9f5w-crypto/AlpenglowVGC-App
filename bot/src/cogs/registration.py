@@ -18,27 +18,6 @@ from src.cogs.common import (
 )
 
 
-async def require_timezone(interaction: discord.Interaction) -> bool:
-    """True when the player has a timezone set.
-
-    Registration is gated on this: newcomers must run /set_timezone (or the
-    /setup walkthrough) first so tee times are never ambiguous.
-    Pure-ish helper, unit-testable with a fake interaction.
-    """
-    db_path = interaction.client.db_path
-    member = interaction.user
-    await db.upsert_player(db_path, str(member.id),
-                           member.display_name[:80])
-    if await db.get_timezone(db_path, str(member.id)):
-        return True
-    await interaction.response.send_message(
-        "⏳ One quick setup step first: set your timezone with `/set_timezone` "
-        "(or run the `/setup` walkthrough — 30 seconds), then register again.",
-        ephemeral=True,
-    )
-    return False
-
-
 async def do_register(interaction: discord.Interaction, tournament_id: int) -> None:
     """Shared registration flow used by /register and the Register button."""
     db_path = interaction.client.db_path
@@ -56,9 +35,12 @@ async def do_register(interaction: discord.Interaction, tournament_id: int) -> N
         )
         return
 
-    if not await require_timezone(interaction):
-        return
+    # No timezone gate (Cayden 2026-10-12): an unset timezone defaults
+    # to Eastern everywhere times are parsed or shown. The upsert keeps
+    # the player row /setup expects.
     member = interaction.user
+    await db.upsert_player(db_path, str(member.id),
+                           member.display_name[:80])
     new = await db.register_player(db_path, t["id"], str(interaction.user.id))
 
     # Per-tournament participant role: "⛳ <tournament name>"

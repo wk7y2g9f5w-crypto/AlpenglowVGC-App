@@ -12,8 +12,7 @@ bot behavior — keep them accurate when commands change.
 PLAYER_COMMANDS: list[tuple[str, str, str]] = [
     ("Tournaments",
      "/register",
-     "Sign up for a tournament (or tap ✅ Register on the announcement) — "
-     "requires your timezone set via /setup first."),
+     "Sign up for a tournament (or tap ✅ Register on the announcement)."),
     ("Tournaments",
      "/unregister",
      "Withdraw from a tournament."),
@@ -70,8 +69,8 @@ PLAYER_COMMANDS: list[tuple[str, str, str]] = [
      "Range history plus personal and course bests per format."),
     ("Profile & seasons",
      "/setup",
-     "New-player setup: pick your timezone (required before registering) "
-     "and link your Golf+ username. Do this first!"),
+     "New-player setup: pick your timezone (unset defaults to Eastern) "
+     "and link your Golf+ username."),
     ("Profile & seasons",
      "/set_timezone",
      "Set your timezone so tee-time times are read as your local time."),

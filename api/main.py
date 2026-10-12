@@ -1417,12 +1417,8 @@ async def register(tournament_id: int, user: CurrentUser) -> dict:
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "registration_closed"},
         )
-    # Mirror the bot's timezone gate exactly (require_timezone).
-    if not await db.get_timezone(DB_PATH, user["discord_id"]):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "timezone_required"},
-        )
+    # No timezone gate (Cayden 2026-10-12, mirrors the bot): an unset
+    # timezone defaults to Eastern wherever times are parsed or shown.
     # Discord role assignment skipped: bot-only side effect.
     new = await db.register_player(DB_PATH, t["id"], user["discord_id"])
     return {"registered": True, "already": not new}
@@ -1697,12 +1693,8 @@ async def create_tee_time(
     tournament_id: int, body: TeeTimeCreate, user: CurrentUser
 ) -> dict:
     t = await _tournament_or_404(tournament_id)
-    tz_name = await db.get_timezone(DB_PATH, user["discord_id"])
-    if not tz_name:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "timezone_required"},
-        )
+    # Unset timezone defaults to Eastern (Cayden 2026-10-12).
+    tz_name = await db.get_timezone_or_default(DB_PATH, user["discord_id"])
     try:
         starts = parse_in_tz(body.date, body.time, tz_name)
     except ValueError as e:
@@ -2074,16 +2066,13 @@ async def update_tee_time(
         )
     starts_at = None
     if body.date is not None or body.time is not None:
-        tz_name = await db.get_timezone(DB_PATH, user["discord_id"])
-        if not tz_name:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={"code": "timezone_required"},
-            )
+        # Unset timezone defaults to Eastern (Cayden 2026-10-12).
+        tz_name = await db.get_timezone_or_default(
+            DB_PATH, user["discord_id"])
         try:
             viewer_tz = ZoneInfo(tz_name)
         except ZoneInfoNotFoundError:
-            viewer_tz = timezone.utc
+            viewer_tz = ZoneInfo(db.DEFAULT_TIMEZONE)
         cur = datetime.fromisoformat(tt["starts_at"]).astimezone(viewer_tz)
         try:
             starts = parse_in_tz(

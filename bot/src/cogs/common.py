@@ -13,13 +13,15 @@ DIRECTOR_ROLE_NAME = "Tournament Director"
 
 
 def resolve_tz(tz_name: str | None) -> ZoneInfo:
-    """ZoneInfo for an IANA name, falling back to UTC when unset/invalid."""
+    """ZoneInfo for an IANA name. Unset/invalid falls back to Eastern
+    (db.DEFAULT_TIMEZONE) — Cayden 2026-10-12: nobody is blocked or
+    silently shown UTC for not setting a timezone."""
     if tz_name:
         try:
             return ZoneInfo(tz_name)
         except ZoneInfoNotFoundError:
             pass
-    return ZoneInfo("UTC")
+    return ZoneInfo(db.DEFAULT_TIMEZONE)
 
 
 def format_tee_time_local(starts_at: str | None, tz_name: str | None) -> str:

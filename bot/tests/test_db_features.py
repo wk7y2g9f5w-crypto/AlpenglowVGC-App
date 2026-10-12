@@ -522,9 +522,11 @@ class ParseInTzTest(unittest.TestCase):
         dt = tt_mod.parse_in_tz("2026-01-15", "19:30", "America/Denver")
         self.assertEqual(dt, datetime(2026, 1, 16, 2, 30, tzinfo=timezone.utc))
 
-    def test_unset_or_invalid_zone_falls_back_to_utc(self):
+    def test_unset_or_invalid_zone_falls_back_to_eastern(self):
+        # Cayden 2026-10-12: unset/invalid timezone defaults to Eastern
+        # (was UTC). 19:30 EDT (UTC-4) = 23:30 UTC.
         from src.cogs import teetimes as tt_mod
-        expected = datetime(2026, 9, 26, 19, 30, tzinfo=timezone.utc)
+        expected = datetime(2026, 9, 26, 23, 30, tzinfo=timezone.utc)
         self.assertEqual(tt_mod.parse_in_tz("2026-09-26", "19:30", None),
                          expected)
         self.assertEqual(tt_mod.parse_in_tz("2026-09-26", "19:30", "Mars/Olympus"),
@@ -541,42 +543,36 @@ class ParseInTzTest(unittest.TestCase):
 
 
 @requires_aiosqlite
-class RegistrationGateTest(TempDbTest):
-    def _fake_interaction(self):
-        from types import SimpleNamespace
+class TimezoneDefaultTest(TempDbTest):
+    """Cayden 2026-10-12: no timezone requirement — unset means Eastern."""
 
-        class FakeResponse:
-            def __init__(self):
-                self.sent = []
+    async def test_or_default_unset_is_eastern(self):
+        self.assertEqual(db.DEFAULT_TIMEZONE, "America/New_York")
+        self.assertEqual(
+            await db.get_timezone_or_default(self.db_path, "ghost"),
+            "America/New_York")
 
-            async def send_message(self, content, **kwargs):
-                self.sent.append(content)
+    async def test_or_default_prefers_stored(self):
+        await db.upsert_player(self.db_path, "p1", "Player One")
+        await db.set_timezone(self.db_path, "p1", "America/Denver")
+        self.assertEqual(
+            await db.get_timezone_or_default(self.db_path, "p1"),
+            "America/Denver")
 
-        class FakeUser:
-            id = "newbie1"
-            display_name = "Newbie"
+    async def test_resolve_tz_falls_back_to_eastern(self):
+        from src.cogs.common import resolve_tz
+        self.assertEqual(resolve_tz(None).key, "America/New_York")
+        self.assertEqual(resolve_tz("Not/AZone").key, "America/New_York")
+        self.assertEqual(resolve_tz("America/Denver").key,
+                         "America/Denver")
 
-        ix = SimpleNamespace()
-        ix.client = SimpleNamespace(db_path=self.db_path)
-        ix.user = FakeUser()
-        ix.response = FakeResponse()
-        return ix
-
-    async def test_gate_blocks_without_timezone(self):
-        from src.cogs import registration as reg_mod
-        ix = self._fake_interaction()
-        self.assertFalse(await reg_mod.require_timezone(ix))
-        self.assertTrue(any("/set_timezone" in m for m in ix.response.sent))
-        # Player row was still created (so /setup can update it).
-        self.assertIsNotNone(await db.get_player(self.db_path, "newbie1"))
-
-    async def test_gate_passes_with_timezone(self):
-        from src.cogs import registration as reg_mod
-        await db.upsert_player(self.db_path, "newbie1", "Newbie")
-        await db.set_timezone(self.db_path, "newbie1", "America/Denver")
-        ix = self._fake_interaction()
-        self.assertTrue(await reg_mod.require_timezone(ix))
-        self.assertEqual(ix.response.sent, [])
+    async def test_parse_in_tz_none_is_eastern(self):
+        from datetime import timezone as dt_tz
+        from src.cogs import teetimes as tt_mod
+        starts = tt_mod.parse_in_tz("2026-10-03", "09:30", None)
+        # 09:30 EDT (UTC-4) = 13:30 UTC.
+        self.assertEqual(starts.hour, 13)
+        self.assertEqual(starts.tzinfo, dt_tz.utc)
 
 
 class SetupChecklistTest(unittest.TestCase):
@@ -613,15 +609,17 @@ class FormatTeeTimeLocalTest(unittest.TestCase):
                                              "America/Denver"),
             "Sep 26, 7:30 PM MDT")
 
-    def test_utc_default_for_unset_or_bad_zone(self):
+    def test_eastern_default_for_unset_or_bad_zone(self):
+        # Cayden 2026-10-12: unset/invalid timezone displays in Eastern
+        # (was UTC). 01:30 UTC = 21:30 EDT the previous evening.
         from src.cogs import common as common_mod
         self.assertEqual(
             common_mod.format_tee_time_local("2026-09-27T01:30:00+00:00", None),
-            "Sep 27, 1:30 AM UTC")
+            "Sep 26, 9:30 PM EDT")
         self.assertEqual(
             common_mod.format_tee_time_local("2026-09-27T01:30:00+00:00",
                                              "Mars/Olympus"),
-            "Sep 27, 1:30 AM UTC")
+            "Sep 26, 9:30 PM EDT")
 
     def test_unparseable_returns_empty(self):
         from src.cogs import common as common_mod

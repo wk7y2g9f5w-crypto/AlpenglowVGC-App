@@ -1,12 +1,9 @@
 """New-player onboarding: the /setup walkthrough.
 
 /setup gives newcomers a 30-second pre-registration checklist:
-1. pick their timezone (REQUIRED before they can register for anything —
-   enforced by require_timezone in registration.py),
+1. pick their timezone (optional since 2026-10-12 — unset defaults to
+   Eastern, but tee times are entered and shown in their own zone),
 2. link their Golf+ username (optional; shows on boards and rosters).
-
-#welcome diverts newcomers here so nobody hits the registration gate
-confused.
 """
 import discord
 from discord import app_commands

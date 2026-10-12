@@ -1284,6 +1284,12 @@ async def set_timezone(db_path, discord_id: str, tz_name: str | None) -> None:
     )
 
 
+# Cayden 2026-10-12: nobody is blocked for not setting a timezone —
+# unset means Eastern (America/New_York, DST-aware) everywhere a
+# timezone is needed to parse or display times.
+DEFAULT_TIMEZONE = "America/New_York"
+
+
 async def get_timezone(db_path, discord_id: str) -> str | None:
     """A player's stored IANA timezone, or None when never set."""
     row = await _fetchone(
@@ -1291,6 +1297,11 @@ async def get_timezone(db_path, discord_id: str) -> str | None:
         (discord_id,),
     )
     return (row or {}).get("timezone") or None
+
+
+async def get_timezone_or_default(db_path, discord_id: str) -> str:
+    """The player's timezone, or DEFAULT_TIMEZONE when never set."""
+    return await get_timezone(db_path, discord_id) or DEFAULT_TIMEZONE
 
 
 async def list_players(db_path) -> list[dict]:
