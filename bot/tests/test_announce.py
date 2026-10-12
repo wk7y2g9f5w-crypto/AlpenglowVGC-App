@@ -120,3 +120,25 @@ class AnnounceTest(unittest.IsolatedAsyncioTestCase):
         bot = FakeBot({"12345": FakeGuild([])}, self.db_path)
         posted = await tc.post_signup_announcement(bot, "12345", self.tid)
         self.assertFalse(posted)
+
+    def _embed(self, fmt):
+        return tc.build_tournament_announce_embed(
+            tournament_id=7, name="Demo", format=fmt, holes=18,
+            course="Course A", start_date="2026-10-20",
+            end_date="2026-10-27", description=None,
+            rounds=[{"tee_position": "middle", "pin_position": "white",
+                     "wind_strength": "moderate"}],
+            green_speed="pro", pars=None)
+
+    def test_team_formats_announce_teams_first(self):
+        # Cayden 2026-10-12: team-event announcements must say a team
+        # has to be set up before a tee time can be created.
+        for fmt in ("alt_shot", "best_ball", "scramble"):
+            fields = {f.name: f.value for f in self._embed(fmt).fields}
+            self.assertIn("👥 Teams first", fields, fmt)
+            self.assertIn("before you can create a tee time",
+                          fields["👥 Teams first"], fmt)
+
+    def test_stroke_announce_has_no_teams_field(self):
+        names = [f.name for f in self._embed("stroke").fields]
+        self.assertNotIn("👥 Teams first", names)

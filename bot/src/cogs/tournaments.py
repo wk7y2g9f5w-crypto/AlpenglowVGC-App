@@ -29,6 +29,10 @@ FORMAT_LABELS = {
     "scramble": "Scramble",
 }
 
+# Formats scored by tournament teams (mirrors scoring.TEAM_FORMATS and
+# the API's TEAM_FORMATS).
+TEAM_FORMATS = ("best_ball", "alt_shot", "scramble")
+
 # Discord channel(s) for score highlight notifications (aces, albatrosses,
 # top-3 shake-ups). Tried in order; the emoji-prefixed name is current.
 # Missing channel => skipped silently (logged).
@@ -165,6 +169,19 @@ def build_tournament_announce_embed(
                   "`/tee_time create` or request to join an open one from "
                   "`/tee_times` (the tee-time creator approves requests).")
     embed.add_field(name="How to join", value=how_to, inline=False)
+    if format in TEAM_FORMATS:
+        # Cayden 2026-10-12: team events must say up front that a team
+        # comes before any tee time — booking one without a team is
+        # refused, and members were hitting that cold.
+        embed.add_field(
+            name="👥 Teams first",
+            value=("This is a team event — **you have to set up a team "
+                   "before you can create a tee time**. Form one with "
+                   "`/team create` here in Discord, or in the app under "
+                   "the tournament's **Teams** tab. Only the team's "
+                   "creator can put it on a tee time."),
+            inline=False,
+        )
     embed.set_footer(text=f"Tournament ID: {tournament_id}")
     return embed
 
