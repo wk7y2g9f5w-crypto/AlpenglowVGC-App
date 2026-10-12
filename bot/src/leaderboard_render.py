@@ -12,6 +12,11 @@ import discord
 from src import db
 from src import scoring_logic as sl
 
+# Lead-change alerts ("🔄 Lead change! ...") are paused as of 2026-10-11
+# per Cayden. Flip back to True to re-enable. This is separate from the
+# top-3 shake-up highlights, which still post to #tournament-notifications.
+LEAD_CHANGE_ALERTS_ENABLED = False
+
 
 def _pars_list(tournament: dict) -> list[int] | None:
     if tournament.get("pars"):
@@ -794,7 +799,8 @@ async def refresh_leaderboard(bot, db_path: str, tournament_id: int) -> bool:
         if embed is None:
             return False
         await message.edit(embed=embed)
-        await _check_lead_change(bot, db_path, t, channel)
+        if LEAD_CHANGE_ALERTS_ENABLED:
+            await _check_lead_change(bot, db_path, t, channel)
         return True
     except Exception:
         return False
