@@ -39,13 +39,15 @@ class ScoreEntryScreen extends StatefulWidget {
 /// One card in the grid: a player's card, or the shared team card.
 class _CardState {
   final TeeTimePlayer? player; // null in shared-team mode
+  final int? teamId; // the team this card files under (team formats)
+  final String? teamName;
   List<int?> scores;
   String? status; // null | in_progress | pending | verified
   int? cardId;
   String witness = '';
   bool editedAfterSubmit = false;
 
-  _CardState(this.player, int holeCount)
+  _CardState(this.player, int holeCount, {this.teamId, this.teamName})
       : scores = List<int?>.filled(holeCount, null);
 
   bool get complete => !scores.any((s) => s == null);
@@ -91,7 +93,9 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   bool get _locked => widget.teeTime.startsAtUtc.isAfter(DateTime.now());
 
   String _cardTitle(_CardState card) {
-    if (_isSharedCard) return widget.teamName ?? 'Team card';
+    if (_isSharedCard) {
+      return card.teamName ?? widget.teamName ?? 'Team card';
+    }
     final p = card.player;
     if (p == null) return 'Card';
     return golferDisplayName(p.displayName, p.golfplusHandle);
@@ -102,15 +106,36 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   String? _cardPlayerId(_CardState card) =>
       _isTeamMode && _isSharedCard ? null : card.player?.discordId;
 
+  int? _cardTeamId(_CardState card) => card.teamId ?? widget.teamId;
+
   @override
   void initState() {
     super.initState();
     _roundNumber = widget.teeTime.roundNumber;
     if (_isSharedCard) {
-      _cards = [_CardState(null, _holeCount)];
+      // One column per team on the sheet — the whole foursome's cards
+      // are on this one grid (Cayden 2026-10-12).
+      final seen = <int>{};
+      _cards = [];
+      for (final p in widget.teeTime.players) {
+        final tid = p.teamId ?? widget.teamId;
+        if (tid != null && seen.add(tid)) {
+          _cards.add(_CardState(null, _holeCount,
+              teamId: tid, teamName: p.teamName ?? widget.teamName));
+        }
+      }
+      if (_cards.isEmpty && widget.teamId != null) {
+        _cards = [
+          _CardState(null, _holeCount,
+              teamId: widget.teamId, teamName: widget.teamName)
+        ];
+      }
     } else {
       _cards = [
-        for (final p in widget.teeTime.players) _CardState(p, _holeCount)
+        for (final p in widget.teeTime.players)
+          _CardState(p, _holeCount,
+              teamId: _isTeamMode ? (p.teamId ?? widget.teamId) : null,
+              teamName: p.teamName)
       ];
     }
     _loadAll(_roundNumber).then((_) {
@@ -156,7 +181,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         widget.teeTime.id,
         roundNumber: round,
         playerDiscordId: _cardPlayerId(card),
-        teamId: widget.teamId,
+        teamId: _cardTeamId(card),
       );
       if (!mounted || seq != _loadSeq) return;
       if (sc != null && sc.scores.length == _holeCount) {
@@ -270,7 +295,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         _cardPlayerId(card),
         List<int?>.from(card.scores),
         roundNumber: _roundNumber,
-        teamId: widget.teamId,
+        teamId: _cardTeamId(card),
       );
       if (!mounted) return;
       setState(() {
@@ -301,7 +326,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         _cardPlayerId(card),
         List<int?>.from(card.scores),
         roundNumber: _roundNumber,
-        teamId: widget.teamId,
+        teamId: _cardTeamId(card),
       );
       if (!mounted) return null;
       setState(() {
@@ -435,7 +460,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           roundNumber: _roundNumber,
           witnessName: entry.value,
           complete: true,
-          teamId: widget.teamId,
+          teamId: _cardTeamId(card),
         );
         card.status = sc.status;
         card.cardId ??= sc.id;

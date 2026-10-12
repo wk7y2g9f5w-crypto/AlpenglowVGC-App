@@ -1485,10 +1485,16 @@ async def _team_json(team: dict) -> dict:
 class TeamCreate(BaseModel):
     """Form a 2-player team. Exactly one partner identifier is required:
     partner_discord_id (registered player, picked from a dropdown) or
-    partner_name (typed name for a partner not in the app)."""
+    partner_name (typed name for a partner not in the app).
+
+    player_discord_id is Player 1 — normally the caller. Cayden
+    2026-10-12: an admin may create a team for two other players; the
+    admin names Player 1, who becomes the team's creator and its only
+    tee-sheet rep."""
 
     partner_discord_id: str | None = None
     partner_name: str | None = None
+    player_discord_id: str | None = None
 
     @model_validator(mode="after")
     def _one_partner(self) -> "TeamCreate":
@@ -1499,6 +1505,8 @@ class TeamCreate(BaseModel):
                 "exactly one of partner_discord_id / partner_name is required")
         self.partner_discord_id = did or None
         self.partner_name = name[:50] or None
+        p1 = (self.player_discord_id or "").strip()
+        self.player_discord_id = p1 or None
         return self
 
 
@@ -1525,17 +1533,33 @@ async def create_team(tournament_id: int, body: TeamCreate,
             detail={"code": "registration_closed"},
         )
     me = user["discord_id"]
-    if not await db.is_registered(DB_PATH, t["id"], me):
+    # Player 1 defaults to the caller. An admin may instead name two
+    # other players — Player 1 becomes the team's creator and rep.
+    player1 = body.player_discord_id or me
+    if player1 != me:
+        is_admin = await fetch_admin_status(me)
+        if is_admin is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify admin status — try again shortly.",
+            )
+        if not is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "admin_only",
+                        "message": "Only admins can form a team for other players."},
+            )
+    if not await db.is_registered(DB_PATH, t["id"], player1):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "not_registered",
                     "message": "Register for the tournament before forming a team."},
         )
-    partner_ids = [me]
+    partner_ids = [player1]
     partner_name = None
     if body.partner_discord_id:
         pid = body.partner_discord_id
-        if pid == me:
+        if pid == player1:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"code": "self_partner",
@@ -1561,15 +1585,15 @@ async def create_team(tournament_id: int, body: TeamCreate,
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "already_teamed",
                     "team_id": existing["id"],
-                    "message": f"You're already teamed up as {existing['name']}."},
+                    "message": f"Already teamed up as {existing['name']}."},
         )
-    name = f"{await _team_handle(me)} & {partner_label}"[:50]
+    name = f"{await _team_handle(player1)} & {partner_label}"[:50]
     if await db.get_team_by_name(DB_PATH, t["id"], name):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "team_name_taken"},
         )
-    team_id = await db.create_team(DB_PATH, t["id"], name, me,
+    team_id = await db.create_team(DB_PATH, t["id"], name, player1,
                                    partner_name=partner_name)
     for pid in partner_ids:
         await db.add_team_member(DB_PATH, team_id, pid)
@@ -1628,6 +1652,32 @@ async def tournament_players(tournament_id: int, user: CurrentUser) -> dict:
 # --------------------------------------------------------------------------
 # Tee times
 # --------------------------------------------------------------------------
+async def _resolve_team_rep(team: dict, user: dict, is_admin: bool) -> str:
+    """Who reps `team` when it goes on a tee time (Cayden 2026-10-12).
+
+    Only the team's creator reps it — for admin-created teams that's
+    Player 1. An admin putting someone else's team on a sheet doesn't
+    rep it themselves; the creator does. Raises 403 not_team_rep for a
+    member who didn't create the team, 403 not_on_team for anyone else.
+    """
+    caller = user["discord_id"]
+    if caller == team["created_by"] or is_admin:
+        return team["created_by"]
+    members = await db.get_team_members(DB_PATH, team["id"])
+    if any(m["discord_id"] == caller for m in members):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "not_team_rep",
+                    "message": "Only the team's creator can put it on a tee "
+                               "time — ask them or an admin."},
+        )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "not_on_team",
+                "message": "You're not on that team."},
+    )
+
+
 @app.get("/api/tournaments/{tournament_id}/tee-times")
 async def list_tee_times(tournament_id: int, user: CurrentUser) -> list[dict]:
     t = await _tournament_or_404(tournament_id)
@@ -1680,20 +1730,25 @@ async def create_tee_time(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "team_not_found"},
             )
-        members = await db.get_team_members(DB_PATH, team["id"])
-        if not any(m["discord_id"] == user["discord_id"] for m in members):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"code": "not_on_team",
-                        "message": "You're not on that team."},
-            )
+        # Only the team's creator reps it (Cayden 2026-10-12). An admin
+        # creating a tee time for a team doesn't rep it — the creator
+        # does, and the 3-team cap applies to the creator.
+        rep_id = user["discord_id"]
+        if rep_id != team["created_by"]:
+            early_admin = await fetch_admin_status(rep_id)
+            if early_admin is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Could not verify admin status — try again shortly.",
+                )
+            rep_id = await _resolve_team_rep(team, user, early_admin)
         n = await db.count_player_round_tee_times(
-            DB_PATH, t["id"], user["discord_id"], body.round_number)
+            DB_PATH, t["id"], rep_id, body.round_number)
         if n >= 3:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "round_cap",
-                        "message": "You're already repping 3 teams this round — that's the max."},
+                        "message": "The team's rep is already repping 3 teams this round — that's the max."},
             )
         # One sheet per team per round.
         other_tt = await db.find_team_round_tee_time(
@@ -1763,11 +1818,12 @@ async def create_tee_time(
         None,  # channel_id: bot-only field
         round_number=body.round_number,
     )
-    # Creator auto-joins their own tee time, like the bot — as their team's
-    # rep for team formats.
+    # The tee time's creator auto-joins their own tee time, like the bot.
+    # Team formats: the team's rep (its creator) takes the sheet slot —
+    # when an admin set the tee time up, that's not the admin.
     if is_team_format:
         join_result = await db.join_tee_time_as_team(
-            DB_PATH, tt_id, user["discord_id"], body.team_id)
+            DB_PATH, tt_id, rep_id, body.team_id)
         if join_result != "ok":  # pragma: no cover - pre-checked above
             await db.delete_tee_time(DB_PATH, tt_id)
             raise HTTPException(
@@ -1831,6 +1887,23 @@ async def join_tee_time(tee_time_id: int, user: CurrentUser,
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not verify admin status — try again shortly.",
         )
+    # Team formats: only the team's creator reps it (Cayden 2026-10-12).
+    # An admin adding a team puts the creator on the sheet, not
+    # themselves — unless the creator is already here repping another
+    # team (one row per player per sheet).
+    rep_id = user["discord_id"]
+    if is_team_format:
+        rep_id = await _resolve_team_rep(team, user, is_admin)
+        if rep_id != user["discord_id"]:
+            sheet = await db.get_tee_time_players(DB_PATH, tt["id"])
+            for p in sheet:
+                if p["discord_id"] == rep_id and p.get("team_id") != team_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={"code": "rep_on_sheet",
+                                "message": "The team's creator is already on "
+                                           "this tee time repping another team."},
+                    )
     if not is_admin:
         rnd = tt.get("round_number") or 1
         if is_team_format:
@@ -1851,7 +1924,7 @@ async def join_tee_time(tee_time_id: int, user: CurrentUser,
             await _require_previous_round_played(t["id"], user["discord_id"], rnd)
     if is_team_format:
         result = await db.join_tee_time_as_team(DB_PATH, tt["id"],
-                                               user["discord_id"], team_id)
+                                               rep_id, team_id)
     else:
         result = await db.join_tee_time(DB_PATH, tt["id"], user["discord_id"])
     if result == "missing":  # pragma: no cover - checked above
@@ -1879,12 +1952,18 @@ async def join_tee_time(tee_time_id: int, user: CurrentUser,
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "round_cap",
-                    "message": "You're already repping 3 teams this round — that's the max."},
+                    "message": "The team's rep is already repping 3 teams this round — that's the max."},
         )
     if result == "round_conflict":  # pragma: no cover - pre-checked above
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "round_conflict"},
+        )
+    if result == "team_round_conflict":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "team_round_conflict",
+                    "message": "That team is already on a tee time for this round."},
         )
     if result == "started":
         raise HTTPException(
@@ -2524,6 +2603,15 @@ async def request_join(tee_time_id: int, user: CurrentUser,
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"code": "not_on_team"},
             )
+        # Only the team's creator reps it (Cayden 2026-10-12) — a request
+        # would put the requester on the sheet as the rep.
+        if team["created_by"] != user["discord_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "not_team_rep",
+                        "message": "Only the team's creator can rep it on a "
+                                   "tee time — ask them or an admin."},
+            )
         team_id = team["id"]
     result = await db.create_join_request(DB_PATH, tt["id"], user["discord_id"],
                                          team_id=team_id)
@@ -2698,22 +2786,33 @@ async def get_scorecard(
     tt, t = await _tee_time_or_404(tee_time_id)
     cards = await db.get_scorecards(DB_PATH, t["id"])
     if team_id is not None:
-        # Shared team card (alt-shot / scramble / best ball).
+        # Shared team card (alt-shot / scramble), or one member's card
+        # when player_discord_id is also given (best ball).
         team = await db.get_team(DB_PATH, team_id)
         if team is None or team["tournament_id"] != t["id"]:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "team_not_found"},
             )
-        members = await db.get_team_members(DB_PATH, team_id)
+        # Cayden 2026-10-12: members of EITHER team on this tee time may
+        # view both teams' cards (the whole foursome keeps score).
         is_admin = await fetch_admin_status(user["discord_id"])
-        if not is_admin and not any(
-            m["discord_id"] == user["discord_id"] for m in members
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"code": "not_on_team"},
-            )
+        if not is_admin:
+            sheet_players = await db.get_tee_time_players(DB_PATH, tt["id"])
+            visible_team_ids = {p.get("team_id") for p in sheet_players} - {None}
+            visible_team_ids.add(team_id)
+            caller = user["discord_id"]
+            allowed = False
+            for vtid in visible_team_ids:
+                ms = await db.get_team_members(DB_PATH, vtid)
+                if any(m["discord_id"] == caller for m in ms):
+                    allowed = True
+                    break
+            if not allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"code": "not_on_team"},
+                )
         mine = next(
             (
                 c
@@ -2722,6 +2821,11 @@ async def get_scorecard(
                 and c.get("tee_time_id") == tt["id"]
                 and (round_number is None
                      or (c.get("round_number") or 1) == round_number)
+                and (
+                    c.get("player_discord_id") == player_discord_id
+                    if player_discord_id is not None
+                    else c.get("player_discord_id") is None
+                )
             ),
             None,
         )
@@ -2803,8 +2907,19 @@ async def put_scorecard(
         )
     if not is_admin:
         if is_team_format:
-            if not any(m["discord_id"] == user["discord_id"]
-                       for m in team_members):
+            # Cayden 2026-10-12: the whole foursome keeps score — a
+            # member of EITHER team on this tee time may enter/edit both
+            # teams' cards (only the reps are on the sheet; partners
+            # count through their team's rep row).
+            sheet_players = await db.get_tee_time_players(DB_PATH, tt["id"])
+            sheet_team_ids = {p.get("team_id") for p in sheet_players} - {None}
+            on_sheet_team = False
+            for stid in sheet_team_ids:
+                ms = await db.get_team_members(DB_PATH, stid)
+                if any(m["discord_id"] == user["discord_id"] for m in ms):
+                    on_sheet_team = True
+                    break
+            if not on_sheet_team:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail={"code": "not_on_team"},

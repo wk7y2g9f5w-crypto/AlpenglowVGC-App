@@ -75,8 +75,20 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
     } catch (_) {
       // Offline — crew actions just stay hidden.
     }
+    var teams = <Map<String, dynamic>>[];
+    if (_isTeamFormat) {
+      try {
+        teams = await _api.getTeams(widget.tournament.id);
+      } catch (_) {
+        // Team-aware actions just stay hidden.
+      }
+    }
     return _DetailData(
-        teeTime: tt, requests: requests, isCrew: isCrew, isAdmin: isAdmin);
+        teeTime: tt,
+        requests: requests,
+        isCrew: isCrew,
+        isAdmin: isAdmin,
+        teams: teams);
   }
 
   Future<void> _refresh() async {
@@ -100,12 +112,13 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
   bool get _isTeamFormat => const {'best_ball', 'alt_shot', 'scramble'}
       .contains(widget.tournament.format);
 
-  /// Join (or request to join) a tee time. Team formats ask which team the
-  /// player is repping first.
-  Future<void> _joinOrRequest(TeeTime tt, {required bool request}) async {
+  /// Join (or request to join) a tee time. Team formats ask which team
+  /// is being repped first.
+  Future<void> _joinOrRequest(TeeTime tt,
+      {required bool request, required bool isAdmin}) async {
     int? teamId;
     if (_isTeamFormat) {
-      teamId = await _pickTeam();
+      teamId = await _pickTeam(isAdmin: isAdmin);
       if (teamId == null) return;
     }
     if (request) {
@@ -116,31 +129,59 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
     }
   }
 
-  /// Team picker dialog: the user's teams for this tournament.
-  Future<int?> _pickTeam() async {    List<Map<String, dynamic>> teams;
+  bool _teamHasMember(Map<String, dynamic> tm, String discordId) =>
+      ((tm['members'] as List?) ?? [])
+          .whereType<Map<String, dynamic>>()
+          .any((m) => m['discord_id']?.toString() == discordId);
+
+  String _memberLabel(Map<String, dynamic> tm, String discordId) {
+    for (final m in ((tm['members'] as List?) ?? [])
+        .whereType<Map<String, dynamic>>()) {
+      if (m['discord_id']?.toString() == discordId) {
+        final handle = (m['golfplus_handle']?.toString() ?? '').trim();
+        if (handle.isNotEmpty) return handle;
+        return (m['display_name']?.toString() ?? '').trim();
+      }
+    }
+    return '';
+  }
+
+  /// Team picker dialog. Only a team's creator reps it (Cayden
+  /// 2026-10-12), so non-admins pick from teams they created; admins
+  /// may put any team on the sheet (its creator reps it).
+  Future<int?> _pickTeam({required bool isAdmin}) async {
+    List<Map<String, dynamic>> teams;
     try {
       teams = await _api.getTeams(widget.tournament.id);
     } on ApiException catch (e) {
       if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
       return null;
     }
-    final mine = teams
-        .where((tm) => ((tm['members'] as List?) ?? [])
-            .whereType<Map<String, dynamic>>()
-            .any((m) => m['discord_id']?.toString() == widget.myDiscordId))
-        .toList();
+    final pickable = isAdmin
+        ? teams
+        : teams
+            .where((tm) =>
+                tm['created_by']?.toString() == widget.myDiscordId)
+            .toList();
     if (!mounted) return null;
-    if (mine.isEmpty) {
-      showSnack(context, 'Form a team first (Teams tab on the tournament).',
+    if (pickable.isEmpty) {
+      showSnack(
+          context,
+          isAdmin
+              ? 'No teams yet — form one in the Teams tab.'
+              : 'Only a team\'s creator can rep it. Form a team first '
+                  '(Teams tab), or ask your team\'s creator or an admin.',
           error: true);
       return null;
     }
-    if (mine.length == 1) return (mine.first['id'] as num).toInt();
+    if (pickable.length == 1 && !isAdmin) {
+      return (pickable.first['id'] as num).toInt();
+    }
     return showDialog<int>(
       context: context,
       builder: (ctx) => SimpleDialog(
-        title: const Text('Which team are you repping?'),
-        children: mine
+        title: Text(isAdmin ? 'Add which team?' : 'Which team are you repping?'),
+        children: pickable
             .map((tm) => SimpleDialogOption(
                   onPressed: () =>
                       Navigator.of(ctx).pop((tm['id'] as num).toInt()),
@@ -151,20 +192,65 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
     );
   }
 
-  /// Launch score entry. Team formats open the shared team card for the
-  /// team the viewer is repping on this sheet.
+  /// Admin: put a team on this tee time. The team's creator becomes its
+  /// rep on the sheet (handled server-side).
+  Future<void> _addTeam(TeeTime tt, List<Map<String, dynamic>> teams) async {
+    final onSheet = tt.players.map((p) => p.teamId).whereType<int>().toSet();
+    final available =
+        teams.where((tm) => !onSheet.contains((tm['id'] as num?)?.toInt())).toList();
+    if (available.isEmpty) {
+      showSnack(context, 'Every team is already on a sheet or none exist yet.',
+          error: true);
+      return;
+    }
+    final picked = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Add team'),
+        children: available
+            .map((tm) => SimpleDialogOption(
+                  onPressed: () => Navigator.of(ctx).pop(tm),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(tm['name']?.toString() ?? 'Team'),
+                      Text(
+                        'Rep: ${_memberLabel(tm, tm['created_by']?.toString() ?? '')}',
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                ))
+            .toList(),
+      ),
+    );
+    if (picked == null) return;
+    await _act(
+        () => _api.joinTeeTime(tt.id,
+            teamId: (picked['id'] as num).toInt()),
+        'Team added.');
+  }
+
+  /// Launch score entry. Team formats open the grid with BOTH teams'
+  /// cards — anyone in the foursome (reps and partners alike) can enter
+  /// scores; the passed team is just the viewer's own when they have
+  /// one, else the first team on the sheet.
   void _enterScores(TeeTime tt) {
     int? teamId;
     String? teamName;
     if (_isTeamFormat) {
-      final me = tt.players.where(
-          (p) => p.discordId == widget.myDiscordId);
-      if (me.isNotEmpty) {
-        teamId = me.first.teamId;
-        teamName = me.first.teamName;
+      final me =
+          tt.players.where((p) => p.discordId == widget.myDiscordId);
+      final rows = me.isNotEmpty
+          ? me
+          : tt.players.where((p) => p.teamId != null);
+      if (rows.isNotEmpty) {
+        teamId = rows.first.teamId;
+        teamName = rows.first.teamName;
       }
       if (teamId == null) {
-        showSnack(context, 'No team found for you on this tee time.',
+        showSnack(context, 'No teams on this tee time yet.',
             error: true);
         return;
       }
@@ -422,6 +508,15 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
           final isCreator = tt.createdBy == widget.myDiscordId;
           final inIt =
               tt.players.any((p) => p.discordId == widget.myDiscordId);
+          // Team formats: partners aren't on the sheet, but everyone in
+          // the foursome can enter scores (Cayden 2026-10-12).
+          final sheetTeamIds =
+              tt.players.map((p) => p.teamId).whereType<int>().toSet();
+          final onSheetTeam = _isTeamFormat &&
+              data.teams.any((tm) =>
+                  sheetTeamIds.contains((tm['id'] as num?)?.toInt()) &&
+                  _teamHasMember(tm, widget.myDiscordId));
+          final canEnterScores = inIt || data.isAdmin || onSheetTeam;
           final pending = data.requests
               .where((r) => r.status.toLowerCase() == 'pending')
               .toList();
@@ -499,15 +594,26 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                 children: [
                   if (!inIt && !tt.isFull && !tt.isStarted)
                     ElevatedButton.icon(
-                      onPressed: () => _joinOrRequest(tt, request: false),
+                      onPressed: () => _joinOrRequest(tt,
+                          request: false, isAdmin: data.isAdmin),
                       icon: const Icon(Icons.add),
                       label: const Text('Join'),
                     ),
                   if (!inIt && tt.isFull && !tt.isStarted)
                     OutlinedButton.icon(
-                      onPressed: () => _joinOrRequest(tt, request: true),
+                      onPressed: () => _joinOrRequest(tt,
+                          request: true, isAdmin: data.isAdmin),
                       icon: const Icon(Icons.send),
                       label: const Text('Request to join'),
+                    ),
+                  if (_isTeamFormat &&
+                      data.isAdmin &&
+                      !tt.isStarted &&
+                      tt.players.length < 2)
+                    OutlinedButton.icon(
+                      onPressed: () => _addTeam(tt, data.teams),
+                      icon: const Icon(Icons.group_add),
+                      label: const Text('Add team (admin)'),
                     ),
                   if (tt.isStarted && !inIt)
                     const Padding(
@@ -555,7 +661,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       icon: const Icon(Icons.play_arrow),
                       label: const Text('Start Round (admin)'),
                     ),
-                  if (inIt && tt.isStarted)
+                  if (canEnterScores && tt.isStarted)
                     ElevatedButton.icon(
                       onPressed: () => _enterScores(tt),
                       icon: const Icon(Icons.scoreboard),
@@ -582,7 +688,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       icon: const Icon(Icons.verified, color: Colors.green),
                       label: const Text('Verify all (admin)'),
                     ),
-                  if (!inIt && !tt.isStarted)
+                  if (!canEnterScores && !tt.isStarted)
                     const Padding(
                       padding: EdgeInsets.only(top: 4),
                       child: Text(
@@ -665,9 +771,15 @@ class _DetailData {
   final List<TeeTimeRequest> requests;
   final bool isCrew;
   final bool isAdmin;
+
+  /// Tournament teams (team formats only) — used to tell whether the
+  /// viewer is on a team in this foursome (partners aren't on the sheet)
+  /// and for the admin Add team picker.
+  final List<Map<String, dynamic>> teams;
   _DetailData(
       {required this.teeTime,
       required this.requests,
       this.isCrew = false,
-      this.isAdmin = false});
+      this.isAdmin = false,
+      this.teams = const []});
 }

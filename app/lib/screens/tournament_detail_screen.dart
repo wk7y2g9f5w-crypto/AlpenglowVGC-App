@@ -844,28 +844,36 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                         return const Center(
                             child: CircularProgressIndicator());
                       }
-                      final mine = (snap.data ?? [])
-                          .where((tm) =>
-                              ((tm['members'] as List?) ?? [])
-                                  .whereType<Map<String, dynamic>>()
-                                  .any((m) =>
-                                      m['discord_id']?.toString() ==
-                                      data.me.discordId))
-                          .toList();
-                      if (mine.isEmpty) {
-                        return const Text(
-                          'Form a team first (Teams tab) — then book a tee time for it.',
-                          style: TextStyle(color: Colors.grey),
+                      // Only a team's creator reps it (Cayden 2026-10-12):
+                      // non-admins book teams they created; admins may
+                      // book any team (its creator reps it on the sheet).
+                      final all = snap.data ?? [];
+                      final pickable = data.me.isAdmin
+                          ? all
+                          : all
+                              .where((tm) =>
+                                  tm['created_by']?.toString() ==
+                                  data.me.discordId)
+                              .toList();
+                      if (pickable.isEmpty) {
+                        return Text(
+                          data.me.isAdmin
+                              ? 'No teams yet — form one in the Teams tab.'
+                              : 'Form a team first (Teams tab) — then book a '
+                                  'tee time for it. Only the team\'s creator '
+                                  'can book it.',
+                          style: const TextStyle(color: Colors.grey),
                         );
                       }
                       return DropdownButtonFormField<int>(
                         initialValue: pickedTeamId,
-                        decoration: const InputDecoration(
-                          labelText: 'Your team',
-                          border: OutlineInputBorder(),
+                        decoration: InputDecoration(
+                          labelText:
+                              data.me.isAdmin ? 'Team' : 'Your team',
+                          border: const OutlineInputBorder(),
                           isDense: true,
                         ),
-                        items: mine
+                        items: pickable
                             .map((tm) => DropdownMenuItem<int>(
                                   value: (tm['id'] as num).toInt(),
                                   child: Text(
@@ -1498,6 +1506,7 @@ class _TeamsTabState extends State<_TeamsTab> {
         api: _api,
         tournamentId: widget.tournament.id,
         myDiscordId: _myDiscordId ?? '',
+        adminMode: _isAdmin,
       ),
     );
     if (result == null) return;
@@ -1506,6 +1515,7 @@ class _TeamsTabState extends State<_TeamsTab> {
         widget.tournament.id,
         partnerDiscordId: result.discordId,
         partnerName: result.typedName,
+        playerDiscordId: result.player1Id,
       );
       if (!mounted) return;
       showSnack(context, 'Team formed — good luck!');
@@ -1633,26 +1643,32 @@ class _TeamsTabState extends State<_TeamsTab> {
   }
 }
 
-/// Partner choice from the form-team dialog: either a registered player
-/// (discordId) or a typed name.
+/// Team choice from the form-team dialog: the partner is either a
+/// registered player (discordId) or a typed name. player1Id is set only
+/// in admin mode — the admin picks Player 1, who becomes the team's
+/// creator and rep; everyone else forms a team as themselves.
 class _TeamPartner {
   final String? discordId;
   final String? typedName;
+  final String? player1Id;
 
-  const _TeamPartner({this.discordId, this.typedName});
+  const _TeamPartner({this.discordId, this.typedName, this.player1Id});
 }
 
 /// Dialog to form a team: pick a registered partner from the dropdown, or
-/// type a partner name for someone not in the app.
+/// type a partner name for someone not in the app. Admins additionally
+/// pick Player 1 (any registered player) instead of teaming themselves.
 class _FormTeamDialog extends StatefulWidget {
   final ApiClient api;
   final String tournamentId;
   final String myDiscordId;
+  final bool adminMode;
 
   const _FormTeamDialog({
     required this.api,
     required this.tournamentId,
     required this.myDiscordId,
+    this.adminMode = false,
   });
 
   @override
@@ -1662,6 +1678,7 @@ class _FormTeamDialog extends StatefulWidget {
 class _FormTeamDialogState extends State<_FormTeamDialog> {
   bool _typed = false;
   String? _pickedId;
+  String? _player1Id;
   final _nameCtrl = TextEditingController();
   Future<List<TournamentPlayer>>? _playersFuture;
 
@@ -1677,6 +1694,41 @@ class _FormTeamDialogState extends State<_FormTeamDialog> {
     super.dispose();
   }
 
+  /// Player 1 is the admin in admin mode until they pick someone;
+  /// otherwise it's always the person forming the team.
+  String get _effectivePlayer1 =>
+      widget.adminMode ? (_player1Id ?? '') : widget.myDiscordId;
+
+  DropdownButtonFormField<String> _playerDropdown({
+    required String label,
+    required String? value,
+    required List<TournamentPlayer> options,
+    required ValueChanged<String?> onChanged,
+    Key? key,
+  }) {
+    return DropdownButtonFormField<String>(
+      key: key,
+      initialValue: value,
+      decoration: InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+        isDense: true,
+      ),
+      items: options
+          .map((p) => DropdownMenuItem(
+                value: p.discordId,
+                child: Text(
+                  p.golfplusHandle.isNotEmpty
+                      ? p.golfplusHandle
+                      : p.displayName,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ))
+          .toList(),
+      onChanged: onChanged,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
@@ -1686,6 +1738,33 @@ class _FormTeamDialogState extends State<_FormTeamDialog> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (widget.adminMode) ...[
+              FutureBuilder<List<TournamentPlayer>>(
+                future: _playersFuture,
+                builder: (context, snap) {
+                  if (snap.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final options = (snap.data ?? [])
+                      .where((p) => p.registered)
+                      .toList();
+                  if (options.isEmpty) {
+                    return const Text('No registered players yet.',
+                        style: TextStyle(color: Colors.grey));
+                  }
+                  return _playerDropdown(
+                    label: 'Player 1 (team creator & rep)',
+                    value: _player1Id,
+                    options: options,
+                    onChanged: (v) => setState(() {
+                      _player1Id = v;
+                      if (_pickedId == v) _pickedId = null;
+                    }),
+                  );
+                },
+              ),
+              const SizedBox(height: 12),
+            ],
             SegmentedButton<bool>(
               segments: const [
                 ButtonSegment(
@@ -1698,8 +1777,7 @@ class _FormTeamDialogState extends State<_FormTeamDialog> {
                     icon: Icon(Icons.edit)),
               ],
               selected: {_typed},
-              onSelectionChanged: (s) =>
-                  setState(() => _typed = s.first),
+              onSelectionChanged: (s) => setState(() => _typed = s.first),
             ),
             const SizedBox(height: 12),
             if (_typed)
@@ -1716,43 +1794,36 @@ class _FormTeamDialogState extends State<_FormTeamDialog> {
               FutureBuilder<List<TournamentPlayer>>(
                 future: _playersFuture,
                 builder: (context, snap) {
-                  if (snap.connectionState ==
-                      ConnectionState.waiting) {
-                    return const Center(
-                        child: CircularProgressIndicator());
+                  if (snap.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
                   }
                   final options = (snap.data ?? [])
                       .where((p) =>
                           p.registered &&
-                          p.discordId != widget.myDiscordId)
+                          p.discordId != _effectivePlayer1)
                       .toList();
                   if (options.isEmpty) {
                     return const Text(
                         'No other registered players yet.',
                         style: TextStyle(color: Colors.grey));
                   }
-                  return DropdownButtonFormField<String>(
-                    initialValue: _pickedId,
-                    decoration: const InputDecoration(
-                      labelText: 'Partner',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    items: options
-                        .map((p) => DropdownMenuItem(
-                              value: p.discordId,
-                              child: Text(
-                                p.golfplusHandle.isNotEmpty
-                                    ? p.golfplusHandle
-                                    : p.displayName,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ))
-                        .toList(),
-                    onChanged: (v) =>
-                        setState(() => _pickedId = v),
+                  return _playerDropdown(
+                    key: ValueKey('partner-$_player1Id'),
+                    label: 'Partner',
+                    value: _pickedId,
+                    options: options,
+                    onChanged: (v) => setState(() => _pickedId = v),
                   );
                 },
+              ),
+            if (widget.adminMode)
+              const Padding(
+                padding: EdgeInsets.only(top: 10),
+                child: Text(
+                  'Player 1 becomes the team\'s creator — they\'re the '
+                  'one who reps it on tee times.',
+                  style: TextStyle(color: Colors.grey, fontSize: 12),
+                ),
               ),
           ],
         ),
@@ -1764,15 +1835,17 @@ class _FormTeamDialogState extends State<_FormTeamDialog> {
         ),
         FilledButton(
           onPressed: () {
+            if (widget.adminMode && _player1Id == null) return;
+            final p1 = widget.adminMode ? _player1Id : null;
             if (_typed) {
               final name = _nameCtrl.text.trim();
               if (name.isEmpty) return;
               Navigator.of(context)
-                  .pop(_TeamPartner(typedName: name));
+                  .pop(_TeamPartner(typedName: name, player1Id: p1));
             } else {
               if (_pickedId == null) return;
               Navigator.of(context)
-                  .pop(_TeamPartner(discordId: _pickedId));
+                  .pop(_TeamPartner(discordId: _pickedId, player1Id: p1));
             }
           },
           child: const Text('Form team'),

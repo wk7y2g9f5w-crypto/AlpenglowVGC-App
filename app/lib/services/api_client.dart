@@ -271,14 +271,21 @@ class ApiClient {
   }
 
   /// Form a 2-player team. Exactly one of partnerDiscordId (registered
-  /// player) or partnerName (typed name) is required.
+  /// player) or partnerName (typed name) is required. playerDiscordId is
+  /// Player 1 (admins forming a team for two other players); Player 1
+  /// becomes the team's creator and its only tee-sheet rep.
   Future<Map<String, dynamic>> createTeam(String tournamentId,
-      {String? partnerDiscordId, String? partnerName}) async {
+      {String? partnerDiscordId,
+      String? partnerName,
+      String? playerDiscordId}) async {
     final payload = <String, dynamic>{};
     if (partnerDiscordId != null) {
       payload['partner_discord_id'] = partnerDiscordId;
     }
     if (partnerName != null) payload['partner_name'] = partnerName;
+    if (playerDiscordId != null) {
+      payload['player_discord_id'] = playerDiscordId;
+    }
     final body =
         await _post('/api/tournaments/$tournamentId/teams', payload);
     return (body as Map<String, dynamic>?) ?? {};

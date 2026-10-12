@@ -18,7 +18,7 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS_DIR))
 
-from test_api import ApiTestCase, run, GUILD  # noqa: E402
+from test_api import ApiTestCase, run, GUILD, main  # noqa: E402
 
 from src import db  # noqa: E402
 
@@ -233,12 +233,13 @@ class TournamentTeamsApiTestCase(ApiTestCase):
     def test_team_already_repped(self):
         t1 = self._mk_team("1", partner_uid="2")
         tt = self._tt("1", t1["id"]).json()
-        # Partner tries to rep the same team on the same sheet.
+        # Cayden 2026-10-12: only the team's creator reps it — the
+        # partner can't put the team on a sheet at all.
         r = self.client.post(f"/api/tee-times/{tt['id']}/join",
                              headers=self.h("2"),
                              json={"team_id": t1["id"]})
-        self.assertEqual(r.status_code, 409)
-        self.assertEqual(r.json()["code"], "team_taken")
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["code"], "not_team_rep")
 
     def test_player_three_team_round_cap(self):
         teams = [self._mk_team("1", partner_uid=str(i))["id"]
@@ -254,15 +255,23 @@ class TournamentTeamsApiTestCase(ApiTestCase):
     def test_same_team_one_sheet_per_round(self):
         t1 = self._mk_team("1", partner_uid="2")
         tt1 = self._tt("1", t1["id"]).json()
-        # Partner reps the same team on a different sheet, same round ->
-        # blocked: one tee time per team per round.
+        # The creator books the same team on a different sheet, same
+        # round -> blocked: one tee time per team per round.
         r = self.client.post("/api/tournaments/{}/tee-times".format(self.tid),
-                             headers=self.h("2"),
+                             headers=self.h("1"),
                              json={"label": "B", "date": "2026-10-03",
                                    "time": "10:30", "max_players": 4,
                                    "team_id": t1["id"]})
         self.assertEqual(r.status_code, 409, r.text)
         self.assertEqual(r.json()["code"], "team_round_conflict")
+        # The partner can't book the team anywhere (not the rep).
+        r = self.client.post("/api/tournaments/{}/tee-times".format(self.tid),
+                             headers=self.h("2"),
+                             json={"label": "C", "date": "2026-10-03",
+                                   "time": "11:30", "max_players": 4,
+                                   "team_id": t1["id"]})
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.json()["code"], "not_team_rep")
 
     # -- team scorecards ----------------------------------------------
     def _start_and_card(self, tt_id, team_id, uid, scores=None):
@@ -317,7 +326,7 @@ class TournamentTeamsApiTestCase(ApiTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         # Same team, different sheet, same round -> blocked.
         r = self.client.post(
-            f"/api/tournaments/{self.tid}/tee-times", headers=self.h("2"),
+            f"/api/tournaments/{self.tid}/tee-times", headers=self.h("1"),
             json={"label": "B", "date": "2026-10-03", "time": "10:30",
                   "max_players": 4, "team_id": t1["id"]})
         self.assertEqual(r.status_code, 409, r.text)
@@ -390,6 +399,176 @@ class TournamentTeamsApiTestCase(ApiTestCase):
         # One row per player even across teams.
         self.assertEqual(
             len([r for r in rows if r["player_discord_id"] == "1"]), 1)
+
+    # -- admin team management (Cayden 2026-10-12) ---------------------
+    def _admin_only(self, uid):
+        async def fake(discord_id):
+            return discord_id == uid
+        main.fetch_admin_status = fake
+
+    def test_admin_forms_team_for_two_others(self):
+        self._ensure_alt()
+        self._admin_only("7")
+        r = self.client.post(f"/api/tournaments/{self.tid}/teams",
+                             headers=self.h("7"),
+                             json={"player_discord_id": "3",
+                                   "partner_discord_id": "4"})
+        self.assertEqual(r.status_code, 201, r.text)
+        team = r.json()
+        # Player 1 becomes the creator (and therefore the rep).
+        self.assertEqual(team["created_by"], "3")
+        self.assertEqual({m["discord_id"] for m in team["members"]},
+                         {"3", "4"})
+        self.assertEqual(team["name"], "Charlie & Delta")
+
+    def test_non_admin_cannot_form_team_for_others(self):
+        self._ensure_alt()
+        r = self.client.post(f"/api/tournaments/{self.tid}/teams",
+                             headers=self.h("2"),
+                             json={"player_discord_id": "3",
+                                   "partner_discord_id": "4"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["code"], "admin_only")
+
+    def test_admin_team_player1_must_be_registered(self):
+        self._ensure_alt()
+        self._admin_only("7")
+        r = self.client.post(f"/api/tournaments/{self.tid}/teams",
+                             headers=self.h("7"),
+                             json={"player_discord_id": "99",
+                                   "partner_discord_id": "4"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["code"], "not_registered")
+
+    def test_admin_adds_team_to_tee_time_creator_reps(self):
+        t1 = self._mk_team("1", partner_uid="2")
+        t2 = self._mk_team("3", partner_uid="4")
+        tt = self._tt("1", t1["id"]).json()
+        self._admin_only("7")
+        r = self.client.post(f"/api/tee-times/{tt['id']}/join",
+                             headers=self.h("7"),
+                             json={"team_id": t2["id"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.get(f"/api/tournaments/{self.tid}/tee-times",
+                            headers=self.h("7"))
+        sheet = next(x for x in r.json() if x["id"] == tt["id"])
+        reps = {p["discord_id"]: p.get("team_id")
+                for p in sheet["players"]}
+        self.assertEqual(reps.get("3"), t2["id"])  # creator reps
+        self.assertNotIn("7", reps)                # admin not on sheet
+
+    def test_admin_add_team_already_on_other_sheet_409(self):
+        t1 = self._mk_team("1", partner_uid="2")
+        t2 = self._mk_team("3", partner_uid="4")
+        tt1 = self._tt("1", t1["id"]).json()
+        self._tt("3", t2["id"])
+        self._admin_only("7")
+        r = self.client.post(f"/api/tee-times/{tt1['id']}/join",
+                             headers=self.h("7"),
+                             json={"team_id": t2["id"]})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["code"], "team_round_conflict")
+
+    def test_admin_creates_tee_time_for_team(self):
+        t2 = self._mk_team("3", partner_uid="4")
+        self._admin_only("7")
+        r = self.client.post(f"/api/tournaments/{self.tid}/tee-times",
+                             headers=self.h("7"),
+                             json={"label": "Admin sheet",
+                                   "date": "2026-10-03", "time": "08:00",
+                                   "max_players": 4,
+                                   "team_id": t2["id"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        players = r.json()["players"]
+        self.assertEqual([p["discord_id"] for p in players], ["3"])
+
+    def test_request_requires_creator(self):
+        t1 = self._mk_team("1", partner_uid="2")
+        t2 = self._mk_team("3", partner_uid="4")
+        tt = self._tt("3", t2["id"]).json()
+        r = self.client.post(f"/api/tee-times/{tt['id']}/request",
+                             headers=self.h("2"),
+                             json={"team_id": t1["id"]})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["code"], "not_team_rep")
+
+    def test_either_team_can_enter_both_cards(self):
+        t1 = self._mk_team("1", partner_uid="2")
+        t2 = self._mk_team("3", partner_uid="4")
+        tt = self._tt("1", t1["id"]).json()
+        r = self.client.post(f"/api/tee-times/{tt['id']}/join",
+                             headers=self.h("3"),
+                             json={"team_id": t2["id"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        run(db.start_tournament_tee_time(self.db_path, tt["id"], "1"))
+        # Partner of team 1 (not on the sheet) enters team 2's card.
+        r = self.client.put(f"/api/tee-times/{tt['id']}/scorecard",
+                            headers=self.h("2"),
+                            json={"team_id": t2["id"], "scores": [4] * 18,
+                                  "round_number": 1})
+        self.assertEqual(r.status_code, 200, r.text)
+        # Partner of team 2 can read team 1's card.
+        r = self.client.get(
+            f"/api/tee-times/{tt['id']}/scorecard?team_id={t1['id']}",
+            headers=self.h("4"))
+        self.assertEqual(r.status_code, 200, r.text)
+        # A registered player with no team on this sheet cannot enter.
+        r = self.client.put(f"/api/tee-times/{tt['id']}/scorecard",
+                            headers=self.h("5"),
+                            json={"team_id": t1["id"], "scores": [4] * 18,
+                                  "round_number": 1})
+        self.assertEqual(r.status_code, 403)
+
+    def test_best_ball_cards_are_per_player(self):
+        tid = run(
+            db.create_tournament(
+                self.db_path, GUILD, "Best Ball Open", "best_ball", 18,
+                "Pebble Beach Golf Links", PARS_18, "bb", "1",
+            )
+        )
+        for uid in ("1", "2"):
+            r = self.client.post(f"/api/tournaments/{tid}/register",
+                                 headers=self.h(uid))
+            self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(f"/api/tournaments/{tid}/teams",
+                             headers=self.h("1"),
+                             json={"partner_discord_id": "2"})
+        self.assertEqual(r.status_code, 201, r.text)
+        team = r.json()
+        r = self.client.post(f"/api/tournaments/{tid}/tee-times",
+                             headers=self.h("1"),
+                             json={"label": "BB", "date": "2026-10-03",
+                                   "time": "09:00", "max_players": 4,
+                                   "team_id": team["id"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        tt = r.json()
+        run(db.start_tournament_tee_time(self.db_path, tt["id"], "1"))
+        # Partner files their own best-ball card (player + team).
+        r = self.client.put(f"/api/tee-times/{tt['id']}/scorecard",
+                            headers=self.h("2"),
+                            json={"player_discord_id": "2",
+                                  "team_id": team["id"],
+                                  "scores": [3] * 18, "round_number": 1})
+        self.assertEqual(r.status_code, 200, r.text)
+        # The rep files a different card.
+        r = self.client.put(f"/api/tee-times/{tt['id']}/scorecard",
+                            headers=self.h("1"),
+                            json={"player_discord_id": "1",
+                                  "team_id": team["id"],
+                                  "scores": [5] * 18, "round_number": 1})
+        self.assertEqual(r.status_code, 200, r.text)
+        # GET with team + player returns THAT player's card.
+        r = self.client.get(
+            f"/api/tee-times/{tt['id']}/scorecard"
+            f"?team_id={team['id']}&player_discord_id=2",
+            headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["card"]["total"], 54)
+        r = self.client.get(
+            f"/api/tee-times/{tt['id']}/scorecard"
+            f"?team_id={team['id']}&player_discord_id=1",
+            headers=self.h("1"))
+        self.assertEqual(r.json()["card"]["total"], 90)
 
 
 del ApiTestCase
