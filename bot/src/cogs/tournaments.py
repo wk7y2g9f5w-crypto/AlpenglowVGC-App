@@ -391,6 +391,9 @@ class Tournaments(commands.Cog):
                         guild_id = t["guild_id"] if t else None
                     if guild_id:
                         await post_final_standings(self.bot, guild_id, tid)
+                        # Flip the pinned live board to Final Standings.
+                        await leaderboard_render.finalize_leaderboard(
+                            self.bot, self.bot.db_path, tid)
                 elif row["kind"] == "tournament_ended":
                     guild_id = row["payload"].get("guild_id")
                     if guild_id:
@@ -685,24 +688,31 @@ class Tournaments(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         await db.set_tournament_status(self.bot.db_path, t["id"], "in_progress")
-        embed = await leaderboard_render.build_leaderboard_embed(
-            self.bot.db_path, t["id"]
+        # The live board lives in #🏁leaderboard; fall back to the current
+        # channel when the guild hasn't created it yet.
+        from src.cogs.common import find_leaderboard_channel
+        lb_channel = find_leaderboard_channel(self.bot,
+                                              str(interaction.guild_id))
+        board_note = ""
+        if lb_channel is None:
+            lb_channel = interaction.channel
+            board_note = (" (no #🏁leaderboard channel — create one and run "
+                          "`/leaderboard post` there to move the board)")
+        ok, reason = await leaderboard_render.post_leaderboard(
+            self.bot, self.bot.db_path, str(interaction.guild_id),
+            t["id"], channel=lb_channel,
         )
-        msg = await interaction.channel.send(
-            content="🟢 **Tournament is live!** Good luck, everyone.",
-            embed=embed,
-        )
-        try:
-            await msg.pin()
-        except (discord.Forbidden, discord.HTTPException):
-            pass  # board still works unpinned
-        await db.set_leaderboard_message(
-            self.bot.db_path, t["id"], interaction.channel_id, msg.id
-        )
+        if not ok:
+            await interaction.followup.send(
+                f"⚠️ Tournament started, but the leaderboard board couldn't "
+                f"be posted ({reason}).",
+                ephemeral=True,
+            )
+            return
         await ts.maybe_refresh(self.bot, str(interaction.guild_id))
         await interaction.followup.send(
             f"✅ **{t['name']}** is now in progress. The leaderboard will update "
-            "automatically as scores come in.",
+            f"automatically as scores come in.{board_note}",
             ephemeral=True,
         )
 
@@ -757,6 +767,9 @@ class Tournaments(commands.Cog):
             print(f"season points award failed for tournament {t['id']}: {e}")
             season_msg = " (⚠️ season points could not be awarded — check the logs)"
         note = f" ({expired} pending join request(s) expired)" if expired else ""
+        # Flip the pinned live board to Final Standings (best-effort).
+        await leaderboard_render.finalize_leaderboard(
+            self.bot, self.bot.db_path, t["id"])
         await ts.maybe_refresh(self.bot, str(interaction.guild_id))
         await interaction.followup.send(
             f"✅ **{t['name']}** marked complete.{note}{season_msg}", ephemeral=True

@@ -166,6 +166,31 @@ def find_teesheet_channel(bot, guild_id):
     return None
 
 
+# Channel names accepted for the live leaderboard board and the
+# /leaderboard commands, in preference order. The emoji-prefixed form is
+# tried first (in case the guild uses it); "leaderboard" is the fallback.
+LEADERBOARD_CHANNEL_NAMES: tuple[str, ...] = (
+    "🏁leaderboard",
+    "leaderboard",
+)
+
+
+def find_leaderboard_channel(bot, guild_id):
+    """The guild's leaderboard channel, or None when it has none of the
+    accepted names."""
+    try:
+        guild = bot.get_guild(int(guild_id))
+    except (TypeError, ValueError):
+        return None
+    if guild is None:
+        return None
+    for name in LEADERBOARD_CHANNEL_NAMES:
+        channel = discord.utils.get(guild.text_channels, name=name)
+        if channel is not None:
+            return channel
+    return None
+
+
 # Commands that may only be invoked from a designated channel, mapped by
 # command key -> accepted channel names (first is the display name). The
 # gate is strict: when the guild has no channel with any of those names,
@@ -173,6 +198,7 @@ def find_teesheet_channel(bot, guild_id):
 # isn't set up for it) rather than running elsewhere.
 DESIGNATED_CHANNELS: dict[str, tuple[str, ...]] = {
     "tee_sheet": TEESHEET_CHANNEL_NAMES,
+    "leaderboard": LEADERBOARD_CHANNEL_NAMES,
 }
 
 

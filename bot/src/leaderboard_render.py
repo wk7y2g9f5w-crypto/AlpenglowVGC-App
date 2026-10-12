@@ -798,3 +798,66 @@ async def refresh_leaderboard(bot, db_path: str, tournament_id: int) -> bool:
         return True
     except Exception:
         return False
+
+
+async def post_leaderboard(bot, db_path: str, guild_id: str,
+                           tournament_id: int,
+                           channel=None) -> tuple[bool, str]:
+    """Post (and pin) the live leaderboard board for a tournament.
+
+    Finds #🏁leaderboard (emoji-first, plain fallback) when no channel is
+    given. Stores the channel/message IDs on the tournament row so the
+    auto-refresh can edit it in place. Returns (ok, reason).
+    """
+    from src.cogs.common import find_leaderboard_channel
+    t = await db.get_tournament(db_path, tournament_id)
+    if t is None:
+        return False, "tournament not found"
+    if t.get("status") == "completed":
+        return False, "tournament is already complete"
+    if channel is None:
+        channel = find_leaderboard_channel(bot, guild_id)
+        if channel is None:
+            return False, "no #🏁leaderboard channel"
+    embed = await build_leaderboard_embed(db_path, tournament_id)
+    if embed is None:
+        return False, "could not build leaderboard"
+    try:
+        msg = await channel.send(
+            content=f"📊 **{t['name']}** — live leaderboard:",
+            embed=embed,
+        )
+    except Exception as e:  # noqa: BLE001 - send failure is reported
+        return False, f"could not post: {e}"
+    try:
+        await msg.pin()
+    except Exception:
+        pass  # board still works unpinned
+    await db.set_leaderboard_message(db_path, tournament_id,
+                                     channel.id, msg.id)
+    return True, ""
+
+
+async def finalize_leaderboard(bot, db_path: str, tournament_id: int) -> bool:
+    """Flip the pinned board to Final Standings. Never raises."""
+    try:
+        t = await db.get_tournament(db_path, tournament_id)
+        if not t or not t.get("leaderboard_channel_id") or not t.get("leaderboard_message_id"):
+            return False
+        channel = bot.get_channel(int(t["leaderboard_channel_id"]))
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(int(t["leaderboard_channel_id"]))
+            except Exception:
+                return False
+        try:
+            message = await channel.fetch_message(int(t["leaderboard_message_id"]))
+        except Exception:
+            return False
+        embed = await build_leaderboard_embed(db_path, tournament_id, final=True)
+        if embed is None:
+            return False
+        await message.edit(embed=embed)
+        return True
+    except Exception:
+        return False
