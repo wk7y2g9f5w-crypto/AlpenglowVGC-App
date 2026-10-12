@@ -4,6 +4,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
+import '../widgets/scorecard_grid.dart';
 
 /// Enter (or edit) a team's 18-hole alt-shot score. Submitted once — not a
 /// live scorecard. The team needs both players attached to submit.
@@ -25,26 +26,30 @@ class AltShotScoreScreen extends StatefulWidget {
 }
 
 class _AltShotScoreScreenState extends State<AltShotScoreScreen> {
-  late List<int> _holes;
+  late List<int?> _holes;
   bool _saving = false;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
+
+  List<int> get _pars {
+    final pars = widget.teeTime.pars;
+    return List<int>.generate(18, (i) => pars.length == 18 ? pars[i] : 4);
+  }
 
   @override
   void initState() {
     super.initState();
     final existing = widget.team.score;
     if (existing != null && existing.holes.length == 18) {
-      _holes = List<int>.from(existing.holes);
+      _holes = List<int?>.from(existing.holes);
     } else {
-      final pars = widget.teeTime.pars;
-      _holes = List<int>.generate(
-          18, (i) => pars.length == 18 ? pars[i] : 4);
+      // Fresh card starts at par on every hole (unchanged behavior).
+      _holes = List<int?>.from(_pars);
     }
   }
 
-  int get _total => _holes.reduce((a, b) => a + b);
+  int get _total => _holes.fold<int>(0, (a, b) => a + (b ?? 0));
 
   String get _toParLine {
     final pars = widget.teeTime.pars;
@@ -71,7 +76,7 @@ class _AltShotScoreScreenState extends State<AltShotScoreScreen> {
     setState(() => _saving = true);
     try {
       await _api.submitAltShotScore(
-          widget.teeTime.id, widget.team.id, _holes);
+          widget.teeTime.id, widget.team.id, _holes.map((s) => s ?? 4).toList());
       if (mounted) Navigator.of(context).pop(true);
     } on ApiException catch (e) {
       if (mounted) showSnack(context, e.message, error: true);
@@ -82,7 +87,6 @@ class _AltShotScoreScreenState extends State<AltShotScoreScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pars = widget.teeTime.pars;
     return Scaffold(
       appBar: AppBar(title: Text(widget.team.score == null
           ? 'Enter Team Score'
@@ -111,49 +115,19 @@ class _AltShotScoreScreenState extends State<AltShotScoreScreen> {
             ),
           ),
           Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: 18,
-              itemBuilder: (context, i) {
-                final par = pars.length == 18 ? pars[i] : 4;
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 6),
-                  child: ListTile(
-                    dense: true,
-                    title: Text('Hole ${i + 1}',
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w600)),
-                    subtitle: Text('Par $par',
-                        style: const TextStyle(fontSize: 12)),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.remove_circle_outline),
-                          onPressed: _holes[i] > 1
-                              ? () =>
-                                  setState(() => _holes[i]--)
-                              : null,
-                        ),
-                        SizedBox(
-                          width: 36,
-                          child: Text('${_holes[i]}',
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold)),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.add_circle_outline),
-                          onPressed: _holes[i] < 20
-                              ? () =>
-                                  setState(() => _holes[i]++)
-                              : null,
-                        ),
-                      ],
-                    ),
-                  ),
-                );
+            child: ScorecardGrid(
+              cards: [
+                ScorecardGridCard(
+                  title: widget.team.displayName,
+                  scores: _holes,
+                ),
+              ],
+              pars: _pars,
+              holeCount: 18,
+              allowClear: false,
+              customMax: 20,
+              onScore: (card, hole, score) {
+                if (score != null) setState(() => _holes[hole] = score);
               },
             ),
           ),

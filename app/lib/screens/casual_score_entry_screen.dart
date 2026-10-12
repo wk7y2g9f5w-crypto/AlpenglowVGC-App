@@ -6,16 +6,16 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
-import '../widgets/score_badge.dart';
+import '../widgets/scorecard_grid.dart';
 import '../widgets/shot_tracker.dart';
 import 'shot_review_screen.dart';
 
 /// Score entry for a casual stroke / best-ball round.
 ///
-/// Same hole-by-hole entry UX as the tournament screen, minus rounds and
-/// tee-time gates: a casual round is a single 18-hole card per player.
-/// Cards are self-attested — submitting marks the card verified directly,
-/// and it feeds the same optional stats + handicap as tournament cards.
+/// Grid scorecard: every player's card on one tab, tap a cell to enter.
+/// A casual round is a single 18-hole card per player. Cards are
+/// self-attested — submitting marks the card verified directly, and it
+/// feeds the same optional stats + handicap as tournament cards.
 class CasualScoreEntryScreen extends StatefulWidget {
   final AuthService auth;
   final SettingsService settings;
@@ -35,23 +35,33 @@ class CasualScoreEntryScreen extends StatefulWidget {
       _CasualScoreEntryScreenState();
 }
 
+/// One player's card in the grid.
+class _CardState {
+  final CasualPlayer player;
+  List<int?> scores;
+  String? status; // null | in_progress | verified
+  int? cardId;
+  String witness = '';
+  bool editedAfterSubmit = false;
+
+  _CardState(this.player)
+      : scores = List<int?>.filled(_CasualScoreEntryScreenState._holeCount, null);
+
+  bool get complete => !scores.any((s) => s == null);
+  bool get submitted => status == 'verified';
+  bool get submittable => complete && (!submitted || editedAfterSubmit);
+  int get entered => scores.where((s) => s != null).length;
+}
+
 class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
   static const _holeCount = 18;
 
-  CasualPlayer? _player;
-  late List<int?> _scores;
-  int _hole = 0; // 0-based current hole
+  late List<_CardState> _cards;
   bool _loading = true;
   bool _submitting = false;
-  String? _existingStatus;
-  final _witnessCtrl = TextEditingController();
-  int _loadSeq = 0;
-  Timer? _saveTimer;
+  final Map<int, Timer> _saveTimers = {};
   bool _saving = false;
   bool _saveFailed = false;
-
-  /// Scorecard id from the server — the key for the shots endpoints.
-  int? _cardId;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -74,160 +84,86 @@ class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
     }
   }
 
+  String _cardTitle(_CardState card) => golferDisplayName(
+      card.player.displayName, card.player.golfplusHandle);
+
   @override
   void initState() {
     super.initState();
-    _scores = List<int?>.filled(_holeCount, null);
-    // Select my own chip when I'm in the round, otherwise the first
-    // player — the card loaded below always belongs to the selected chip.
-    final players = widget.teeTime.players;
-    _player = players.isNotEmpty
-        ? players.firstWhere((p) => p.discordId == widget.myDiscordId,
-            orElse: () => players.first)
-        : null;
-    _loadCard(_player?.discordId).then((_) {
+    _cards = [for (final p in widget.teeTime.players) _CardState(p)];
+    Future.wait([
+      for (var i = 0; i < _cards.length; i++) _loadCard(i)
+    ]).then((_) {
       if (mounted) setState(() => _loading = false);
     });
   }
 
   @override
   void dispose() {
-    _saveTimer?.cancel();
-    _witnessCtrl.dispose();
+    for (final t in _saveTimers.values) {
+      t.cancel();
+    }
     super.dispose();
   }
 
-  /// First hole with no score entered, or 0 when the card is blank or
-  /// fully scored. Used so switching players lands on their next
-  /// unscored hole instead of always resetting to hole 1.
-  int _firstUnscoredHole(List<int?> scores) {
-    final idx = scores.indexWhere((s) => s == null);
-    return idx >= 0 ? idx : 0;
-  }
-
-  /// Load the saved card (if any) for [playerDiscordId] (null = me).
-  Future<void> _loadCard(String? playerDiscordId) async {    final seq = ++_loadSeq;
+  Future<void> _loadCard(int i) async {
+    final card = _cards[i];
     try {
-      final card = await _api.getCasualScorecard(widget.teeTime.id,
-          playerDiscordId: playerDiscordId);
-      if (!mounted || seq != _loadSeq) return;
-      if (card != null && card.scores.length == _holeCount) {
+      final sc = await _api.getCasualScorecard(widget.teeTime.id,
+          playerDiscordId: card.player.discordId);
+      if (!mounted) return;
+      if (sc != null && sc.scores.length == _holeCount) {
         setState(() {
-          _scores = card.scores.map<int?>((s) => s).toList();
-          _existingStatus = card.status;
-          _witnessCtrl.text = card.witnessName ?? '';
-          _cardId = card.id;
-          _hole = _firstUnscoredHole(_scores);
-          final match = widget.teeTime.players
-              .where((p) => p.discordId == card.playerDiscordId);
-          if (match.isNotEmpty) _player = match.first;
+          card.scores = sc.scores.map<int?>((s) => s).toList();
+          card.status = sc.status;
+          card.witness = sc.witnessName ?? '';
+          card.cardId = sc.id;
+          card.editedAfterSubmit = false;
         });
-      } else {
-        _blankCard();
       }
     } on ApiException {
-      if (mounted && seq == _loadSeq) _blankCard();
+      // No existing card or unreadable; leave the column blank.
     }
   }
 
-  void _blankCard() {
+  void _onScore(int i, int hole, int? score) {
+    final card = _cards[i];
     setState(() {
-      _scores = List<int?>.filled(_holeCount, null);
-      _existingStatus = null;
-      _witnessCtrl.clear();
-      _cardId = null;
-      _hole = 0;
+      card.scores[hole] = score;
+      if (card.submitted) card.editedAfterSubmit = true;
     });
+    _scheduleSave(i);
   }
 
-  /// Switch to another player's scorecard. Flushes any pending debounced
-  /// live save first so a quick switch can't drop a just-entered score.
-  Future<void> _pickPlayer(CasualPlayer p) async {
-    if (p.discordId == _player?.discordId) return;
-    _saveTimer?.cancel();
-    if (_player != null) await _liveSave();
-    if (!mounted) return;
-    setState(() {
-      _player = p;
-      _loading = true;
-    });
-    _loadCard(p.discordId).then((_) {
-      if (mounted) setState(() => _loading = false);
-    });
-  }
-
-  int? get _total {
-    if (_scores.any((s) => s == null)) return null;
-    return _scores.fold<int>(0, (a, b) => a + (b ?? 0));
-  }
-
-  int? get _toPar {
-    final pars = _pars;
-    final total = _total;
-    if (pars == null || total == null) return null;
-    return total - pars.fold<int>(0, (a, b) => a + b);
-  }
-
-  String _toParLabel() {
-    final tp = _toPar;
-    if (tp == null) return '';
-    if (tp == 0) return 'E';
-    return tp > 0 ? '+$tp' : '$tp';
-  }
-
-  /// Front-nine (holes 1-9) running total. Null until all nine are scored.
-  int? get _outTotal {
-    if (_holeCount < 9) return null;
-    final nine = _scores.take(9);
-    if (nine.any((s) => s == null)) return null;
-    return nine.fold<int>(0, (a, b) => a + (b ?? 0));
-  }
-
-  /// Back-nine (holes 10-18) running total. Null until all nine are scored.
-  int? get _inTotal {
-    if (_holeCount < 18) return null;
-    final nine = _scores.skip(9).take(9);
-    if (nine.any((s) => s == null)) return null;
-    return nine.fold<int>(0, (a, b) => a + (b ?? 0));
-  }
-
-  void _enterScore(int score) {
-    if (_locked) return;
-    setState(() {
-      _scores[_hole] = score;
-      if (_hole < _holeCount - 1) _hole++;
-    });
-    _scheduleLiveSave();
-  }
-
-  /// Debounced live save: each entered hole is persisted to the server
-  /// (in_progress card) shortly after entry, so the leaderboard moves
-  /// hole by hole. Best-effort — the next save retries whatever failed.
-  void _scheduleLiveSave() {
+  /// Debounced live save per card: each entered hole is persisted to the
+  /// server (in_progress card) shortly after entry, so the casual
+  /// leaderboard moves hole by hole. Best-effort — the next save retries.
+  void _scheduleSave(int i) {
     if (_locked || _submitting) return;
-    _saveTimer?.cancel();
-    _saveTimer = Timer(const Duration(milliseconds: 800), _liveSave);
+    _saveTimers[i]?.cancel();
+    _saveTimers[i] =
+        Timer(const Duration(milliseconds: 800), () => _liveSave(i));
   }
 
-  Future<void> _liveSave() async {
-    final player = _player;
-    if (player == null || _locked || _submitting) return;
-    if (!_scores.any((s) => s != null)) return;
+  Future<void> _liveSave(int i) async {
+    final card = _cards[i];
+    if (_locked || _submitting) return;
+    if (!card.scores.any((s) => s != null)) return;
     setState(() {
       _saving = true;
       _saveFailed = false;
     });
     try {
-      final card = await _api.submitCasualScorecard(
+      final sc = await _api.submitCasualScorecard(
         widget.teeTime.id,
-        player.discordId,
-        List<int?>.from(_scores),
+        card.player.discordId,
+        List<int?>.from(card.scores),
       );
       if (!mounted) return;
       setState(() {
         _saving = false;
-        _existingStatus ??= card.status;
-        _cardId ??= card.id;
+        card.status ??= sc.status;
+        card.cardId ??= sc.id;
       });
     } catch (_) {
       if (mounted) {
@@ -239,140 +175,45 @@ class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
     }
   }
 
-  Future<void> _customScore() async {
-    final ctrl =
-        TextEditingController(text: _scores[_hole]?.toString() ?? '');
-    final val = await showDialog<int>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Hole ${_hole + 1} — custom score'),
-        content: TextField(
-          controller: ctrl,
-          keyboardType: TextInputType.number,
-          autofocus: true,
-          decoration: const InputDecoration(
-              labelText: 'Strokes (1–15)', border: OutlineInputBorder()),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () {
-              final n = int.tryParse(ctrl.text.trim());
-              if (n == null || n < 1 || n > 15) {
-                showSnack(ctx, 'Enter a number from 1 to 15.', error: true);
-                return;
-              }
-              Navigator.of(ctx).pop(n);
-            },
-            child: const Text('Set'),
-          ),
-        ],
-      ),
-    );
-    if (val != null) _enterScore(val);
-  }
-
-  Future<void> _submit() async {
-    if (_player == null) return;
-    final toPar = _toParLabel();
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Submit scorecard?'),
-        content: Text(
-          'All scores entered are final.\n\n'
-          '${golferDisplayName(_player!.displayName, _player!.golfplusHandle)}: '
-          'total ${_total ?? '–'}'
-          '${toPar.isNotEmpty ? ' ($toPar)' : ''}'
-          '${_witnessCtrl.text.trim().isNotEmpty ? '\nWitness: ${_witnessCtrl.text.trim()}' : ''}',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Keep editing'),
-          ),
-          // Opens above the dialog; the dialog is still here when the
-          // review closes.
-          if (_cardId != null)
-            TextButton(
-              onPressed: () => _openShotReview(),
-              child: const Text('Review shots'),
-            ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Submit'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    setState(() => _submitting = true);
-    try {
-      final card = await _api.submitCasualScorecard(
-        widget.teeTime.id,
-        _player!.discordId,
-        _scores.map((s) => s!).toList(),
-        complete: true,
-        witnessName: _witnessCtrl.text,
-      );
-      if (mounted) {
-        setState(() {
-          _existingStatus = card.status;
-          _cardId ??= card.id;
-        });
-        showSnack(context, 'Casual scorecard submitted.');
-        Navigator.of(context).pop(true);
-      }
-    } on ApiException catch (e) {
-      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
-    } catch (e) {
-      if (mounted) showSnack(context, 'Submit failed: $e', error: true);
-    } finally {
-      if (mounted) setState(() => _submitting = false);
-    }
-  }
-
   /// Create the in-progress scorecard on first use (all-null scores are a
   /// valid live partial save) so shot tracking doesn't wait for a manually
   /// entered score. Returns the card id, or null on failure.
-  Future<int?> _ensureCard() async {
-    final player = _player;
-    if (player == null || _locked || _submitting) return null;
+  Future<int?> _ensureCard(int i) async {
+    final card = _cards[i];
+    if (card.cardId != null) return card.cardId;
+    if (_locked || _submitting) return null;
     try {
-      final card = await _api.submitCasualScorecard(
+      final sc = await _api.submitCasualScorecard(
         widget.teeTime.id,
-        player.discordId,
-        List<int?>.from(_scores),
+        card.player.discordId,
+        List<int?>.from(card.scores),
       );
       if (!mounted) return null;
       setState(() {
-        _existingStatus ??= card.status;
-        _cardId ??= card.id;
+        card.status ??= sc.status;
+        card.cardId ??= sc.id;
       });
-      return _cardId;
+      return card.cardId;
     } on ApiException catch (e) {
       if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
       return null;
     } catch (e) {
       if (mounted) {
-        showSnack(context, 'Could not start shot tracking: $e', error: true);
+        showSnack(context, 'Could not start shot tracking: $e',
+            error: true);
       }
       return null;
     }
   }
 
-  /// Opt-in shot tracking for the current hole. Always available — the
-  /// scorecard is created on first use if needed. A finished (holed)
-  /// tracking session writes its stroke count as the hole's score, so
-  /// tracking doubles as score entry; an unfinished or untouched session
-  /// leaves the score alone.
-  Future<void> _openShotTracker() async {
-    var cardId = _cardId;
-    cardId ??= await _ensureCard();
+  /// Opt-in shot tracking for one card + hole. A finished (holed) tracking
+  /// session writes its stroke count as the hole's score, so tracking
+  /// doubles as score entry.
+  Future<void> _trackShots(int i, int hole) async {
+    final card = _cards[i];
+    var cardId = card.cardId;
+    cardId ??= await _ensureCard(i);
     if (cardId == null || !mounted) return;
-    final hole = _hole;
     final tracked = await showShotTracker(
       context: context,
       api: _api,
@@ -380,44 +221,101 @@ class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
       courseName: widget.teeTime.course,
       holeNumber: hole + 1,
       par: _pars?[hole] ?? 4,
-      strokes: _scores[hole],
+      strokes: card.scores[hole],
     );
     if (tracked != null && mounted) {
-      setState(() => _scores[hole] = tracked);
-      _scheduleLiveSave();
+      _onScore(i, hole, tracked);
     }
   }
 
-  /// Read-only review of every hole's tracked shots, loaded fresh from
-  /// the server — for checking the maps before submitting.
-  Future<void> _openShotReview() async {
-    final cardId = _cardId;
-    if (cardId == null) return;
+  /// Read-only review of a card's tracked shots.
+  Future<void> _reviewShots(int i) async {
+    final card = _cards[i];
+    if (card.cardId == null) return;
     await showShotReview(
       context: context,
       api: _api,
-      cardId: cardId,
+      cardId: card.cardId!,
       courseName: widget.teeTime.course,
       pars: _pars ?? List.filled(_holeCount, 4),
-      strokes: List.of(_scores),
+      strokes: List.of(card.scores),
     );
+  }
+
+  int? _total(_CardState card) {
+    if (!card.complete) return null;
+    return card.scores.fold<int>(0, (a, b) => a + (b ?? 0));
+  }
+
+  String _toParLabel(_CardState card) {
+    final pars = _pars;
+    final total = _total(card);
+    if (pars == null || total == null) return '';
+    final tp = total - pars.fold<int>(0, (a, b) => a + b);
+    if (tp == 0) return 'E';
+    return tp > 0 ? '+$tp' : '$tp';
+  }
+
+  /// One submit for everyone: every complete, not-yet-submitted card (plus
+  /// edited submitted cards) goes in a single confirmation.
+  Future<void> _submitAll() async {
+    final result = await showDialog<Map<int, String>>(
+      context: context,
+      builder: (_) => _SubmitAllDialog(
+        cards: _cards,
+        titles: [for (final c in _cards) _cardTitle(c)],
+        totals: [for (final c in _cards) _total(c)],
+        toParLabels: [for (final c in _cards) _toParLabel(c)],
+      ),
+    );
+    if (result == null || result.isEmpty) return;
+    setState(() => _submitting = true);
+    var ok = 0;
+    final failures = <String>[];
+    for (final entry in result.entries) {
+      final card = _cards[entry.key];
+      _saveTimers[entry.key]?.cancel();
+      try {
+        final sc = await _api.submitCasualScorecard(
+          widget.teeTime.id,
+          card.player.discordId,
+          card.scores.map((s) => s!).toList(),
+          complete: true,
+          witnessName: entry.value,
+        );
+        card.status = sc.status;
+        card.cardId ??= sc.id;
+        card.editedAfterSubmit = false;
+        card.witness = entry.value;
+        ok++;
+      } on ApiException catch (e) {
+        failures.add('${_cardTitle(card)}: ${friendlyApiMessage(e)}');
+      } catch (e) {
+        failures.add('${_cardTitle(card)}: $e');
+      }
+    }
+    if (!mounted) return;
+    setState(() => _submitting = false);
+    if (failures.isNotEmpty) {
+      showSnack(
+          context,
+          'Submitted $ok card${ok == 1 ? '' : 's'}. Failed: '
+          '${failures.join('; ')}',
+          error: true);
+    } else {
+      showSnack(
+          context,
+          ok == 1 ? 'Casual scorecard submitted.' : '$ok scorecards submitted.');
+    }
+    if (_cards.every((c) => c.submitted)) {
+      Navigator.of(context).pop(true);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-          title: Text('Enter scores — ${widget.teeTime.formatLabel}'),
-          actions: [
-            // Quiet entry to the shot-map review. Only once the scorecard
-            // exists server-side (same gate as shot tracking).
-            if (_cardId != null)
-              IconButton(
-                icon: const Icon(Icons.map_outlined),
-                tooltip: 'Review tracked shots',
-                onPressed: _openShotReview,
-              ),
-          ]),
+      appBar: AppBar(title: Text('Enter scores — ${widget.teeTime.formatLabel}')),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _locked
@@ -451,277 +349,173 @@ class _CasualScoreEntryScreenState extends State<CasualScoreEntryScreen> {
   }
 
   Widget _entryBody() {
-    final pars = _pars;
-    final par = pars != null ? pars[_hole] : null;
-    final complete = !_scores.any((s) => s == null);
-
+    final readyCount = _cards.where((c) => c.submittable).length;
     return Column(
       children: [
-        // Header: player chips (every player in the round, always
-        // visible) + running total / to-par. Tapping a chip switches to
-        // that player's scorecard instantly.
-        Container(
-          padding: const EdgeInsets.all(12),
-          color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          child: Row(
-            children: [
-              Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: widget.teeTime.players.map((p) {
-                      final selected = p.discordId == _player?.discordId;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(golferDisplayName(
-                              p.displayName, p.golfplusHandle)),
-                          selected: selected,
-                          onSelected: (_) => _pickPlayer(p),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text('Total ${_total ?? '–'}',
-                      style: const TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.bold)),
-                  Text(_toParLabel(),
-                      style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: (_toPar ?? 0) <= 0
-                              ? Colors.green.shade700
-                              : Colors.red.shade700)),
-                  if (_outTotal != null || _inTotal != null)
-                    Text(
-                      'Out ${_outTotal ?? '–'} · In ${_inTotal ?? '–'}',
-                      style: TextStyle(
-                          fontSize: 13,
-                          color:
-                              Theme.of(context).colorScheme.onSurfaceVariant),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        // Hole strip: hole number + score in standard golf notation.
-        // Tap a hole to jump to it.
-        SizedBox(
-          height: 70,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            itemCount: _holeCount,
-            itemBuilder: (context, i) {
-              final score = _scores[i];
-              final holePar = pars != null ? pars[i] : null;
-              final current = i == _hole;
-              final scheme = Theme.of(context).colorScheme;
-              return GestureDetector(
-                onTap: () => setState(() => _hole = i),
-                child: Container(
-                  width: 54,
-                  margin: const EdgeInsets.symmetric(horizontal: 2),
-                  decoration: BoxDecoration(
-                    color: current ? scheme.primaryContainer : null,
-                    borderRadius: BorderRadius.circular(10),
-                    border: current
-                        ? Border.all(color: scheme.primary, width: 1.5)
-                        : null,
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        '${i + 1}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: scheme.onSurfaceVariant,
-                          fontWeight:
-                              current ? FontWeight.bold : FontWeight.normal,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      score != null
-                          ? ScoreBadge(score: score, par: holePar, size: 30)
-                          : Container(
-                              width: 30,
-                              height: 30,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: scheme.outlineVariant,
-                                  width: 1,
-                                ),
-                              ),
-                            ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
+        Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 2),
+          child: _saving
+              ? const Text('Saving…',
+                  style: TextStyle(fontSize: 12, color: Colors.grey))
+              : _saveFailed
+                  ? const Text('Save failed — will retry on next entry',
+                      style: TextStyle(fontSize: 12, color: Colors.red))
+                  : _cards.any((c) => c.entered > 0)
+                      ? const Text('⛳ Live — scores save as you enter them',
+                          style:
+                              TextStyle(fontSize: 12, color: Colors.green))
+                      : const SizedBox(height: 15),
         ),
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                        'Hole ${_hole + 1}${par != null ? ' · Par $par' : ''}',
-                        style: const TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold)),
-                    const SizedBox(width: 2),
-                    Tooltip(
-                      message: 'Track shots for this hole (optional)',
-                      child: TextButton.icon(
-                        onPressed: _openShotTracker,
-                        icon: const Icon(Icons.timeline, size: 15),
-                        label: const Text('Track shots',
-                            style: TextStyle(fontSize: 12)),
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.grey.shade600,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8),
-                          minimumSize: Size.zero,
-                          tapTargetSize:
-                              MaterialTapTargetSize.shrinkWrap,
-                        ),
-                      ),
-                    ),
-                  ],
+          child: ScorecardGrid(
+            cards: [
+              for (final card in _cards)
+                ScorecardGridCard(
+                  title: _cardTitle(card),
+                  scores: card.scores,
+                  submitted: card.submitted,
+                  hasCard: card.cardId != null,
                 ),
-                const SizedBox(height: 4),
-                if (_saving)
-                  const Text('Saving…',
-                      style: TextStyle(fontSize: 12, color: Colors.grey))
-                else if (_saveFailed)
-                  const Text('Save failed — will retry on next hole',
-                      style: TextStyle(fontSize: 12, color: Colors.red))
-                else if (_existingStatus == 'in_progress' ||
-                    _scores.any((s) => s != null))
-                  const Text('⛳ Live — scores are on the leaderboard',
-                      style: TextStyle(fontSize: 12, color: Colors.green)),
-                const SizedBox(height: 16),
-                _scoreButtons(par),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: _customScore,
-                  icon: const Icon(Icons.edit),
-                  label: const Text('Custom score (1–15)'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _witnessCtrl,
-                  maxLength: 80,
-                  decoration: const InputDecoration(
-                    labelText: 'Witness (optional)',
-                    hintText: 'Who saw you play this round?',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                    counterText: '',
-                  ),
-                ),
-                if (_existingStatus != null) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                      'Previously saved: ${_existingStatus == 'in_progress' ? 'in progress' : _existingStatus}',
-                      style:
-                          const TextStyle(color: Colors.grey, fontSize: 12)),
-                ],
-              ],
-            ),
+            ],
+            pars: _pars,
+            holeCount: _holeCount,
+            onScore: _onScore,
+            onTrackShots: _trackShots,
+            onReviewShots: _reviewShots,
           ),
         ),
-        // Footer: prev/next + submit.
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: Row(
-              children: [
-                OutlinedButton(
-                  onPressed: _hole > 0 ? () => setState(() => _hole--) : null,
-                  child: const Text('Prev'),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: _hole < _holeCount - 1
-                      ? () => setState(() => _hole++)
-                      : null,
-                  child: const Text('Next'),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: (complete && !_submitting && _player != null)
-                        ? _submit
-                        : null,
-                    child: _submitting
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2))
-                        : Text(complete
-                            ? 'Submit scorecard'
-                            : 'Enter all $_holeCount holes to submit'),
-                  ),
-                ),
-              ],
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed:
+                    (readyCount > 0 && !_submitting) ? _submitAll : null,
+                child: _submitting
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : Text(readyCount == 0
+                        ? 'Enter all $_holeCount holes to submit'
+                        : 'Submit all cards ($readyCount ready)'),
+              ),
             ),
           ),
         ),
       ],
     );
   }
+}
 
-  /// Fixed numeric quick buttons (1-10) that never move. The button
-  /// matching par stays off-white; under-par tints green and over-par
-  /// tints red, darkening with distance from par.
-  Widget _scoreButtons(int? par) {
-    return GridView.count(
-      crossAxisCount: 5,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      mainAxisSpacing: 8,
-      crossAxisSpacing: 8,
-      childAspectRatio: 1.2,
-      children: List.generate(10, (i) => i + 1).map((score) {
-        final selected = _scores[_hole] == score;
-        return ElevatedButton(
-          onPressed: () => _enterScore(score),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: selected
-                ? Theme.of(context).colorScheme.primary
-                : _scoreTint(score, par),
-            foregroundColor: selected ? Colors.white : Colors.black87,
-          ),
-          child: Text('$score',
-              style:
-                  const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-        );
-      }).toList(),
+/// Confirmation for submit-all: lists every card with its state; complete
+/// cards get a witness field, incomplete ones are noted as staying in
+/// progress. Returns cardIndex → witness text for the cards to submit.
+class _SubmitAllDialog extends StatefulWidget {
+  final List<_CardState> cards;
+  final List<String> titles;
+  final List<int?> totals;
+  final List<String> toParLabels;
+
+  const _SubmitAllDialog({
+    required this.cards,
+    required this.titles,
+    required this.totals,
+    required this.toParLabels,
+  });
+
+  @override
+  State<_SubmitAllDialog> createState() => _SubmitAllDialogState();
+}
+
+class _SubmitAllDialogState extends State<_SubmitAllDialog> {
+  late final Map<int, TextEditingController> _witnessCtrls = {
+    for (var i = 0; i < widget.cards.length; i++)
+      if (widget.cards[i].submittable)
+        i: TextEditingController(text: widget.cards[i].witness),
+  };
+
+  @override
+  void dispose() {
+    for (final c in _witnessCtrls.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Submit scorecards?'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Casual cards are self-attested — submitting marks them '
+              'verified.',
+              style: TextStyle(fontSize: 13, color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            for (var i = 0; i < widget.cards.length; i++) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.titles[i],
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Text(_statusLine(i),
+                      style: const TextStyle(fontSize: 13)),
+                ],
+              ),
+              if (widget.cards[i].submittable)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4, bottom: 10),
+                  child: TextField(
+                    controller: _witnessCtrls[i],
+                    maxLength: 80,
+                    decoration: const InputDecoration(
+                      labelText: 'Witness (optional)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                      counterText: '',
+                    ),
+                  ),
+                )
+              else
+                const SizedBox(height: 10),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Keep editing'),
+        ),
+        ElevatedButton(
+          onPressed: () => Navigator.of(context).pop({
+            for (final e in _witnessCtrls.entries) e.key: e.value.text,
+          }),
+          child: const Text('Submit'),
+        ),
+      ],
     );
   }
 
-  /// Tint for a fixed score button: par is off-white, under-par goes
-  /// green and over-par goes red, darkening with distance from par.
-  /// Null par (unknown) leaves the default button color.
-  Color? _scoreTint(int score, int? par) {
-    if (par == null) return null;
-    if (score == par) return const Color(0xFFF5F5F0); // off-white
-    final dist = (score - par).abs().clamp(1, 4);
-    final shade = 100 * dist; // 100, 200, 300, 400
-    return score < par ? Colors.green[shade] : Colors.red[shade];
+  String _statusLine(int i) {
+    final card = widget.cards[i];
+    if (card.submittable) {
+      final tp = widget.toParLabels[i];
+      final base = 'total ${widget.totals[i] ?? '–'}${tp.isEmpty ? '' : ' ($tp)'}';
+      return card.submitted ? '$base · update' : base;
+    }
+    if (card.submitted) return 'already submitted ✓';
+    return '${card.entered}/${_CasualScoreEntryScreenState._holeCount} holes — stays in progress';
   }
 }
