@@ -103,6 +103,10 @@ ADMIN_COMMANDS: list[tuple[str, str, str]] = [
      "/tournament start",
      "Open play and post the pinned live leaderboard."),
     ("Running tournaments",
+     "/tournament announce",
+     "Re-post a tournament's signup announcement in #✍️event-signups — "
+     "use when the original announcement never appeared."),
+    ("Running tournaments",
      "/tournament complete",
      "Close the tournament, post final standings, award season points."),
     ("Running tournaments",

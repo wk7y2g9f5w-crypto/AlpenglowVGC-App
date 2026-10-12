@@ -15,6 +15,7 @@ from src.cogs.common import (
     active_tournament_autocomplete,
     any_tournament_autocomplete,
     is_crew,
+    open_tournament_autocomplete,
     require_admin,
     require_strict_admin,
     resolve_tournament,
@@ -39,9 +40,13 @@ NOTIFICATIONS_CHANNEL_NAMES: tuple[str, ...] = (
 
 # Discord channel(s) for tournament signup announcements (registration
 # boards, final standings). Tried in order; the emoji-prefixed name is
-# current. Missing channel => falls back to the invoking channel (logged).
+# current. The skin-tone variant is what a phone emoji picker produces —
+# a channel renamed with it didn't match either exact name and its
+# announcement silently never posted (2026-10-12). Missing channel =>
+# falls back to the invoking channel (logged).
 SIGNUP_CHANNEL_NAMES: tuple[str, ...] = (
     "✍️event-signups",
+    "✍🏻event-signups",
     "event-signups",
 )
 
@@ -1061,6 +1066,55 @@ class Tournaments(commands.Cog):
             await interaction.followup.send(
                 "❌ Couldn't post — check the bot's send permissions in "
                 f"#{NOTIFICATIONS_CHANNEL_NAMES[0]}.",
+                ephemeral=True,
+            )
+
+    @tournament.command(name="announce",
+                        description="Re-post a tournament's signup "
+                                    "announcement in #✍️event-signups (admin)")
+    @app_commands.autocomplete(tournament=open_tournament_autocomplete)
+    @app_commands.describe(
+        tournament="Defaults to the single tournament open for registration")
+    async def tournament_announce(self, interaction: discord.Interaction,
+                                  tournament: Optional[int] = None):
+        """Re-post the signup announcement for a registration-open
+        tournament. The original announcement posts exactly once (at
+        creation, directly or via the outbox drain); when that post is
+        missed — e.g. the signups channel couldn't be found under its
+        expected name — this is the recovery path. Diagnosis-friendly,
+        like /tournament shakeup: it names exactly why it can't post."""
+        if not await require_admin(interaction):
+            return
+        t, err = await resolve_tournament(
+            interaction, tournament, ["registration_open"])
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        channel = signup_channel(self.bot, str(interaction.guild_id))
+        if channel is None:
+            await interaction.response.send_message(
+                f"❌ Channel #{SIGNUP_CHANNEL_NAMES[0]} not found — the bot "
+                f"looks for a channel named exactly "
+                f"`{SIGNUP_CHANNEL_NAMES[0]}` or `{SIGNUP_CHANNEL_NAMES[1]}`. "
+                "Rename or create it, then run this again. (This is also "
+                "why the original announcement never posted.)",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        self.bot.add_view(RegisterView(t["id"]))
+        posted = await post_signup_announcement(
+            self.bot, str(interaction.guild_id), t["id"])
+        if posted:
+            await interaction.followup.send(
+                f"✅ Signup announcement for **{t['name']}** posted in "
+                f"{channel.mention}.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "❌ Couldn't post — check the bot's send permissions in "
+                f"{channel.mention}.",
                 ephemeral=True,
             )
 
