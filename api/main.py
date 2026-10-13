@@ -3115,6 +3115,34 @@ async def put_scorecard(
     # present -> auto-verified; solo rounds stay pending.
     player_count = await db.tee_time_player_count(DB_PATH, tt["id"])
     status_value = "verified" if player_count >= 2 else "pending"
+    # Cayden 2026-10-13 (alt-shot only): a tee time with a single team has
+    # nobody to cross-check the card, so a named witness stands in for the
+    # missing team — a witnessed final submit auto-verifies like a
+    # two-team round. Without a witness, a regular member's final submit
+    # is refused; crew/admin can still file it pending (the standing
+    # rescue path, e.g. an admin verifies it afterwards).
+    if fmt == "alt_shot" and player_count < 2 and body.complete:
+        if (body.witness_name or "").strip():
+            status_value = "verified"
+        elif not is_admin:
+            if is_crew is None:
+                is_crew = await fetch_crew_status(user["discord_id"])
+            if is_crew is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Could not verify crew status with Discord — "
+                           "try again shortly.",
+                )
+            if not is_crew:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "code": "witness_required",
+                        "message": "This team is playing solo — a witness "
+                                   "is required to submit. Add the "
+                                   "witness's name and submit again.",
+                    },
+                )
     if body.complete:
         card_id = await db.upsert_scorecard(
             DB_PATH,

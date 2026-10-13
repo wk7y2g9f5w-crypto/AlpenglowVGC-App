@@ -785,6 +785,23 @@ async def _save_scorecard(bot: commands.Bot, interaction: discord.Interaction,
     # Verification: 2+ players in the tee time = partners present.
     player_count = await db.tee_time_player_count(db_path, tt["id"])
     status = "verified" if player_count >= 2 else "pending"
+    # Cayden 2026-10-13 (alt-shot only): a tee time with a single team
+    # has nobody to cross-check the card, so a named witness stands in
+    # for the missing team — a witnessed submit verifies like a
+    # two-team round. Without a witness, a regular member's submit is
+    # refused; crew can still file it pending (the standing rescue
+    # path, e.g. an admin verifies it afterwards).
+    if t["format"] == "alt_shot" and player_count < 2:
+        if (witness_name or "").strip():
+            status = "verified"
+        elif not await is_crew(interaction):
+            await interaction.followup.send(
+                "❌ This team is playing solo (no second team on the "
+                "tee time), so the card needs a witness — set one with "
+                "the **Witness** button, then submit again.",
+                ephemeral=True,
+            )
+            return
     # Play-in-order: the card owner's previous round must be submitted
     # (pending or verified). Crew submitting on someone's behalf bypass
     # this (admin override after the fact).

@@ -189,7 +189,7 @@ class TournamentTeamsApiTestCase(ApiTestCase):
         r = self.client.put(
             f"/api/tee-times/{tt['id']}/scorecard", headers=self.h("1"),
             json={"team_id": t["id"], "scores": scores, "round_number": 1,
-                  "complete": True})
+                  "complete": True, "witness_name": "Witness"})
         self.assertEqual(r.status_code, 200, r.text)
         r = self.client.delete(
             f"/api/tournaments/{self.tid}/teams/{t['id']}",
@@ -277,10 +277,12 @@ class TournamentTeamsApiTestCase(ApiTestCase):
     def _start_and_card(self, tt_id, team_id, uid, scores=None):
         run(db.start_tournament_tee_time(self.db_path, tt_id, uid))
         scores = scores or [4] * 18
+        # Solo tee times need a witness since 2026-10-13 (alt-shot rule);
+        # harmless on two-team sheets.
         return self.client.put(
             f"/api/tee-times/{tt_id}/scorecard", headers=self.h(uid),
             json={"team_id": team_id, "scores": scores, "round_number": 1,
-                  "complete": True})
+                  "complete": True, "witness_name": "Witness"})
 
     def test_shared_team_card(self):
         t1 = self._mk_team("1", partner_uid="2")
@@ -293,11 +295,12 @@ class TournamentTeamsApiTestCase(ApiTestCase):
                   "round_number": 1})
         self.assertEqual(r.status_code, 200, r.text)
         # Partner (not on the sheet) can also enter the shared card, and
-        # complete it.
+        # complete it. Solo sheet: a witness name is required (2026-10-13).
         r = self.client.put(
             f"/api/tee-times/{tt['id']}/scorecard", headers=self.h("2"),
             json={"team_id": t1["id"], "scores": [5] * 18,
-                  "round_number": 1, "complete": True})
+                  "round_number": 1, "complete": True,
+                  "witness_name": "Witness"})
         self.assertEqual(r.status_code, 200, r.text)
         card = r.json()["card"]
         self.assertIsNone(card["player_discord_id"])

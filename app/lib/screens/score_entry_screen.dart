@@ -63,6 +63,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   bool _submitting = false;
   bool _isCrew = false;
   bool _isAdmin = false;
+  List<String> _witnessOptions = [];
   final Map<int, Timer> _saveTimers = {};
   bool _saving = false;
   bool _saveFailed = false;
@@ -72,6 +73,39 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
 
   bool get _isSharedCard =>
       const {'alt_shot', 'scramble'}.contains(widget.tournament.format);
+
+  /// Solo alt-shot: only one team on this tee time — its card needs a
+  /// witness to count (Cayden 2026-10-13).
+  bool get _soloAltShot {
+    if (widget.tournament.format != 'alt_shot' || !_isSharedCard) {
+      return false;
+    }
+    final teamIds = <int>{
+      for (final p in widget.teeTime.players)
+        if (p.teamId != null) p.teamId!,
+    };
+    return teamIds.length == 1;
+  }
+
+  /// Witness picker options: the tournament's registered players, labeled
+  /// the same way as the team-formation picker (Golf+ handle first).
+  Future<void> _loadWitnessOptions() async {
+    try {
+      final players = await _api.getTournamentPlayers(widget.tournament.id);
+      if (!mounted) return;
+      final labels = <String>{};
+      for (final p in players) {
+        if (!p.registered) continue;
+        final label =
+            (p.golfplusHandle.isNotEmpty ? p.golfplusHandle : p.displayName)
+                .trim();
+        if (label.isNotEmpty) labels.add(label);
+      }
+      setState(() => _witnessOptions = labels.toList()..sort());
+    } catch (_) {
+      // The picker falls back to free text when the list can't load.
+    }
+  }
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -142,6 +176,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       if (mounted) setState(() => _loading = false);
     });
     _loadCrew();
+    _loadWitnessOptions();
   }
 
   @override
@@ -443,6 +478,8 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         toParLabels: [for (final c in _cards) _toParLabel(c)],
         holeCount: _holeCount,
         roundNumber: _roundNumber,
+        witnessOptions: _witnessOptions,
+        witnessRequired: _soloAltShot,
       ),
     );
     if (result == null || result.isEmpty) return;
@@ -637,8 +674,11 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
 }
 
 /// Confirmation for submit-all: lists every card with its state; complete
-/// cards get a witness field, incomplete ones are noted as staying in
-/// progress. Returns cardIndex → witness text for the cards to submit.
+/// cards get a witness picker (the tournament's registered players, or
+/// type a name — the team-formation pattern), incomplete ones are noted
+/// as staying in progress. Returns cardIndex → witness text for the
+/// cards to submit. [witnessRequired] (a solo alt-shot team, Cayden
+/// 2026-10-13) blocks submitting until every card to submit has one.
 class _SubmitAllDialog extends StatefulWidget {
   final List<_CardState> cards;
   final List<String> titles;
@@ -646,6 +686,8 @@ class _SubmitAllDialog extends StatefulWidget {
   final List<String> toParLabels;
   final int holeCount;
   final int roundNumber;
+  final List<String> witnessOptions;
+  final bool witnessRequired;
 
   const _SubmitAllDialog({
     required this.cards,
@@ -654,6 +696,8 @@ class _SubmitAllDialog extends StatefulWidget {
     required this.toParLabels,
     required this.holeCount,
     required this.roundNumber,
+    this.witnessOptions = const [],
+    this.witnessRequired = false,
   });
 
   @override
@@ -661,18 +705,28 @@ class _SubmitAllDialog extends StatefulWidget {
 }
 
 class _SubmitAllDialogState extends State<_SubmitAllDialog> {
-  late final Map<int, TextEditingController> _witnessCtrls = {
-    for (var i = 0; i < widget.cards.length; i++)
-      if (widget.cards[i].submittable)
-        i: TextEditingController(text: widget.cards[i].witness),
-  };
+  // Controllers handed to us by each Autocomplete's field view — the
+  // source of truth for the witness text at submit time (they're owned
+  // by the Autocomplete, so no dispose here).
+  final Map<int, TextEditingController> _witnessCtrls = {};
+  bool _witnessError = false;
 
-  @override
-  void dispose() {
-    for (final c in _witnessCtrls.values) {
-      c.dispose();
+  String _witnessText(int i) =>
+      _witnessCtrls[i]?.text ?? widget.cards[i].witness;
+
+  void _trySubmit() {
+    if (widget.witnessRequired) {
+      final missing = widget.cards.asMap().entries.any(
+          (e) => e.value.submittable && _witnessText(e.key).trim().isEmpty);
+      if (missing) {
+        setState(() => _witnessError = true);
+        return;
+      }
     }
-    super.dispose();
+    Navigator.of(context).pop({
+      for (var i = 0; i < widget.cards.length; i++)
+        if (widget.cards[i].submittable) i: _witnessText(i),
+    });
   }
 
   @override
@@ -689,6 +743,15 @@ class _SubmitAllDialogState extends State<_SubmitAllDialog> {
               'change them.',
               style: TextStyle(fontSize: 13, color: Colors.grey),
             ),
+            if (widget.witnessRequired)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Only one team is on this tee time, so its card needs '
+                  'a witness to count.',
+                  style: TextStyle(fontSize: 13, color: Colors.grey),
+                ),
+              ),
             const SizedBox(height: 12),
             for (var i = 0; i < widget.cards.length; i++) ...[
               Row(
@@ -707,15 +770,37 @@ class _SubmitAllDialogState extends State<_SubmitAllDialog> {
               if (widget.cards[i].submittable)
                 Padding(
                   padding: const EdgeInsets.only(top: 4, bottom: 10),
-                  child: TextField(
-                    controller: _witnessCtrls[i],
-                    maxLength: 80,
-                    decoration: const InputDecoration(
-                      labelText: 'Witness (optional)',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                      counterText: '',
-                    ),
+                  child: Autocomplete<String>(
+                    initialValue:
+                        TextEditingValue(text: widget.cards[i].witness),
+                    optionsBuilder: (tv) {
+                      final q = tv.text.trim().toLowerCase();
+                      if (q.isEmpty) return widget.witnessOptions;
+                      return widget.witnessOptions
+                          .where((o) => o.toLowerCase().contains(q));
+                    },
+                    fieldViewBuilder:
+                        (context, ctrl, focusNode, onFieldSubmitted) {
+                      _witnessCtrls[i] = ctrl;
+                      return TextField(
+                        controller: ctrl,
+                        focusNode: focusNode,
+                        maxLength: 80,
+                        decoration: InputDecoration(
+                          labelText: widget.witnessRequired
+                              ? 'Witness (required)'
+                              : 'Witness (optional)',
+                          hintText: 'Pick a player or type a name',
+                          border: const OutlineInputBorder(),
+                          isDense: true,
+                          counterText: '',
+                          errorText: _witnessError && widget.witnessRequired
+                              ? 'A witness is required for a solo team'
+                              : null,
+                        ),
+                        onSubmitted: (_) => onFieldSubmitted(),
+                      );
+                    },
                   ),
                 )
               else
@@ -730,9 +815,7 @@ class _SubmitAllDialogState extends State<_SubmitAllDialog> {
           child: const Text('Keep editing'),
         ),
         ElevatedButton(
-          onPressed: () => Navigator.of(context).pop({
-            for (final e in _witnessCtrls.entries) e.key: e.value.text,
-          }),
+          onPressed: _trySubmit,
           child: const Text('Submit'),
         ),
       ],
