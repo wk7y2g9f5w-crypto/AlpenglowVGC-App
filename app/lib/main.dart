@@ -9,6 +9,7 @@ import 'screens/matchplay_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/tournaments_screen.dart';
+import 'services/api_client.dart';
 import 'services/auth.dart';
 import 'services/push.dart';
 import 'util/web_support.dart';
@@ -107,6 +108,55 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
 
+  /// Golf+ username gate (Cayden 2026-10-12): a signed-in user with no
+  /// Golf+ username on file lands on the Profile tab and cannot open
+  /// the play tabs until they save one. Profile + Settings stay
+  /// reachable (sign-out lives there — nobody gets trapped).
+  bool _gated = false;
+
+  static const int _profileTab = 4;
+  static const int _settingsTab = 5;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkGate();
+  }
+
+  Future<void> _checkGate() async {
+    try {
+      final api = ApiClient(
+          baseUrl: widget.settings.baseUrl,
+          token: widget.auth.token ?? '');
+      final me = await api.getMe();
+      if (!mounted) return;
+      if ((me.golfplusHandle ?? '').trim().isEmpty) {
+        setState(() {
+          _gated = true;
+          _index = _profileTab;
+        });
+      }
+    } catch (_) {
+      // Profile unreachable (offline etc.): never lock on an
+      // unverified profile.
+    }
+  }
+
+  void _onHandleSaved(String handle) {
+    // Saving an empty username re-engages the gate.
+    setState(() => _gated = handle.trim().isEmpty);
+  }
+
+  void _onTabSelected(int i) {
+    if (_gated && i != _profileTab && i != _settingsTab) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Add your Golf+ username on the Profile tab to continue.')));
+      return;
+    }
+    setState(() => _index = i);
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [
@@ -114,14 +164,18 @@ class _HomeShellState extends State<HomeShell> {
       CasualScreen(auth: widget.auth, settings: widget.settings),
       AltShotScreen(auth: widget.auth, settings: widget.settings),
       MatchplayScreen(auth: widget.auth, settings: widget.settings),
-      ProfileScreen(auth: widget.auth, settings: widget.settings),
+      ProfileScreen(
+          auth: widget.auth,
+          settings: widget.settings,
+          gateActive: _gated,
+          onHandleSaved: _onHandleSaved),
       SettingsScreen(auth: widget.auth, settings: widget.settings),
     ];
     return Scaffold(
       body: IndexedStack(index: _index, children: pages),
       bottomNavigationBar: _ScrollableNavBar(
         selectedIndex: _index,
-        onSelected: (i) => setState(() => _index = i),
+        onSelected: _onTabSelected,
         items: const [
           _NavItem(icon: Icons.emoji_events, label: 'Tournaments'),
           _NavItem(icon: Icons.golf_course, label: 'Casual'),

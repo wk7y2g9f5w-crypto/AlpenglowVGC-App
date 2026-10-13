@@ -13,7 +13,20 @@ class ProfileScreen extends StatefulWidget {
   final AuthService auth;
   final SettingsService settings;
 
-  const ProfileScreen({super.key, required this.auth, required this.settings});
+  /// True while the app shell is gating this user (no Golf+ username
+  /// on file): shows the explainer banner at the top.
+  final bool gateActive;
+
+  /// Called with the saved Golf+ username after a successful profile
+  /// save, so the shell can lift (or re-apply) the gate.
+  final ValueChanged<String>? onHandleSaved;
+
+  const ProfileScreen(
+      {super.key,
+      required this.auth,
+      required this.settings,
+      this.gateActive = false,
+      this.onHandleSaved});
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
@@ -97,6 +110,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         timezone: tz.isEmpty ? null : tz,
         golfplusHandle: _handleCtrl.text.trim(),
       );
+      widget.onHandleSaved?.call(_handleCtrl.text.trim());
       if (mounted) showSnack(context, 'Profile saved.');
       await _refresh();
     } on ApiException catch (e) {
@@ -207,6 +221,32 @@ class _ProfileScreenState extends State<ProfileScreen> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
+              if (widget.gateActive &&
+                  (data.me.golfplusHandle == null ||
+                      data.me.golfplusHandle!.trim().isEmpty)) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.amber.shade700),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.lock_outline, size: 20),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                            'One thing first: add your Golf+ username '
+                            'below and tap Save profile — the rest of '
+                            'the app unlocks as soon as it\'s set.'),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               Row(
                 children: [
                   const CircleAvatar(
