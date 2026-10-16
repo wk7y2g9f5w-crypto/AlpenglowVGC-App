@@ -141,6 +141,11 @@ class Tournament {
   final int numRounds;
   final List<TournamentRound> rounds;
 
+  /// Rounds the signed-in user has already finished in this tournament
+  /// (submitted own or team card), from the API. The tee-time round
+  /// picker hides them — a finished round can't be booked again.
+  final List<int> myCompletedRounds;
+
   Tournament({
     required this.id,
     required this.name,
@@ -158,6 +163,7 @@ class Tournament {
     this.pars,
     this.numRounds = 1,
     this.rounds = const [],
+    this.myCompletedRounds = const [],
   });
 
   factory Tournament.fromJson(Map<String, dynamic> j) => Tournament(
@@ -180,6 +186,9 @@ class Tournament {
         numRounds: (j['num_rounds'] as num?)?.toInt() ?? 1,
         rounds: ((j['rounds'] as List?) ?? [])
             .map((e) => TournamentRound.fromJson(e as Map<String, dynamic>))
+            .toList(growable: false),
+        myCompletedRounds: ((j['my_completed_rounds'] as List?) ?? [])
+            .map((e) => (e as num).toInt())
             .toList(growable: false),
       );
 

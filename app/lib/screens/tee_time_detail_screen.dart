@@ -345,7 +345,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
   String _timeStr(TimeOfDay t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
-  Future<void> _editTeeTime(TeeTime tt) async {
+  Future<void> _editTeeTime(TeeTime tt, {required bool isAdmin}) async {
     final labelCtrl = TextEditingController(text: tt.label);
     final current = DateTime.tryParse(tt.startsAtUtc.toString())?.toLocal();
     DateTime date = current ?? DateTime.now();
@@ -353,7 +353,17 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
         ? TimeOfDay.now()
         : TimeOfDay(hour: current.hour, minute: current.minute);
     int roundNumber = tt.roundNumber;
-    final rounds = widget.tournament.rounds;
+    // Rounds the editor has already finished leave the picker (admins
+    // keep the full list). The tee time's current round always stays —
+    // leaving it where it is must remain selectable.
+    final completed = isAdmin
+        ? const <int>{}
+        : widget.tournament.myCompletedRounds.toSet();
+    final rounds = widget.tournament.rounds
+        .where((r) =>
+            r.roundNumber == tt.roundNumber ||
+            !completed.contains(r.roundNumber))
+        .toList();
 
     final saved = await showDialog<bool>(
       context: context,
@@ -709,7 +719,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                 Row(
                   children: [
                     OutlinedButton.icon(
-                      onPressed: () => _editTeeTime(tt),
+                      onPressed: () => _editTeeTime(tt, isAdmin: data.isAdmin),
                       icon: const Icon(Icons.edit),
                       label: const Text('Edit'),
                     ),

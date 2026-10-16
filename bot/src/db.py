@@ -2800,6 +2800,29 @@ async def has_completed_round_card(db_path, tournament_id, player_discord_id,
     return row is not None
 
 
+async def completed_round_numbers(db_path, tournament_id,
+                                  player_discord_id) -> list[int]:
+    """Sorted round numbers the player has finished in this tournament.
+
+    A round counts as finished with a submitted card (pending or verified —
+    same definition as has_completed_round_card): either the player's own
+    card, or a team card for any team the player belongs to in this
+    tournament (team cards count for every member). In-progress cards don't
+    count. Backs the app's tee-time round picker, which hides rounds the
+    player can no longer book.
+    """
+    rows = await _fetchall(
+        db_path,
+        "SELECT DISTINCT round_number FROM scorecards"
+        " WHERE tournament_id = ? AND status IN ('pending', 'verified')"
+        " AND (player_discord_id = ? OR team_id IN"
+        " (SELECT team_id FROM team_members WHERE player_discord_id = ?))"
+        " ORDER BY round_number",
+        (tournament_id, player_discord_id, player_discord_id),
+    )
+    return [r["round_number"] for r in rows]
+
+
 async def find_scorecard(db_path, tournament_id, *, player_discord_id=None,
                          team_id=None, tee_time_id=None,
                          round_number=1) -> dict | None:

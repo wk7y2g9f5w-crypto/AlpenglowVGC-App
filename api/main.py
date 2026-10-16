@@ -686,7 +686,8 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
 
 
 def _tournament_json(t: dict, registered: bool,
-                     rounds: list[dict] | None = None) -> dict:
+                     rounds: list[dict] | None = None,
+                     my_completed_rounds: list[int] | None = None) -> dict:
     pars_csv = t.get("pars")
     pars = None
     if pars_csv:
@@ -710,6 +711,10 @@ def _tournament_json(t: dict, registered: bool,
         "green_speed": t.get("green_speed"),
         "pars": pars,
         "registered": registered,
+        # Rounds the requesting user has already finished here (submitted
+        # own or team card). The app hides them in the tee-time round
+        # picker — a finished round can't be booked again.
+        "my_completed_rounds": my_completed_rounds or [],
         "num_rounds": len(rounds) or 1,
         "rounds": [
             {
@@ -1314,7 +1319,10 @@ async def list_tournaments(user: CurrentUser) -> list[dict]:
     for t in rows:
         registered = await db.is_registered(DB_PATH, t["id"], user["discord_id"])
         rounds = await db.list_rounds(DB_PATH, t["id"])
-        out.append(_tournament_json(t, registered, rounds))
+        completed = await db.completed_round_numbers(
+            DB_PATH, t["id"], user["discord_id"])
+        out.append(_tournament_json(t, registered, rounds,
+                                    my_completed_rounds=completed))
     return out
 
 

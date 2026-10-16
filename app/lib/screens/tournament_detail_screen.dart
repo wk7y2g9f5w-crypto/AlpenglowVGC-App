@@ -792,8 +792,18 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
     DateTime date = DateTime.now().add(const Duration(days: 1));
     TimeOfDay time = const TimeOfDay(hour: 18, minute: 0);
     int maxPlayers = 4;
-    int roundNumber = 1;
     final rounds = widget.tournament.rounds;
+    // Rounds this user has already finished (submitted own or team card)
+    // can't be booked again, so they leave the picker. Admins keep the
+    // full list — they book and fix tee times for other people.
+    final bookableRounds = data.me.isAdmin
+        ? rounds
+        : rounds
+            .where((r) => !widget.tournament.myCompletedRounds
+                .contains(r.roundNumber))
+            .toList();
+    int roundNumber =
+        bookableRounds.isNotEmpty ? bookableRounds.first.roundNumber : 1;
     final isTeamFormat = const {'best_ball', 'alt_shot', 'scramble'}
         .contains(widget.tournament.format);
     int? pickedTeamId;
@@ -814,7 +824,12 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                       hintText: 'e.g. Friday crew round'),
                 ),
                 const SizedBox(height: 12),
-                if (rounds.length > 1)
+                if (bookableRounds.isEmpty)
+                  const Text(
+                    "You've completed every round of this tournament.",
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                if (rounds.length > 1 && bookableRounds.isNotEmpty)
                   DropdownButtonFormField<int>(
                     initialValue: roundNumber,
                     decoration: const InputDecoration(
@@ -822,7 +837,7 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                       border: OutlineInputBorder(),
                       isDense: true,
                     ),
-                    items: rounds
+                    items: bookableRounds
                         .map((r) => DropdownMenuItem(
                               value: r.roundNumber,
                               child: Text(
@@ -962,7 +977,9 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                 onPressed: () => Navigator.of(ctx).pop(false),
                 child: const Text('Cancel')),
             ElevatedButton(
-              onPressed: () async {
+              onPressed: bookableRounds.isEmpty
+                  ? null
+                  : () async {
                 if (isTeamFormat && pickedTeamId == null) {
                   showSnack(ctx, 'Pick which team you\'re repping.',
                       error: true);
