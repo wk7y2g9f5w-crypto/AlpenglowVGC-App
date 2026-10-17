@@ -4,6 +4,7 @@ Each function opens its own short-lived connection, which is fine at the
 scale of a Discord community bot.
 """
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
@@ -482,8 +483,42 @@ def upcoming_bound_iso() -> str:
             - timedelta(minutes=_UPCOMING_GRACE_MINUTES)).isoformat()
 
 
+_BUSY_TIMEOUT_MS = 30000
+
+
+async def _tune(con: aiosqlite.Connection) -> None:
+    """Tune a fresh connection for the bot + API sharing one SQLite file.
+
+    WAL mode lets readers and the one writer work at the same time
+    instead of blocking each other (the mode is stored on the database
+    file, so setting it per connection is just insurance for fresh
+    files). The busy timeout makes a connection wait for the write
+    lock instead of failing with 'database is locked' when several
+    players submit at once.
+    """
+    await con.execute("PRAGMA journal_mode=WAL")
+    await con.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+
+
+async def _open(db_path: str) -> aiosqlite.Connection:
+    """Open a tuned connection; the caller closes it."""
+    con = await aiosqlite.connect(db_path, timeout=_BUSY_TIMEOUT_MS / 1000)
+    await _tune(con)
+    return con
+
+
+@asynccontextmanager
+async def _connect(db_path: str):
+    """Open a tuned connection as an async context manager."""
+    con = await _open(db_path)
+    try:
+        yield con
+    finally:
+        await con.close()
+
+
 async def init_db(db_path: str) -> None:
-    async with aiosqlite.connect(db_path) as con:
+    async with _connect(db_path) as con:
         await con.executescript(SCHEMA)
         await con.commit()
     await _migrate(db_path)
@@ -517,7 +552,7 @@ async def _migrate(db_path: str) -> None:
     New tables (join_requests, side_quests) are handled by the idempotent
     CREATE TABLE IF NOT EXISTS in SCHEMA.
     """
-    async with aiosqlite.connect(db_path) as con:
+    async with _connect(db_path) as con:
         cur = await con.execute("PRAGMA table_info(tournaments)")
         cols = [r[1] for r in await cur.fetchall()]
         if "start_date" not in cols:
@@ -1001,14 +1036,14 @@ def _dicts(rows) -> list[dict]:
 
 
 async def _fetchall(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
-    async with aiosqlite.connect(db_path) as con:
+    async with _connect(db_path) as con:
         con.row_factory = aiosqlite.Row
         async with con.execute(sql, params) as cur:
             return _dicts(await cur.fetchall())
 
 
 async def _fetchone(db_path: str, sql: str, params: tuple = ()) -> dict | None:
-    async with aiosqlite.connect(db_path) as con:
+    async with _connect(db_path) as con:
         con.row_factory = aiosqlite.Row
         async with con.execute(sql, params) as cur:
             row = await cur.fetchone()
@@ -1017,7 +1052,7 @@ async def _fetchone(db_path: str, sql: str, params: tuple = ()) -> dict | None:
 
 async def _execute(db_path: str, sql: str, params: tuple = ()) -> tuple[int, int]:
     """Returns (lastrowid, rowcount)."""
-    async with aiosqlite.connect(db_path) as con:
+    async with _connect(db_path) as con:
         cur = await con.execute(sql, params)
         await con.commit()
         return cur.lastrowid, cur.rowcount
@@ -1387,7 +1422,7 @@ async def create_local_user(db_path, email: str, password_hash: str,
     """Insert local_credentials + matching players row, atomically.
 
     Email pre-lowercased. Raises on duplicate email or player_key."""
-    async with aiosqlite.connect(db_path) as con:
+    async with _connect(db_path) as con:
         await con.execute(
             "INSERT INTO local_credentials (email, password_hash, player_key,"
             " display_name, created_at) VALUES (?,?,?,?,?)",
@@ -1894,7 +1929,7 @@ async def reset_tournament_ids(db_path, keep_ids=(16, 17)) -> dict:
               "matches", "season_tournaments", "season_points",
               "tournament_leaders"]
 
-    async with aiosqlite.connect(db_path) as con:
+    async with _connect(db_path) as con:
         await con.execute("BEGIN IMMEDIATE")
         try:
             for old, new in mapping.items():
@@ -2696,7 +2731,7 @@ async def save_partial_scorecard(db_path, tournament_id, player_id, team_id,
     now = utcnow_iso()
     # Single-connection transaction: two partners tapping the same shared
     # team card can't interleave a read-modify-write and lose a hole.
-    con = await aiosqlite.connect(db_path)
+    con = await _open(db_path)
     try:
         con.row_factory = aiosqlite.Row
         await con.execute("BEGIN IMMEDIATE")
@@ -2906,7 +2941,7 @@ async def set_hole_shots(db_path, scorecard_id: int, hole_number: int,
     Each shot: {x, y, lie, holed, putts}. seq is implied by list order (1-based).
     Returns the number of shots stored.
     """
-    async with aiosqlite.connect(db_path) as con:
+    async with _connect(db_path) as con:
         await con.execute(
             "DELETE FROM hole_shots WHERE scorecard_id = ? AND hole_number = ?",
             (scorecard_id, hole_number),
