@@ -26,6 +26,7 @@ COURSES = [
     "Castle Pines Golf Club",
     "Lofoten Links",
     "Medinah Country Club",
+    "Payne's Valley",
 ]
 
 
@@ -116,6 +117,11 @@ COURSE_PARS = {
 
     # Source: Golf+ in-game GPS screenshots (total par 72), verified hole-by-hole 2026-10-08.
     "Medinah Country Club": [4, 3, 4, 4, 5, 4, 5, 4, 4, 5, 3, 4, 3, 4, 4, 4, 3, 5],
+
+    # Source: Hole19 scorecard for Payne's Valley (total par 72, Blue tees), researched 2026-10-17.
+    # Note: real-world card — Golf+ in-game pars not yet verified against GPS screenshots.
+    # The bonus 19th hole ("The Big Rock", par 3) doesn't count toward the course par.
+    "Payne's Valley": [4, 3, 4, 5, 3, 4, 4, 5, 4, 3, 4, 4, 5, 4, 4, 3, 4, 5],
 }
 
 
