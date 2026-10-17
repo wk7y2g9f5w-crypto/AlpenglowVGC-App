@@ -21,6 +21,7 @@ a Discord user OAuth token (validated per-request against Discord's
 local email+password login (``local:`` accounts, HS256, ``JWT_SECRET``).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -78,13 +79,33 @@ from pydantic import BaseModel, Field, field_validator, model_validator  # noqa:
 # --------------------------------------------------------------------------
 # Discord token validation
 # --------------------------------------------------------------------------
+# Successful validations are cached for a few minutes: the auth
+# dependency validates on every request, and during a busy round those
+# per-tap calls to Discord rate-limit and time out, which surfaced as
+# bogus "Invalid Discord token" 401s for players with good tokens.
+# Only successes are cached — a failure can be transient, so the next
+# request always retries Discord fresh. Cache keys are SHA-256 hashes,
+# so raw tokens are never held in the cache.
+_DISCORD_USER_CACHE_TTL_S = 300.0
+_DISCORD_USER_CACHE_MAX = 2048
+_discord_user_cache: dict[str, tuple[float, dict]] = {}
+
+
 async def fetch_discord_user(token: str) -> dict | None:
     """Validate an OAuth bearer token with Discord.
 
     Returns ``{"id": ..., "display_name": ...}`` on success, None on any
     failure (bad/expired token, network error, unexpected response). Single
-    function so unit tests can monkeypatch it. The token is never stored.
+    function so unit tests can monkeypatch it. The token is never stored
+    or logged; successful results are cached briefly (see above).
     """
+    cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = time.monotonic()
+    cached = _discord_user_cache.get(cache_key)
+    if cached is not None:
+        if cached[0] > now:
+            return cached[1]
+        del _discord_user_cache[cache_key]
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
@@ -106,7 +127,18 @@ async def fetch_discord_user(token: str) -> dict | None:
     except (ValueError, KeyError, TypeError):
         return None
     display_name = (data.get("global_name") or data.get("username") or "Player")[:80]
-    return {"id": discord_id, "display_name": display_name}
+    info = {"id": discord_id, "display_name": display_name}
+    if len(_discord_user_cache) >= _DISCORD_USER_CACHE_MAX:
+        # Bound the cache: drop expired entries first, and if it is
+        # still full, start over — correctness never depends on it.
+        for k in [k for k, (exp, _i) in _discord_user_cache.items()
+                  if exp <= now]:
+            del _discord_user_cache[k]
+        if len(_discord_user_cache) >= _DISCORD_USER_CACHE_MAX:
+            _discord_user_cache.clear()
+    _discord_user_cache[cache_key] = (
+        now + _DISCORD_USER_CACHE_TTL_S, info)
+    return info
 
 
 async def get_current_user(request: Request) -> dict:
