@@ -51,12 +51,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.dispose();
   }
 
-  /// Open the privacy policy in the external browser (App Store requirement).
+  /// Open the privacy policy in an in-app browser (App Store requirement).
+  /// The in-app browser has a Done/close button, so there is always a way
+  /// back — an external handoff can strand the user on the page with no
+  /// exit. The page itself also carries a "Back to Alpenglow VGC" link.
   Future<void> _openPrivacyPolicy() async {
     const privacyUrl = 'https://alpenglow-vgc.onrender.com/privacy';
     try {
       final ok = await launchUrl(Uri.parse(privacyUrl),
-          mode: LaunchMode.externalApplication);
+          mode: LaunchMode.inAppBrowserView);
       if (!ok && mounted) {
         showSnack(context, 'Could not open the privacy policy.',
             error: true);
@@ -73,7 +76,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     const supportUrl = 'https://alpenglow-vgc.onrender.com/support';
     try {
       final ok = await launchUrl(Uri.parse(supportUrl),
-          mode: LaunchMode.externalApplication);
+          mode: LaunchMode.inAppBrowserView);
       if (!ok && mounted) {
         showSnack(context, 'Could not open the support page.',
             error: true);

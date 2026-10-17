@@ -1178,9 +1178,11 @@ PRIVACY_POLICY_HTML = """<!DOCTYPE html>
          margin: 2em auto; padding: 0 1.2em; line-height: 1.6; color: #222; }
   h1 { font-size: 1.5em; } h2 { font-size: 1.15em; margin-top: 1.8em; }
   .meta { color: #666; font-size: 0.9em; }
+  .backbar a { color: #1565c0; font-weight: 600; text-decoration: none; }
 </style>
 </head>
 <body>
+<p class="backbar"><a href="/">&larr; Back to Alpenglow VGC</a></p>
 <h1>Alpenglow VGC Privacy Policy</h1>
 <p class="meta">Dated 2026-10-02</p>
 
@@ -1260,9 +1262,11 @@ SUPPORT_HTML = """<!DOCTYPE html>
          margin: 2em auto; padding: 0 1.2em; line-height: 1.6; color: #222; }
   h1 { font-size: 1.5em; } h2 { font-size: 1.15em; margin-top: 1.8em; }
   .meta { color: #666; font-size: 0.9em; }
+  .backbar a { color: #1565c0; font-weight: 600; text-decoration: none; }
 </style>
 </head>
 <body>
+<p class="backbar"><a href="/">&larr; Back to Alpenglow VGC</a></p>
 <h1>Alpenglow VGC &mdash; Support</h1>
 <p class="meta">The companion app for the Alpenglow VGC golf community.</p>
 

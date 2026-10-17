@@ -2671,6 +2671,9 @@ class AppStorePrepApiTestCase(ApiTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn("text/html", r.headers["content-type"])
         self.assertIn("Alpenglow VGC Privacy Policy", r.text)
+        # The page must always offer a way back into the app.
+        self.assertIn('href="/"', r.text)
+        self.assertIn("Back to Alpenglow VGC", r.text)
         self.assertIn("2026-10-02", r.text)
         self.assertIn("Delete Account", r.text)
 
@@ -2680,6 +2683,9 @@ class AppStorePrepApiTestCase(ApiTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn("text/html", r.headers["content-type"])
         self.assertIn("Alpenglow VGC", r.text)
+        # The page must always offer a way back into the app.
+        self.assertIn('href="/"', r.text)
+        self.assertIn("Back to Alpenglow VGC", r.text)
         self.assertIn("Alpenglowvgc@outlook.com", r.text)
         self.assertIn("Delete Account", r.text)
 
