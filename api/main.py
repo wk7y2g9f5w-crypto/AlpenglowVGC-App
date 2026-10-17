@@ -310,7 +310,53 @@ CREW_ROLE_NAMES = frozenset(
 _MANAGE_GUILD_BIT = 1 << 5
 
 
+# Guild standings are cached briefly per user. Every crew/admin gate
+# used to re-run the full Discord lookup (member + guild + roles), and
+# /api/players/me runs three gates back to back — up to nine Discord
+# calls to render one screen. Under load those calls rate-limit and
+# time out, the gate answers "not verified", and admin surfaces
+# flicker in and out (the server owner, holding the Admin role,
+# intermittently lost the Settings admin rows). Only successful
+# standings are cached — a failed lookup (None) always retries
+# Discord fresh on the next call.
+_STANDING_CACHE_TTL_S = 300.0
+_STANDING_CACHE_MAX = 1024
+_standing_cache: dict[str, tuple[float, tuple[bool, frozenset]]] = {}
+
+
+def _invalidate_standing(discord_id: str) -> None:
+    """Drop a user's cached standing (e.g. after a role change)."""
+    _standing_cache.pop(str(discord_id), None)
+
+
 async def _fetch_guild_standing(
+    discord_id: str,
+) -> tuple[bool, set[str]] | None:
+    key = str(discord_id)
+    now = time.monotonic()
+    cached = _standing_cache.get(key)
+    if cached is not None:
+        if cached[0] > now:
+            privileged, names = cached[1]
+            return privileged, set(names)
+        del _standing_cache[key]
+    standing = await _fetch_guild_standing_uncached(discord_id)
+    if standing is not None:
+        if len(_standing_cache) >= _STANDING_CACHE_MAX:
+            # Bound the cache like the token cache: expired first,
+            # then start over — correctness never depends on it.
+            for k in [k for k, (exp, _s) in _standing_cache.items()
+                      if exp <= now]:
+                del _standing_cache[k]
+            if len(_standing_cache) >= _STANDING_CACHE_MAX:
+                _standing_cache.clear()
+        _standing_cache[key] = (
+            now + _STANDING_CACHE_TTL_S,
+            (standing[0], frozenset(standing[1])))
+    return standing
+
+
+async def _fetch_guild_standing_uncached(
     discord_id: str,
 ) -> tuple[bool, set[str]] | None:
     """Guild standing for a Discord user: (privileged, role_names).
@@ -2415,6 +2461,9 @@ async def change_crew_role(body: CrewRoleChange, user: AdminUser) -> dict:
             detail="Discord request failed — try again shortly.",
         )
     if result == 204:
+        # The target's roles just changed; don't let a cached standing
+        # keep answering with the old role set.
+        _invalidate_standing(body.discord_id)
         return {"ok": True, "discord_id": body.discord_id,
                 "role": body.role, "action": body.action}
     if result == 404:
