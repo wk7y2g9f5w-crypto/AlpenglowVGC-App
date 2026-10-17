@@ -113,6 +113,11 @@ COURSES = [
     # exact-name preference keeps us on the right boundary.
     dict(slug="castle-pines-golf-club", display="Castle Pines Golf Club",
          lat=39.4366699, lon=-104.9003579, boundaries=["Castle Pines Golf Club"]),
+    # Added to Golf+ 2026-10-16 (Big Cedar Lodge). Pars verified against
+    # Cayden's in-game GPS screenshots 2026-10-17 (in COURSE_PARS).
+    dict(slug="paynes-valley", display="Payne's Valley",
+         lat=36.5646859, lon=-93.2010533,
+         boundaries=["Payne's Valley Golf Course", "Payne's Valley"]),
 ]
 
 # --------------------------------------------------------------------------

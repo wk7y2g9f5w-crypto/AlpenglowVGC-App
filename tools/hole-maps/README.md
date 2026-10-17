@@ -62,6 +62,22 @@ on top of complete real data). Water is never synthesized.
 - If you re-render, attribution stays with the images; do not ship the
   intermediate vectors.
 
+## Manifest warning (learned 2026-10-17, Payne's Valley)
+
+`render.py`'s Dart manifest writer is STALE and batch-scoped: its
+`DART_HEADER` predates the `YardageMarker` / `yardages` /
+`yardsPerPixel` fields, and `write_manifest` only writes the courses
+in the current `--courses` batch. Running it rewrites
+`app/lib/widgets/hole_map_manifest.dart` in the old schema with only
+the rendered courses, wiping every other course and all marker
+augmentations. Until render.py is brought up to the current schema,
+add a course by rendering it, then hand-merging just its generated
+block into the committed manifest (entries are format-compatible —
+the new fields are optional). Also: the generator emits course keys
+as single-quoted strings, which is invalid Dart for names with an
+apostrophe — the Payne's Valley key must be double-quoted
+(`"Payne's Valley": {`).
+
 ## Course notes / gotchas
 
 - **TPC Sawgrass**: hole ways are tagged `Stadium N` vs `Valley N`
