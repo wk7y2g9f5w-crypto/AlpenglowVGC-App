@@ -2055,12 +2055,40 @@ class AltShotApiTestCase(ApiTestCase):
         r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
                              headers=self.h("5"), json={})
         self.assertEqual(r.status_code, 422, r.text)
-        # Guest text names are rejected on 2-team tee times.
+        # Guest names are allowed when JOINING casual alt-shot (Cayden
+        # 2026-10-18: "for casual, guests are fine") — but they only take
+        # a roster slot that's actually free. Here user 5's own join
+        # fills team 1's last slot, so the extra name has nowhere to go
+        # and is dropped; the join itself still succeeds.
         r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
                              headers=self.h("5"),
                              json={"team_id": teams[1]["id"],
                                    "extra_names": ["Gus"]})
-        self.assertEqual(r.status_code, 422, r.text)
+        self.assertEqual(r.status_code, 200, r.text)
+        team1 = self._teams_by_number(r.json())[1]
+        self.assertEqual(team1["member_discord_ids"], ["1", "5"])
+        self.assertEqual(team1["player_names"], ["User1", "User5"])
+
+    def test_join_with_guest_partner(self):
+        # A captain joining with a typed-in guest partner: the guest is
+        # added as an unnamed-account member and counts toward the
+        # team's roster cap exactly like a registered player.
+        tt = self._create_tt()
+        teams = self._teams_by_number(tt)
+        t2 = teams[2]
+        r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
+                             headers=self.h("2"),
+                             json={"team_id": t2["id"],
+                                   "extra_names": ["Gus"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        team2 = self._teams_by_number(r.json())[2]
+        self.assertEqual(team2["member_discord_ids"], ["2"])
+        self.assertEqual(team2["player_names"], ["User2", "Gus"])
+        # The guest fills the team (size 2): a third join is full.
+        r = self.client.post(f"/api/altshot-tee-times/{tt['id']}/join",
+                             headers=self.h("3"), json={"team_id": t2["id"]})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("full", r.json()["detail"].lower())
 
     def test_player_cannot_join_both_teams(self):
         tt = self._create_tt()
