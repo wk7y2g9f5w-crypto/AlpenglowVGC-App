@@ -62,21 +62,24 @@ on top of complete real data). Water is never synthesized.
 - If you re-render, attribution stays with the images; do not ship the
   intermediate vectors.
 
-## Manifest warning (learned 2026-10-17, Payne's Valley)
+## Manifest writer (fixed 2026-10-18)
 
-`render.py`'s Dart manifest writer is STALE and batch-scoped: its
-`DART_HEADER` predates the `YardageMarker` / `yardages` /
-`yardsPerPixel` fields, and `write_manifest` only writes the courses
-in the current `--courses` batch. Running it rewrites
-`app/lib/widgets/hole_map_manifest.dart` in the old schema with only
-the rendered courses, wiping every other course and all marker
-augmentations. Until render.py is brought up to the current schema,
-add a course by rendering it, then hand-merging just its generated
-block into the committed manifest (entries are format-compatible —
-the new fields are optional). Also: the generator emits course keys
-as single-quoted strings, which is invalid Dart for names with an
-apostrophe — the Payne's Valley key must be double-quoted
-(`"Payne's Valley": {`).
+`render.py`'s Dart manifest writer is current-schema and
+PRESERVE-MERGE: it parses the committed
+`app/lib/widgets/hole_map_manifest.dart` before writing and carries
+forward every course and hole outside the render batch, plus the
+yardage augmentations (`yardsPerPixel` / `yardages`) of re-rendered
+holes — those exist only in the committed file, so they are kept
+verbatim. Course keys are emitted apostrophe-safe (`"Payne's
+Valley"` is double-quoted). Adding a course is just: extract,
+render, commit — no hand-merging.
+
+One caution: re-rendering an EXISTING course regenerates its
+tee/pin geometry from the current `holes.json`. For older courses
+the extracted data has drifted from the committed manifest (which
+embodies screenshot-QA corrections), so a full-batch re-render
+shows geometry churn on those courses — diff the manifest after
+any re-render and commit only the changes you intended.
 
 ## Course notes / gotchas
 
