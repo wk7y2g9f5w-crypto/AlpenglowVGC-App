@@ -338,6 +338,8 @@ class _NotificationPrefsState extends State<_NotificationPrefs> {
     ('ace', 'Hole-in-one', 'Someone aces a hole'),
     ('albatross', 'Albatross', 'Someone goes 3-under on a hole'),
     ('top3_changes', 'Top 3 changes', 'The leaderboard top 3 reorders'),
+    ('witness_designated', 'Named as a witness',
+        'A Solo player picks you as their witness'),
   ];
 
   ApiClient get _api => ApiClient(

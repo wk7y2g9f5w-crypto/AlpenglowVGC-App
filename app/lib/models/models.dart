@@ -146,6 +146,10 @@ class Tournament {
   /// picker hides them — a finished round can't be booked again.
   final List<int> myCompletedRounds;
 
+  /// Season(s) this tournament counts toward (by design exactly one,
+  /// or none). Empty = its standings go nowhere.
+  final List<Season> seasons;
+
   Tournament({
     required this.id,
     required this.name,
@@ -164,6 +168,7 @@ class Tournament {
     this.numRounds = 1,
     this.rounds = const [],
     this.myCompletedRounds = const [],
+    this.seasons = const [],
   });
 
   factory Tournament.fromJson(Map<String, dynamic> j) => Tournament(
@@ -190,7 +195,14 @@ class Tournament {
         myCompletedRounds: ((j['my_completed_rounds'] as List?) ?? [])
             .map((e) => (e as num).toInt())
             .toList(growable: false),
+        seasons: ((j['seasons'] as List?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(Season.fromJson)
+            .toList(growable: false),
       );
+
+  /// The season this tournament counts toward, or null for none.
+  Season? get season => seasons.isEmpty ? null : seasons.first;
 
   /// True when the tournament has more than one round configured.
   bool get isMultiRound => numRounds > 1 || rounds.length > 1;
@@ -811,6 +823,37 @@ class SeasonStandingEntry {
           (json['tournaments_played'] as num?)?.toInt() ?? 0,
     );
   }
+}
+
+/// One season. Seasons run side by side; a tournament counts toward
+/// exactly one (or none).
+class Season {
+  final int id;
+  final String name;
+  final String status; // 'active' | 'completed'
+  final String? startDate; // YYYY-MM-DD or null
+  final String? endDate; // YYYY-MM-DD or null
+  final int tournamentCount;
+
+  const Season({
+    required this.id,
+    required this.name,
+    required this.status,
+    this.startDate,
+    this.endDate,
+    this.tournamentCount = 0,
+  });
+
+  bool get isActive => status == 'active';
+
+  factory Season.fromJson(Map<String, dynamic> j) => Season(
+        id: (j['id'] as num?)?.toInt() ?? 0,
+        name: (j['name'] ?? 'Season').toString(),
+        status: (j['status'] ?? 'active').toString(),
+        startDate: j['start_date']?.toString(),
+        endDate: j['end_date']?.toString(),
+        tournamentCount: (j['tournament_count'] as num?)?.toInt() ?? 0,
+      );
 }
 
 /// Season points standings: the active season's name plus ranked entries.

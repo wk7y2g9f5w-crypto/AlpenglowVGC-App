@@ -195,6 +195,7 @@ class ApiClient {
     String greenSpeed = 'pro',
     String? description,
     List<Map<String, String>>? rounds,
+    int? seasonId,
   }) async {
     final payload = <String, dynamic>{
       'name': name,
@@ -209,6 +210,7 @@ class ApiClient {
       'green_speed': greenSpeed,
       if (description != null && description.isNotEmpty)
         'description': description,
+      if (seasonId != null) 'season_id': seasonId,
     };
     if (rounds != null) payload['rounds'] = rounds;
     final body = await _post('/api/tournaments', payload);
@@ -558,12 +560,33 @@ class ApiClient {
     return (body as Map<String, dynamic>? ?? {});
   }
 
+  /// All seasons, newest first (pickers, Seasons screen, standings
+  /// switcher).
+  Future<List<Season>> listSeasons() async {
+    final body = await _get('/api/seasons');
+    final map = body as Map<String, dynamic>? ?? {};
+    final items = (map['seasons'] as List? ?? []);
+    return items
+        .whereType<Map<String, dynamic>>()
+        .map(Season.fromJson)
+        .toList(growable: false);
+  }
+
+  /// Set which season a tournament counts toward (crew). Null = none.
+  /// Points move with the assignment server-side.
+  Future<void> setTournamentSeason(String tournamentId, int? seasonId) async {
+    await _put('/api/tournaments/$tournamentId/season',
+        {'season_id': seasonId});
+  }
+
   /// Typed season points standings. Returns [SeasonStandings.empty] when
   /// there is no active season (API 404 no_active_season) instead of
   /// throwing, so the UI can show a friendly empty state.
-  Future<SeasonStandings> seasonStandings() async {
+  Future<SeasonStandings> seasonStandings({int? seasonId}) async {
     try {
-      final body = await _get('/api/seasons/standings');
+      final body = await _get(seasonId == null
+          ? '/api/seasons/standings'
+          : '/api/seasons/standings?season_id=$seasonId');
       final map = body as Map<String, dynamic>? ?? {};
       final season = map['season'] as Map<String, dynamic>?;
       final items = (map['standings'] as List? ?? []);
@@ -761,7 +784,8 @@ class ApiClient {
         'round_starts',
         'ace',
         'albatross',
-        'top3_changes'
+        'top3_changes',
+        'witness_designated'
       ])
         k: map[k] == true,
     };

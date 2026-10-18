@@ -41,6 +41,10 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
   bool _loadingCourses = true;
   bool _submitting = false;
 
+  // Season pick (side-by-side seasons): null = counts for no season.
+  List<Season> _activeSeasons = [];
+  int? _seasonId;
+
   String _format = 'stroke';
   int _holes = 18;
   GolfCourse? _course;
@@ -72,6 +76,24 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
   void initState() {
     super.initState();
     _loadCourses();
+    _loadSeasons();
+  }
+
+  Future<void> _loadSeasons() async {
+    try {
+      final seasons = await _api.listSeasons();
+      if (!mounted) return;
+      final active = seasons.where((s) => s.isActive).toList();
+      setState(() {
+        _activeSeasons = active;
+        // Exactly one active season: preselect it (still changeable).
+        if (active.length == 1) _seasonId = active.first.id;
+      });
+    } catch (e) {
+      // Seasons are best-effort here: on failure the picker just shows
+      // the no-season warning and creation still works.
+      if (mounted) setState(() => _activeSeasons = []);
+    }
   }
 
   @override
@@ -282,6 +304,7 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
         description:
             _descCtrl.text.trim().isEmpty ? null : _descCtrl.text.trim(),
         rounds: rounds,
+        seasonId: _seasonId,
       );
       if (mounted) {
         showSnack(context, 'Tournament created.');
@@ -412,6 +435,12 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
                         .toList(),
                     onChanged: (v) =>
                         _setFormat(v ?? 'stroke'),
+                  ),
+                  const SizedBox(height: 12),
+                  SeasonPicker(
+                    activeSeasons: _activeSeasons,
+                    value: _seasonId,
+                    onChanged: (v) => setState(() => _seasonId = v),
                   ),
                   const SizedBox(height: 12),
                   Row(

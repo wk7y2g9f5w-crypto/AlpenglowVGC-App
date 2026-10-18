@@ -18,22 +18,53 @@ class SeasonStandingsView extends StatefulWidget {  final ApiClient api;
 
 class _SeasonStandingsViewState extends State<SeasonStandingsView> {
   Future<SeasonStandings>? _future;
+  List<Season> _seasons = [];
+  int? _selectedId;
 
   @override
   void initState() {
     super.initState();
     _future = widget.api.seasonStandings();
+    _loadSeasons();
+  }
+
+  /// Load the season list for the switcher (side-by-side seasons).
+  /// Default view stays the API's default (newest active season); the
+  /// switcher just lets you look at any other season, active or done.
+  Future<void> _loadSeasons() async {
+    try {
+      final seasons = await widget.api.listSeasons();
+      if (!mounted) return;
+      setState(() {
+        _seasons = seasons;
+        if (seasons.isNotEmpty) {
+          final active = seasons.where((s) => s.isActive).toList();
+          _selectedId =
+              (active.isNotEmpty ? active.first : seasons.first).id;
+        }
+      });
+    } catch (e) {
+      // Switcher is best-effort; the default standings still show.
+    }
   }
 
   Future<void> _refresh() async {
-    final f = widget.api.seasonStandings();
+    final f = widget.api.seasonStandings(seasonId: _selectedId);
     setState(() => _future = f);
     await f;
   }
 
+  void _pickSeason(int? id) {
+    if (id == null || id == _selectedId) return;
+    setState(() {
+      _selectedId = id;
+      _future = widget.api.seasonStandings(seasonId: id);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    return AsyncBody<SeasonStandings>(
+    final standings = AsyncBody<SeasonStandings>(
       future: _future!,
       onRefresh: _refresh,
       builder: (context, s) {
@@ -107,6 +138,32 @@ class _SeasonStandingsViewState extends State<SeasonStandingsView> {
           },
         );
       },
+    );
+    if (_seasons.length < 2) return standings;
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          child: DropdownButtonFormField<int>(
+            initialValue: _selectedId,
+            decoration: const InputDecoration(
+              labelText: 'Season',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: _seasons
+                .map((s) => DropdownMenuItem(
+                      value: s.id,
+                      child: Text(s.isActive
+                          ? s.name
+                          : '${s.name} (completed)'),
+                    ))
+                .toList(),
+            onChanged: _pickSeason,
+          ),
+        ),
+        Expanded(child: standings),
+      ],
     );
   }
 }

@@ -73,6 +73,38 @@ class SeasonDbTest(unittest.IsolatedAsyncioTestCase):
         # completing twice is a no-op
         self.assertFalse(await db.complete_season(self.db_path, sid))
 
+    async def test_unlink_and_delete_points(self):
+        # The season-move helpers (Cayden 2026-10-18): unlinking and
+        # pulling a tournament's points out of a season.
+        sid = await db.create_season(self.db_path, "guild1", "S1", "admin1")
+        tid = await self._make_tournament()
+        await db.add_tournament_to_season(self.db_path, sid, tid)
+        await db.record_season_points(self.db_path, sid, tid,
+                                      [("p1", 1, 100), ("p2", 2, 90)])
+        self.assertEqual(
+            await db.delete_season_points(self.db_path, sid, tid), 2)
+        self.assertEqual(
+            await db.delete_season_points(self.db_path, sid, tid), 0)
+        self.assertTrue(await db.remove_tournament_from_season(
+            self.db_path, sid, tid))
+        self.assertFalse(await db.remove_tournament_from_season(
+            self.db_path, sid, tid))
+        self.assertEqual(await db.get_season_tournaments(
+            self.db_path, sid), [])
+
+    async def test_seasons_for_tournament_any_status(self):
+        sid = await db.create_season(self.db_path, "guild1", "S1", "admin1")
+        tid = await self._make_tournament()
+        await db.add_tournament_to_season(self.db_path, sid, tid)
+        await db.complete_season(self.db_path, sid)
+        # Default (active-only) hides the completed link...
+        self.assertEqual(await db.get_seasons_for_tournament(
+            self.db_path, tid), [])
+        # ...status=None returns it (the assignment-correction view).
+        rows = await db.get_seasons_for_tournament(self.db_path, tid,
+                                                   status=None)
+        self.assertEqual([s["id"] for s in rows], [sid])
+
     async def test_link_tournament_idempotent(self):
         sid = await db.create_season(self.db_path, "guild1", "S1", "admin1")
         tid = await self._make_tournament()

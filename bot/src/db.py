@@ -267,6 +267,7 @@ CREATE TABLE IF NOT EXISTS notification_prefs(
   ace INTEGER NOT NULL DEFAULT 1,
   albatross INTEGER NOT NULL DEFAULT 1,
   top3_changes INTEGER NOT NULL DEFAULT 1,
+  witness_designated INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS push_outbox(
@@ -600,6 +601,15 @@ async def _migrate(db_path: str) -> None:
             await con.execute(
                 "ALTER TABLE players ADD COLUMN stats_private INTEGER"
                 " NOT NULL DEFAULT 0"
+            )
+            await con.commit()
+
+        cur = await con.execute("PRAGMA table_info(notification_prefs)")
+        pref_cols = [r[1] for r in await cur.fetchall()]
+        if "witness_designated" not in pref_cols:
+            await con.execute(
+                "ALTER TABLE notification_prefs ADD COLUMN"
+                " witness_designated INTEGER NOT NULL DEFAULT 1"
             )
             await con.commit()
 
@@ -2668,6 +2678,35 @@ async def add_tournament_to_season(db_path, season_id, tournament_id) -> bool:
     return rowcount == 1
 
 
+async def remove_tournament_from_season(db_path, season_id,
+                                        tournament_id) -> bool:
+    """Unlink a tournament from a season. False when it wasn't linked.
+
+    Does NOT touch season_points — callers moving a completed
+    tournament delete its points rows explicitly (delete_season_points)
+    so the old season's standings stop counting it.
+    """
+    _, rowcount = await _execute(
+        db_path,
+        "DELETE FROM season_tournaments WHERE season_id = ?"
+        " AND tournament_id = ?",
+        (season_id, tournament_id),
+    )
+    return rowcount > 0
+
+
+async def delete_season_points(db_path, season_id, tournament_id) -> int:
+    """Remove a tournament's points rows from one season. Returns the
+    number of rows deleted."""
+    _, rowcount = await _execute(
+        db_path,
+        "DELETE FROM season_points WHERE season_id = ?"
+        " AND tournament_id = ?",
+        (season_id, tournament_id),
+    )
+    return rowcount
+
+
 async def get_season_tournaments(db_path, season_id) -> list[dict]:
     return await _fetchall(
         db_path,
@@ -2679,6 +2718,15 @@ async def get_season_tournaments(db_path, season_id) -> list[dict]:
 
 async def get_seasons_for_tournament(db_path, tournament_id,
                                      status="active") -> list[dict]:
+    """Seasons a tournament is linked to. status=None returns every
+    link regardless of season status (the season-assignment views)."""
+    if status is None:
+        return await _fetchall(
+            db_path,
+            "SELECT s.* FROM seasons s JOIN season_tournaments st"
+            " ON st.season_id = s.id WHERE st.tournament_id = ?",
+            (tournament_id,),
+        )
     return await _fetchall(
         db_path,
         "SELECT s.* FROM seasons s JOIN season_tournaments st ON st.season_id = s.id"
@@ -3441,7 +3489,7 @@ async def ack_outbox(db_path, ids: list[int]) -> None:
 
 # ------------------------------------------------------------------- push notifications
 PREF_KEYS = ("tournament_starts", "round_starts", "ace", "albatross",
-             "top3_changes")
+             "top3_changes", "witness_designated")
 
 
 async def register_device(db_path, discord_id: str, push_token: str,
@@ -3482,16 +3530,18 @@ async def set_notification_prefs(db_path, discord_id: str,
     await _execute(
         db_path,
         "INSERT INTO notification_prefs (discord_id, tournament_starts,"
-        " round_starts, ace, albatross, top3_changes, updated_at)"
-        " VALUES (?,?,?,?,?,?,?)"
+        " round_starts, ace, albatross, top3_changes, witness_designated,"
+        " updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?)"
         " ON CONFLICT(discord_id) DO UPDATE SET"
         " tournament_starts=excluded.tournament_starts,"
         " round_starts=excluded.round_starts, ace=excluded.ace,"
         " albatross=excluded.albatross, top3_changes=excluded.top3_changes,"
+        " witness_designated=excluded.witness_designated,"
         " updated_at=excluded.updated_at",
         (discord_id, clean["tournament_starts"], clean["round_starts"],
          clean["ace"], clean["albatross"], clean["top3_changes"],
-         utcnow_iso()),
+         clean["witness_designated"], utcnow_iso()),
     )
     return await get_notification_prefs(db_path, discord_id)
 
@@ -3611,6 +3661,23 @@ async def notify_tournament_players(db_path, tournament_id: str, pref_key: str,
         await enqueue_push(db_path, pid, title, body, data)
         n += 1
     return n
+
+
+async def notify_player(db_path, discord_id: str, pref_key: str,
+                        title: str, body: str,
+                        data: dict | None = None) -> bool:
+    """Enqueue a push for ONE player, gated exactly like the tournament
+    broadcasts: their pref for `pref_key` is on and they have a
+    registered device. Returns True when a push was enqueued."""
+    prefs = await get_notification_prefs(db_path, discord_id)
+    if not prefs.get(pref_key, True):
+        return False
+    dev = await _fetchone(
+        db_path, "SELECT 1 FROM devices WHERE discord_id = ?", (discord_id,))
+    if dev is None:
+        return False
+    await enqueue_push(db_path, discord_id, title, body, data)
+    return True
 
 
 # ------------------------------------------------------------------- casual tee times

@@ -869,7 +869,8 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
 
 def _tournament_json(t: dict, registered: bool,
                      rounds: list[dict] | None = None,
-                     my_completed_rounds: list[int] | None = None) -> dict:
+                     my_completed_rounds: list[int] | None = None,
+                     seasons: list[dict] | None = None) -> dict:
     pars_csv = t.get("pars")
     pars = None
     if pars_csv:
@@ -893,6 +894,12 @@ def _tournament_json(t: dict, registered: bool,
         "green_speed": t.get("green_speed"),
         "pars": pars,
         "registered": registered,
+        # Season(s) this tournament counts toward (Cayden 2026-10-18:
+        # exactly one by design; empty = counts for no season).
+        "seasons": [
+            {"id": s["id"], "name": s["name"], "status": s["status"]}
+            for s in (seasons or [])
+        ],
         # Rounds the requesting user has already finished here (submitted
         # own or team card). The app hides them in the tee-time round
         # picker — a finished round can't be booked again.
@@ -1111,6 +1118,10 @@ class TournamentCreate(BaseModel):
     green_speed: str = "pro"
     pars: str | None = None  # comma-separated override; auto-filled when omitted
     description: str | None = None
+    # Which season's standings this tournament feeds (Cayden
+    # 2026-10-18: seasons run side by side; the creator picks).
+    # None = counts for no season.
+    season_id: int | None = None
     # 1-5 rounds; each is one full play of the course (18 holes).
     # When omitted, a single round copies the top-level tee/pin/wind.
     rounds: list[RoundCreate] | None = None
@@ -1507,8 +1518,11 @@ async def list_tournaments(user: CurrentUser) -> list[dict]:
         rounds = await db.list_rounds(DB_PATH, t["id"])
         completed = await db.completed_round_numbers(
             DB_PATH, t["id"], user["discord_id"])
+        seasons = await db.get_seasons_for_tournament(
+            DB_PATH, t["id"], status=None)
         out.append(_tournament_json(t, registered, rounds,
-                                    my_completed_rounds=completed))
+                                    my_completed_rounds=completed,
+                                    seasons=seasons))
     return out
 
 
@@ -1535,6 +1549,68 @@ def _validated_round(r: "RoundCreate", body: "TournamentCreate") -> dict:
     }
 
 
+async def _validate_season_pick(season_id: int | None) -> dict | None:
+    """Resolve a creator's season pick to its row (None pick → None).
+
+    422 when the season doesn't exist in this guild or isn't active —
+    a completed season's standings are closed to new tournaments.
+    """
+    if season_id is None:
+        return None
+    season = await db.get_season(DB_PATH, season_id)
+    if not season or str(season["guild_id"]) != str(GUILD_ID):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "season_not_found",
+                    "message": "That season does not exist."},
+        )
+    if season["status"] != "active":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "season_not_active",
+                    "message": "That season has ended — pick an active one."},
+        )
+    return season
+
+
+async def _apply_tournament_season(t: dict,
+                                   season_id: int | None) -> dict:
+    """Set a tournament's season assignment to exactly `season_id`
+    (None = counts for no season), moving its points with it.
+
+    Points follow the link: rows in seasons it leaves are deleted,
+    and a completed tournament's results are awarded into the new
+    season (idempotently) — Cayden 2026-10-18: mistakes must be
+    correctable. The target season is validated by the caller.
+    """
+    tid = t["id"]
+    current = await db.get_seasons_for_tournament(DB_PATH, tid, status=None)
+    current_ids = [s["id"] for s in current]
+    removed_points = 0
+    for s in current:
+        if season_id is not None and s["id"] == season_id:
+            continue
+        removed_points += await db.delete_season_points(DB_PATH, s["id"], tid)
+        await db.remove_tournament_from_season(DB_PATH, s["id"], tid)
+    awarded = 0
+    if season_id is not None:
+        await db.add_tournament_to_season(DB_PATH, season_id, tid)
+        if t["status"] == "completed":
+            target = await db.get_season(DB_PATH, season_id)
+            if target and target["status"] == "active":
+                rows = await lr.final_standings_points(DB_PATH, tid)
+                awarded = await db.record_season_points(
+                    DB_PATH, season_id, tid,
+                    [(r["player_discord_id"], r["position"], r["points"])
+                     for r in rows],
+                )
+    return {
+        "previous_season_ids": current_ids,
+        "points_removed": removed_points,
+        "points_awarded": awarded,
+    }
+
+
 @app.post("/api/tournaments", status_code=status.HTTP_201_CREATED)
 async def create_tournament(body: TournamentCreate, user: CrewUser) -> dict:
     """Create a tournament (crew only). Mirrors /tournament create.
@@ -1544,6 +1620,9 @@ async def create_tournament(body: TournamentCreate, user: CrewUser) -> dict:
     within a minute: it attaches the persistent Register button and
     refreshes the Tee Sheet board.
     """
+    # Season pick validated first: a bad pick fails before anything is
+    # created.
+    await _validate_season_pick(body.season_id)
     try:
         start_d, end_d = sl.validate_date_range(body.start_date, body.end_date)
     except ValueError as e:
@@ -1589,18 +1668,24 @@ async def create_tournament(body: TournamentCreate, user: CrewUser) -> dict:
         ),
     )
     await db.enqueue_outbox(DB_PATH, "tournament_created", {"tournament_id": tid})
-    # Auto-link the new tournament to every active season so its season
-    # points land automatically on completion. Failure-safe: a link failure
-    # must never break tournament creation (the bot's /tournament create
-    # does the same).
-    try:
-        for s in await db.get_active_seasons(DB_PATH, GUILD_ID):
-            await db.add_tournament_to_season(DB_PATH, s["id"], tid)
-    except Exception as e:
-        print(f"season auto-link failed for tournament {tid}: {e}")
+    # Link ONLY the season the creator picked (Cayden 2026-10-18:
+    # seasons run side by side and the creator chooses which one the
+    # standings go to; no pick = counts for no season). Validated
+    # before creation above, so this cannot fail on a bad pick.
+    # Failure-safe regardless: a link failure must never break
+    # tournament creation.
+    picked_season = None
+    if body.season_id is not None:
+        try:
+            await db.add_tournament_to_season(DB_PATH, body.season_id, tid)
+            picked_season = await db.get_season(DB_PATH, body.season_id)
+        except Exception as e:
+            print(f"season link failed for tournament {tid}: {e}")
     t = await db.get_tournament(DB_PATH, tid)
     rounds = await db.list_rounds(DB_PATH, tid)
-    return _tournament_json(t, registered=False, rounds=rounds)
+    return _tournament_json(
+        t, registered=False, rounds=rounds,
+        seasons=[picked_season] if picked_season else [])
 
 
 @app.post("/api/tournaments/{tournament_id}/register")
@@ -2458,6 +2543,28 @@ async def designate_witness(tee_time_id: int, body: WitnessDesignate,
                            "they can't also be its witness.",
             },
         )
+    if result != "already":
+        # Notify the witness (Cayden 2026-10-18): being INPUT as a
+        # witness pushes to the designee — a self-join does not (they
+        # already know) and neither does an admin add. Gated by the
+        # witness's own witness_designated pref + having a device.
+        # Failure-safe: a push problem never breaks the designation.
+        try:
+            t = await db.get_tournament(DB_PATH, tt["tournament_id"])
+            tname = t["name"] if t else "a tournament"
+            who = user.get("display_name") or "A player"
+            await db.notify_player(
+                DB_PATH, target, "witness_designated",
+                "You've been named a witness",
+                f"{who} picked you as their witness for {tname}. "
+                "You'll co-submit their scorecard after the round.",
+                data={"kind": "witness_designated",
+                      "tee_time_id": tt["id"],
+                      "tournament_id": tt["tournament_id"]},
+            )
+        except Exception as e:  # noqa: BLE001 - designation must survive
+            print(f"witness-designated push failed for tee time "
+                  f"{tt['id']}: {e}")
     return {"witness": True, "already": result == "already"}
 
 
@@ -2652,7 +2759,10 @@ async def edit_tournament(
     )
     t = await db.get_tournament(DB_PATH, t["id"])
     rounds = await db.list_rounds(DB_PATH, t["id"])
-    return _tournament_json(t, registered=False, rounds=rounds)
+    seasons = await db.get_seasons_for_tournament(
+        DB_PATH, t["id"], status=None)
+    return _tournament_json(t, registered=False, rounds=rounds,
+                            seasons=seasons)
 
 
 class RoundUpdate(BaseModel):
@@ -5590,8 +5700,19 @@ class SeasonDateUpdate(BaseModel):
 
 
 @app.get("/api/seasons/standings")
-async def season_standings(user: CurrentUser) -> dict:
-    season = await db.get_active_season(DB_PATH, GUILD_ID)
+async def season_standings(user: CurrentUser,
+                           season_id: int | None = None) -> dict:
+    # With side-by-side seasons the caller picks which one to view;
+    # without a pick it defaults to the newest active season.
+    if season_id is not None:
+        season = await db.get_season(DB_PATH, season_id)
+        if not season or str(season["guild_id"]) != str(GUILD_ID):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "season_not_found"},
+            )
+    else:
+        season = await db.get_active_season(DB_PATH, GUILD_ID)
     if not season:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -5619,18 +5740,37 @@ async def season_standings(user: CurrentUser) -> dict:
     }
 
 
+def _season_json(season: dict) -> dict:
+    return {
+        "id": season["id"],
+        "name": season["name"],
+        "status": season["status"],
+        "start_date": season.get("start_date"),
+        "end_date": season.get("end_date"),
+    }
+
+
+@app.get("/api/seasons")
+async def list_seasons(user: CurrentUser) -> dict:
+    """All seasons (newest first) — the pickers and the Seasons screen.
+
+    Seasons run side by side (Cayden 2026-10-18): any number may be
+    active at once, and each tournament picks the one it counts toward.
+    """
+    rows = await db.list_seasons(DB_PATH, GUILD_ID)
+    return {
+        "seasons": [
+            {**_season_json(s),
+             "tournament_count": s.get("tournament_count", 0)}
+            for s in rows
+        ],
+    }
+
+
 @app.post("/api/seasons", status_code=status.HTTP_201_CREATED)
 async def create_season(body: SeasonCreate, user: AdminUser) -> dict:
-    existing = await db.get_active_season(DB_PATH, GUILD_ID)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "active_season_exists",
-                "active_season_id": existing["id"],
-                "active_season_name": existing["name"],
-            },
-        )
+    # No one-active-season block (Cayden 2026-10-18): seasons run side
+    # by side; each ends independently.
     sid = await db.create_season(
         DB_PATH, GUILD_ID, body.name, user["discord_id"],
         start_date=body.start_date, end_date=body.end_date,
@@ -5718,6 +5858,30 @@ async def update_season_dates(
         "status": season["status"],
         "start_date": season.get("start_date"),
         "end_date": season.get("end_date"),
+    }
+
+
+class TournamentSeasonSet(BaseModel):
+    season_id: int | None = None
+
+
+@app.put("/api/tournaments/{tournament_id}/season")
+async def set_tournament_season(tournament_id: int,
+                                body: TournamentSeasonSet,
+                                user: CrewUser) -> dict:
+    """Set which season a tournament counts toward (crew only).
+
+    The correction path for a wrong pick at creation (Cayden
+    2026-10-18: editing must be available for everything). Points
+    move with the assignment; season_id null = counts for no season.
+    """
+    t = await _tournament_or_404(tournament_id)
+    target = await _validate_season_pick(body.season_id)
+    result = await _apply_tournament_season(t, body.season_id)
+    return {
+        "tournament_id": t["id"],
+        "season": _season_json(target) if target else None,
+        **result,
     }
 
 
@@ -5823,6 +5987,7 @@ class NotificationPrefsUpdate(BaseModel):
     ace: bool | None = None
     albatross: bool | None = None
     top3_changes: bool | None = None
+    witness_designated: bool | None = None
 
 
 @app.get("/api/notifications/prefs")

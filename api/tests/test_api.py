@@ -943,11 +943,13 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(rows[0]["total_points"], 100)
         self.assertEqual(rows[1]["discord_id"], "456")
 
-    def test_create_tournament_auto_links_active_season(self):
+    def test_create_tournament_links_picked_season(self):
+        # Cayden 2026-10-18: the creator PICKS the season; no pick
+        # links nothing (see test_seasons_multi.py for the full matrix).
         sid = run(db.create_season(self.db_path, GUILD, "Fall 2026", "123"))
         self._crew(True)
         r = self.client.post("/api/tournaments", headers=self.h("123"),
-                             json=self._create_body())
+                             json=self._create_body(season_id=sid))
         self.assertEqual(r.status_code, 201, r.text)
         tid = r.json()["id"]
         seasons = run(db.get_seasons_for_tournament(self.db_path, tid,
@@ -996,13 +998,16 @@ class ApiTestCase(unittest.TestCase):
         self.assertIsNone(body["start_date"])
         self.assertIsNone(body["end_date"])
 
-    def test_create_season_409_when_active_exists(self):
+    def test_create_season_side_by_side(self):
+        # Cayden 2026-10-18: seasons run side by side — starting one
+        # while another is active is the normal case now, not a 409.
         self._admin(True)
         run(db.create_season(self.db_path, GUILD, "Fall 2026", "1"))
         r = self.client.post("/api/seasons", headers=self.h("1"),
                              json=self._season_body())
-        self.assertEqual(r.status_code, 409, r.text)
-        self.assertEqual(r.json()["code"], "active_season_exists")
+        self.assertEqual(r.status_code, 201, r.text)
+        actives = run(db.get_active_seasons(self.db_path, GUILD))
+        self.assertEqual(len(actives), 2)
 
     def test_create_season_422_blank_name(self):
         self._admin(True)

@@ -250,6 +250,7 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
           pars: fresh.pars,
           numRounds: fresh.numRounds,
           rounds: fresh.rounds,
+          seasons: fresh.seasons,
         ));
   }
 
@@ -258,6 +259,25 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
     final courseCtrl = TextEditingController(text: _tournament.course ?? '');
     DateTime? start = _parseDate(_tournament.startDate);
     DateTime? end = _parseDate(_tournament.endDate);
+
+    // Season correction (Cayden 2026-10-18): the pick can be changed
+    // here; points move with it server-side. Options = active seasons
+    // plus the current assignment when it isn't active anymore (so
+    // the dialog opens showing the truth).
+    List<Season>? seasonOptions;
+    int? seasonPick = _tournament.season?.id;
+    try {
+      final all = await _api.listSeasons();
+      seasonOptions = all.where((s) => s.isActive).toList();
+      final current = _tournament.season;
+      if (current != null &&
+          !seasonOptions.any((s) => s.id == current.id)) {
+        seasonOptions.add(current);
+      }
+    } catch (e) {
+      seasonOptions = null; // picker hidden; season left untouched
+    }
+    if (!mounted) return;
 
     final saved = await showDialog<bool>(
       context: context,
@@ -277,6 +297,14 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
                   decoration: const InputDecoration(labelText: 'Course'),
                 ),
                 const SizedBox(height: 8),
+                if (seasonOptions != null) ...[
+                  SeasonPicker(
+                    activeSeasons: seasonOptions,
+                    value: seasonPick,
+                    onChanged: (v) => setDlg(() => seasonPick = v),
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 Row(
                   children: [
                     Expanded(
@@ -342,18 +370,28 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
     if (startIso != _tournament.startDate) fields['start_date'] = startIso;
     final endIso = end == null ? null : _iso(end!);
     if (endIso != _tournament.endDate) fields['end_date'] = endIso;
-    if (fields.isEmpty) {
+    final seasonChanged =
+        seasonOptions != null && seasonPick != _tournament.season?.id;
+    if (fields.isEmpty && !seasonChanged) {
       showSnack(context, 'Nothing changed.');
       return;
     }
 
     setState(() => _busy = true);
     try {
-      final updated = await _api.editTournament(_tournament.id, fields);
-      if (mounted) {
-        _replace(updated);
-        showSnack(context, 'Tournament updated.');
+      if (fields.isNotEmpty) {
+        final updated = await _api.editTournament(_tournament.id, fields);
+        if (mounted) _replace(updated);
       }
+      if (seasonChanged) {
+        await _api.setTournamentSeason(_tournament.id, seasonPick);
+        // Refresh so the header shows the new assignment.
+        final all = await _api.getTournaments();
+        final fresh =
+            all.where((t) => t.id == _tournament.id).firstOrNull;
+        if (mounted && fresh != null) _replace(fresh);
+      }
+      if (mounted) showSnack(context, 'Tournament updated.');
     } on ApiException catch (e) {
       if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
     } catch (e) {
@@ -683,6 +721,12 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
                 style: const TextStyle(
                     color: Colors.white70, fontSize: 14)),
             Text(formatDateRange(t.startDate, t.endDate),
+                style: const TextStyle(
+                    color: Colors.white70, fontSize: 14)),
+            Text(
+                t.season != null
+                    ? '🏆 Season: ${t.season!.name}'
+                    : '🏆 No season',
                 style: const TextStyle(
                     color: Colors.white70, fontSize: 14)),
             if (t.isMultiRound) ...[

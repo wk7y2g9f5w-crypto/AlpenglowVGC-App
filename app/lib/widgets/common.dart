@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../models/models.dart';
+
 /// Small shared widgets and helpers.
 class StatusChip extends StatelessWidget {
   final String status;
@@ -216,6 +218,73 @@ class ProDifficultyDisclaimer extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Season picker for tournament create/edit (Cayden 2026-10-18):
+/// seasons run side by side, so the creator picks which one the
+/// standings go to. "No season" is always an option — picking it (or
+/// having no active season at all) shows the warning label, and the
+/// creator chooses to continue anyway or go pick one.
+class SeasonPicker extends StatelessWidget {
+  final List<Season> activeSeasons;
+  final int? value; // null = No season
+  final ValueChanged<int?> onChanged;
+
+  const SeasonPicker({
+    super.key,
+    required this.activeSeasons,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (activeSeasons.isNotEmpty)
+          DropdownButtonFormField<int?>(
+            initialValue: value,
+            decoration: const InputDecoration(
+              labelText: 'Season',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              const DropdownMenuItem<int?>(
+                value: null,
+                child: Text('No season'),
+              ),
+              for (final s in activeSeasons)
+                DropdownMenuItem<int?>(value: s.id, child: Text(s.name)),
+            ],
+            onChanged: onChanged,
+          ),
+        if (value == null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.warning_amber,
+                    size: 18, color: Colors.amber.shade800),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    activeSeasons.isEmpty
+                        ? 'No season is active — this tournament won\'t '
+                            'count toward any season standings.'
+                        : 'No season picked — this tournament won\'t '
+                            'count toward any season standings.',
+                    style: TextStyle(
+                        color: Colors.amber.shade900, fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }

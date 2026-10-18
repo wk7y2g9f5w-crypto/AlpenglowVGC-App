@@ -5,9 +5,9 @@ import '../services/api_client.dart';
 import '../services/auth.dart';
 import '../widgets/common.dart';
 
-/// Admin screen for starting a new season: shows the active season (if
-/// any) with an "End season" action, plus a Season Name + start/end
-/// date form.
+/// Admin screen for seasons: every active season (they run side by
+/// side) with Edit dates / End season actions, plus the form to start
+/// another one.
 class NewSeasonScreen extends StatefulWidget {
   final AuthService auth;
   final SettingsService settings;
@@ -24,7 +24,7 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
   DateTime? _startDate;
   DateTime? _endDate;
   bool _saving = false;
-  Future<SeasonStandings>? _future;
+  Future<List<Season>>? _future;
 
   ApiClient get _api => ApiClient(
       baseUrl: widget.settings.baseUrl, token: widget.auth.token ?? '');
@@ -32,7 +32,7 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
   @override
   void initState() {
     super.initState();
-    _future = _api.seasonStandings();
+    _future = _api.listSeasons();
   }
 
   @override
@@ -42,7 +42,7 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
   }
 
   Future<void> _refresh() async {
-    final f = _api.seasonStandings();
+    final f = _api.listSeasons();
     setState(() => _future = f);
     await f;
   }
@@ -104,16 +104,7 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
       showSnack(context, "Season '${season['name']}' started.");
       Navigator.of(context).pop(true);
     } on ApiException catch (e) {
-      if (!mounted) return;
-      if (e.statusCode == 409) {
-        showSnack(
-            context,
-            'A season is already active — end it before starting a new one.',
-            error: true);
-        await _refresh();
-      } else {
-        showSnack(context, friendlyApiMessage(e), error: true);
-      }
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
     } catch (e) {
       if (mounted) {
         showSnack(context, 'Could not create season: $e', error: true);
@@ -123,10 +114,9 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
     }
   }
 
-  /// Adjust the active season's date window via the edit-dates dialog.
-  Future<void> _editSeasonDates(SeasonStandings s) async {
-    final seasonId = s.seasonId;
-    if (seasonId == null) return;
+  /// Adjust a season's date window via the edit-dates dialog.
+  Future<void> _editSeasonDates(Season s) async {
+    final seasonId = s.id;
     DateTime? parse(String? iso) {
       if (iso == null || iso.isEmpty) return null;
       return DateTime.tryParse(iso);
@@ -135,8 +125,8 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
     final result = await showDialog<_SeasonDateEdit>(
       context: context,
       builder: (dialogContext) => _EditSeasonDatesDialog(
-        initialStart: parse(s.seasonStartDate),
-        initialEnd: parse(s.seasonEndDate),
+        initialStart: parse(s.startDate),
+        initialEnd: parse(s.endDate),
       ),
     );
     if (result == null) return;
@@ -163,9 +153,9 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
     }
   }
 
-  Future<void> _confirmEndSeason(SeasonStandings s) async {    final seasonId = s.seasonId;
-    if (seasonId == null) return;
-    final seasonName = s.seasonName;
+  Future<void> _confirmEndSeason(Season s) async {
+    final seasonId = s.id;
+    final seasonName = s.name;
     final confirmController = TextEditingController();
     final confirmed = await showDialog<bool>(
       context: context,
@@ -189,43 +179,51 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('New Season')),
-      body: AsyncBody<SeasonStandings>(
+      appBar: AppBar(title: const Text('Seasons')),
+      body: AsyncBody<List<Season>>(
         future: _future!,
         onRefresh: _refresh,
-        builder: (context, s) {
-          final hasActive = s.seasonName.isNotEmpty;
+        builder: (context, seasons) {
+          final active = seasons.where((s) => s.isActive).toList();
+          final completed = seasons.where((s) => !s.isActive).toList();
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              if (hasActive) ...[
-                Card(
-                  child: ListTile(
-                    leading: const Icon(Icons.emoji_events,
-                        color: Colors.amber),
-                    title: Text(s.seasonName,
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text(_activeRangeLabel(s)),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        TextButton(
-                          onPressed: () => _editSeasonDates(s),
-                          child: const Text('Edit dates'),
-                        ),
-                        TextButton(
-                          onPressed: () => _confirmEndSeason(s),
-                          child: const Text('End season'),
-                        ),
-                      ],
-                    ),
-                  ),
+              if (active.isNotEmpty) ...[
+                const Text('Active seasons',
+                    style: TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                const Text(
+                  'Seasons run side by side — each tournament picks the '
+                  'one it counts toward.',
+                  style: TextStyle(color: Colors.grey, fontSize: 13),
                 ),
                 const SizedBox(height: 8),
-                const Text(
-                  'End the current season before starting a new one.',
-                  style: TextStyle(color: Colors.grey),
-                ),
+                for (final s in active)
+                  Card(
+                    child: ListTile(
+                      leading: const Icon(Icons.emoji_events,
+                          color: Colors.amber),
+                      title: Text(s.name,
+                          style:
+                              const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text(_rangeLabel(s)),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TextButton(
+                            onPressed: () => _editSeasonDates(s),
+                            child: const Text('Edit dates'),
+                          ),
+                          TextButton(
+                            onPressed: () => _confirmEndSeason(s),
+                            child: const Text('End season'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 const SizedBox(height: 16),
                 const Divider(),
                 const SizedBox(height: 8),
@@ -272,18 +270,27 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.add),
                 label: const Text('Start Season'),
-                onPressed:
-                    (_saving || hasActive) ? null : () => _create(),
+                onPressed: _saving ? null : () => _create(),
               ),
-              if (hasActive)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    'Disabled while a season is active.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.grey),
+              if (completed.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                const Divider(),
+                const SizedBox(height: 8),
+                const Text('Completed seasons',
+                    style: TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                for (final s in completed)
+                  ListTile(
+                    leading: const Icon(Icons.flag_outlined,
+                        color: Colors.grey),
+                    title: Text(s.name),
+                    subtitle: Text(
+                        '${s.tournamentCount} tournament'
+                        '${s.tournamentCount == 1 ? '' : 's'} • Completed'),
+                    dense: true,
                   ),
-                ),
+              ],
             ],
           );
         },
@@ -291,7 +298,7 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
     );
   }
 
-  String _activeRangeLabel(SeasonStandings s) {
+  String _rangeLabel(Season s) {
     String? fmt(String? iso) {
       if (iso == null || iso.isEmpty) return null;
       final d = DateTime.tryParse(iso);
@@ -299,11 +306,13 @@ class _NewSeasonScreenState extends State<NewSeasonScreen> {
       return _dateLabel(d);
     }
 
-    final start = fmt(s.seasonStartDate);
-    final end = fmt(s.seasonEndDate);
-    if (start == null && end == null) return 'Active season';
-    if (start != null && end != null) return 'Active • $start – $end';
-    return 'Active • ${start ?? end}';
+    final start = fmt(s.startDate);
+    final end = fmt(s.endDate);
+    final count =
+        '${s.tournamentCount} tournament${s.tournamentCount == 1 ? '' : 's'}';
+    if (start == null && end == null) return 'Active • $count';
+    if (start != null && end != null) return 'Active • $start – $end • $count';
+    return 'Active • ${start ?? end} • $count';
   }
 }
 
@@ -348,9 +357,9 @@ class _EndSeasonDialogState extends State<_EndSeasonDialog> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            "This closes '${widget.seasonName}'. New tournaments will no "
-            'longer earn points toward it, and you can then start a new '
-            'season. This cannot be undone.',
+            "This closes '${widget.seasonName}'. Its standings stay "
+            'final and viewable, and tournaments already linked keep '
+            'their points. This cannot be undone.',
           ),
           const SizedBox(height: 16),
           const Text(

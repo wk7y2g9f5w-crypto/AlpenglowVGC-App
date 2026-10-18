@@ -72,6 +72,56 @@ async def course_autocomplete(interaction: discord.Interaction, current: str):
     ]
 
 
+async def active_season_autocomplete(interaction: discord.Interaction,
+                                     current: str):
+    """Active seasons only — the /tournament create season pick."""
+    rows = await db.get_active_seasons(
+        interaction.client.db_path, str(interaction.guild_id))
+    return [
+        app_commands.Choice(name=r["name"][:100], value=r["id"])
+        for r in rows
+        if not current or current.lower() in r["name"].lower()
+    ][:25]
+
+
+class NoSeasonConfirmView(discord.ui.View):
+    """The no-season warning step for /tournament create (Cayden
+    2026-10-18, mirroring the app): no season picked while seasons are
+    active → warn, and the creator chooses to continue or not."""
+
+    def __init__(self, owner_id: int, on_confirm):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.on_confirm = on_confirm
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        return interaction.user.id == self.owner_id
+
+    def _disable(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Create without a season",
+                       style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction,
+                      button: discord.ui.Button):
+        self._disable()
+        await interaction.response.edit_message(
+            content="Creating the tournament without a season…", view=self)
+        self.stop()
+        await self.on_confirm()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction,
+                     button: discord.ui.Button):
+        self._disable()
+        await interaction.response.edit_message(
+            content="❌ Cancelled — run `/tournament create` again and "
+                    "pick a season to have it count toward one.",
+            view=self)
+        self.stop()
+
+
 class RegisterView(discord.ui.View):
     """Persistent Register button posted on tournament announcements."""
 
@@ -453,7 +503,8 @@ class Tournaments(commands.Cog):
     )
 
     @tournament.command(name="create", description="Create a new tournament (admin)")
-    @app_commands.autocomplete(course=course_autocomplete)
+    @app_commands.autocomplete(course=course_autocomplete,
+                               season=active_season_autocomplete)
     @app_commands.describe(
         name="Tournament name, e.g. 'Friday Night Skins'",
         format="Scoring format",
@@ -468,6 +519,7 @@ class Tournaments(commands.Cog):
         rounds="Number of 18-hole rounds, 1-5 (default: 1). Every round uses the same course; each round copies these tee/pin/wind settings (tune per round later with /tournament set_round or the app)",
         pars="Optional — auto-fills from the course database when you pick a known course; enter comma-separated pars to override",
         description="Optional blurb shown on the announcement",
+        season="Season this tournament counts toward — omit it and you'll be asked to confirm it counts for none",
     )
     async def tournament_create(
         self,
@@ -487,6 +539,7 @@ class Tournaments(commands.Cog):
         rounds: Literal[1, 2, 3, 4, 5] = 1,
         pars: Optional[str] = None,
         description: Optional[str] = None,
+        season: Optional[int] = None,
     ):
         if not await require_admin(interaction):
             return
@@ -525,6 +578,60 @@ class Tournaments(commands.Cog):
                 pars_clean = ",".join(str(p) for p in auto)
                 pars_auto = True
 
+        # Season pick (Cayden 2026-10-18, same rule as the app):
+        # seasons run side by side and the creator picks the one this
+        # tournament counts toward. No pick while seasons are active →
+        # warn and let them choose to continue without one.
+        create_kwargs = dict(
+            name=name, format=format, holes=holes, course=course,
+            start_d=start_d, end_d=end_d, tee_position=tee_position,
+            pin_position=pin_position, wind_strength=wind_strength,
+            green_speed=green_speed, rounds=rounds,
+            pars_clean=pars_clean, pars_auto=pars_auto,
+            description=description,
+        )
+        guild_id = str(interaction.guild_id)
+        if season is not None:
+            srow = await db.get_season(self.bot.db_path, season)
+            if (not srow or srow["guild_id"] != guild_id
+                    or srow["status"] != "active"):
+                await interaction.followup.send(
+                    "❌ That season isn't an active season in this server.",
+                    ephemeral=True,
+                )
+                return
+            await self._finish_create(interaction, season_row=srow,
+                                      **create_kwargs)
+            return
+        actives = await db.get_active_seasons(self.bot.db_path, guild_id)
+        if not actives:
+            await self._finish_create(interaction, season_row=None,
+                                      **create_kwargs)
+            return
+        names = ", ".join(f"**{a['name']}**" for a in actives)
+
+        async def _confirm_no_season():
+            await self._finish_create(interaction, season_row=None,
+                                      **create_kwargs)
+
+        view = NoSeasonConfirmView(interaction.user.id, _confirm_no_season)
+        await interaction.followup.send(
+            "⚠️ **No season picked** — this tournament won't count "
+            "toward any season's standings.\n"
+            f"Active seasons: {names}\n"
+            "Create it without a season, or cancel and run the command "
+            "again with the season option.",
+            ephemeral=True, view=view,
+        )
+
+    async def _finish_create(self, interaction: discord.Interaction, *,
+                             season_row, name, format, holes, course,
+                             start_d, end_d, tee_position, pin_position,
+                             wind_strength, green_speed, rounds,
+                             pars_clean, pars_auto, description):
+        """Create the tournament, link the picked season (if any), and
+        announce it. Split from tournament_create so the no-season
+        warning's confirm button can run the exact same path."""
         tid = await db.create_tournament(
             self.bot.db_path,
             str(interaction.guild_id),
@@ -548,16 +655,14 @@ class Tournaments(commands.Cog):
                 for _ in range(rounds)
             ],
         )
-        # Auto-link to every active season so season points award on
-        # completion without a manual /season add_tournament step.
-        # Failure-safe: never break tournament creation.
-        try:
-            for s in await db.get_active_seasons(
-                    self.bot.db_path, str(interaction.guild_id)):
-                await db.add_tournament_to_season(self.bot.db_path, s["id"],
-                                                  tid)
-        except Exception as e:  # noqa: BLE001 - creation must survive
-            print(f"season auto-link failed for tournament {tid}: {e}")
+        # Link ONLY the picked season. Failure-safe: never break
+        # tournament creation.
+        if season_row is not None:
+            try:
+                await db.add_tournament_to_season(
+                    self.bot.db_path, season_row["id"], tid)
+            except Exception as e:  # noqa: BLE001 - creation must survive
+                print(f"season link failed for tournament {tid}: {e}")
         self.bot.add_view(RegisterView(tid))
 
         # Real rounds carry the default-split dates from create_tournament.
@@ -588,8 +693,14 @@ class Tournaments(commands.Cog):
             )
             where = "announced here (#✍️event-signups not found)"
         await ts.maybe_refresh(self.bot, str(interaction.guild_id))
+        season_note = (
+            f" Counts toward season **{season_row['name']}**."
+            if season_row is not None
+            else " Not linked to any season."
+        )
         await interaction.followup.send(
-            f"\u2705 **{name.strip()}** created - {where}.", ephemeral=True
+            f"\u2705 **{name.strip()}** created - {where}.{season_note}",
+            ephemeral=True
         )
 
     @tournament.command(name="set_round",

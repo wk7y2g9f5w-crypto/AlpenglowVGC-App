@@ -94,14 +94,8 @@ class Seasons(commands.Cog):
         if not await require_admin(interaction):
             return
         guild_id = str(interaction.guild_id)
-        existing = await db.get_active_season(self.bot.db_path, guild_id)
-        if existing:
-            await interaction.response.send_message(
-                f"❌ **{existing['name']}** is already the active season. "
-                "Complete it with `/season complete` before starting a new one.",
-                ephemeral=True,
-            )
-            return
+        # Seasons run side by side (Cayden 2026-10-18): starting one
+        # never requires ending another first.
         clean = name.strip()[:80]
         if not clean:
             await interaction.response.send_message(
@@ -111,27 +105,62 @@ class Seasons(commands.Cog):
         sid = await db.create_season(self.bot.db_path, guild_id, clean,
                                      str(interaction.user.id))
         await interaction.response.send_message(
-            f"✅ Season **{clean}** started! Link tournaments with "
-            f"`/season add_tournament` — they'll award season points when they "
-            f"complete. (Season ID: {sid})"
+            f"✅ Season **{clean}** started! New tournaments pick it at "
+            f"creation, or link existing ones with `/season add_tournament` "
+            f"— they'll award season points when they complete. "
+            f"(Season ID: {sid})"
         )
 
     @season.command(name="add_tournament",
-                    description="Link a tournament to the active season (admin)")
-    @app_commands.autocomplete(tournament=active_tournament_autocomplete)
-    @app_commands.describe(tournament="Tournament to count toward the season")
+                    description="Set which season a tournament counts toward (admin)")
+    @app_commands.autocomplete(tournament=active_tournament_autocomplete,
+                               season=_season_autocomplete)
+    @app_commands.describe(
+        tournament="Tournament to assign",
+        season="Season it should count toward (required when several are active)",
+    )
     async def season_add_tournament(self, interaction: discord.Interaction,
-                                    tournament: Optional[int] = None):
+                                    tournament: Optional[int] = None,
+                                    season: Optional[int] = None):
         if not await require_admin(interaction):
             return
         guild_id = str(interaction.guild_id)
-        s = await db.get_active_season(self.bot.db_path, guild_id)
-        if s is None:
-            await interaction.response.send_message(
-                "❌ No active season — start one with `/season create` first.",
-                ephemeral=True,
-            )
-            return
+        path = self.bot.db_path
+        # Resolve the target season: the explicit pick, or the only
+        # active season. Several active + no pick = ask, never guess.
+        if season is not None:
+            s = await db.get_season(path, season)
+            if not s or s["guild_id"] != guild_id:
+                await interaction.response.send_message(
+                    "❌ That season wasn't found in this server.",
+                    ephemeral=True,
+                )
+                return
+            if s["status"] != "active":
+                await interaction.response.send_message(
+                    f"❌ Season **{s['name']}** has ended — its standings "
+                    "are closed. Pick an active season.",
+                    ephemeral=True,
+                )
+                return
+        else:
+            actives = await db.get_active_seasons(path, guild_id)
+            if not actives:
+                await interaction.response.send_message(
+                    "❌ No active season — start one with `/season create` first.",
+                    ephemeral=True,
+                )
+                return
+            if len(actives) > 1:
+                names = ", ".join(f"**{a['name']}**" for a in actives)
+                await interaction.response.send_message(
+                    f"❌ Several seasons are active ({names}) — run the "
+                    "command again and pick which one this tournament "
+                    "counts toward.",
+                    ephemeral=True,
+                )
+                return
+            s = actives[0]
         t, err = await resolve_tournament(
             interaction, tournament,
             ["registration_open", "in_progress", "completed"],
@@ -140,28 +169,42 @@ class Seasons(commands.Cog):
             await interaction.response.send_message(err, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        linked = await db.add_tournament_to_season(self.bot.db_path, s["id"],
-                                                   t["id"])
-        if not linked:
+        # A tournament counts toward exactly ONE season: assigning it
+        # here moves it out of any other season, points included
+        # (Cayden 2026-10-18: mistakes must be correctable).
+        current = await db.get_seasons_for_tournament(path, t["id"],
+                                                      status=None)
+        others = [c for c in current if c["id"] != s["id"]]
+        if not others and any(c["id"] == s["id"] for c in current):
             await interaction.followup.send(
-                f"ℹ️ **{t['name']}** is already in season **{s['name']}**.",
+                f"ℹ️ **{t['name']}** already counts toward **{s['name']}**.",
                 ephemeral=True,
             )
             return
+        moved_from = ""
+        for o in others:
+            await db.delete_season_points(path, o["id"], t["id"])
+            await db.remove_tournament_from_season(path, o["id"], t["id"])
+        if others:
+            moved_from = (f" Moved out of "
+                          f"{', '.join('**' + o['name'] + '**' for o in others)}"
+                          f" — its points there were removed.")
+        await db.add_tournament_to_season(path, s["id"], t["id"])
         retro = ""
         if t["status"] == "completed":
             # Already finished: award its points right away (idempotent).
             rows = await leaderboard_render.final_standings_points(
-                self.bot.db_path, t["id"]
+                path, t["id"]
             )
             n = await db.record_season_points(
-                self.bot.db_path, s["id"], t["id"],
+                path, s["id"], t["id"],
                 [(r["player_discord_id"], r["position"], r["points"])
                  for r in rows],
             )
             retro = f" Its results were already final, so {n} player(s) were awarded points now."
         await interaction.followup.send(
-            f"✅ **{t['name']}** linked to season **{s['name']}**.{retro}",
+            f"✅ **{t['name']}** now counts toward season "
+            f"**{s['name']}**.{moved_from}{retro}",
             ephemeral=True,
         )
 
