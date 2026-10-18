@@ -344,6 +344,31 @@ class ApiClient {
     await _post('/api/tee-times/$teeTimeId/leave');
   }
 
+  /// Join a solo tournament tee time as its witness (self only — the
+  /// creator can never assign a witness; admins use [adminAddWitness]).
+  Future<void> joinAsWitness(String teeTimeId) async {
+    await _post('/api/tee-times/$teeTimeId/witness');
+  }
+
+  Future<void> leaveAsWitness(String teeTimeId) async {
+    await _delete('/api/tee-times/$teeTimeId/witness');
+  }
+
+  Future<void> adminAddWitness(String teeTimeId, String playerId) async {
+    await _post('/api/tee-times/$teeTimeId/witnesses/$playerId');
+  }
+
+  Future<void> adminRemoveWitness(String teeTimeId, String playerId) async {
+    await _delete('/api/tee-times/$teeTimeId/witnesses/$playerId');
+  }
+
+  /// The witness co-submits a solo scorecard that is waiting on them.
+  Future<Scorecard> witnessSubmitScorecard(int cardId) async {
+    final body = await _post('/api/scorecards/$cardId/witness-submit');
+    return Scorecard.fromJson(
+        (body as Map<String, dynamic>)['card'] as Map<String, dynamic>);
+  }
+
   Future<void> requestTeeTime(String teeTimeId, {int? teamId}) async {
     final payload = <String, dynamic>{};
     if (teamId != null) payload['team_id'] = teamId;

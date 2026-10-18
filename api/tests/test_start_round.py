@@ -9,6 +9,13 @@ class StartRoundApiTestCase(_ApiTestCase):
         tt_id = run(db.create_tee_time(
             self.db_path, tournament, "flight",
             "2026-01-02T15:30:00+00:00", 4, creator, None))
+        # These tests cover Start Round mechanics, not the 2026-10-17
+        # witness rule — grandfather their tee times (the rule itself
+        # is covered in test_witness_rule.py).
+        run(db._execute(
+            self.db_path,
+            "UPDATE tee_times SET witness_rule = 0 WHERE id = ?",
+            (tt_id,)))
         run(db.join_tee_time(self.db_path, tt_id, creator))
         for pid in extra:
             run(db.join_tee_time(self.db_path, tt_id, pid))
@@ -233,6 +240,11 @@ class StartRoundApiTestCase(_ApiTestCase):
         tt_id = run(db.create_tee_time(
             self.db_path, tournament, "flight",
             starts_at, 4, creator, None))
+        # Grandfathered like _started_tt (witness rule not under test).
+        run(db._execute(
+            self.db_path,
+            "UPDATE tee_times SET witness_rule = 0 WHERE id = ?",
+            (tt_id,)))
         run(db.join_tee_time(self.db_path, tt_id, creator))
         for pid in extra:
             run(db.join_tee_time(self.db_path, tt_id, pid))

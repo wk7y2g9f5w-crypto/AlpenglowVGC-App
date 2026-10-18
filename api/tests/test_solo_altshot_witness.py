@@ -1,7 +1,12 @@
-"""Solo alt-shot witness rule (Cayden 2026-10-13).
+"""Solo alt-shot witness rule (Cayden 2026-10-13) — GRANDFATHERED path.
 
 A tournament alt-shot tee time holding a single team has nobody to
-cross-check its card. A named witness stands in for the missing team:
+cross-check its card. A named witness stands in for the missing team.
+Since 2026-10-17, NEW tee times use the joined-witness rule instead
+(a witness joins the tee time and co-submits; see
+test_witness_rule.py). Tee times created before that change keep this
+named-witness behavior, so these tests grandfather their tee times
+(witness_rule = 0) in _tt().
 
 - A regular member's final submit without a witness -> 422
   witness_required; with a witness the card auto-verifies like a
@@ -73,7 +78,14 @@ class SoloAltShotWitnessTestCase(ApiTestCase):
             json={"label": "Sheet", "date": "2026-10-03", "time": "09:30",
                   "max_players": 4, "team_id": team_id})
         self.assertEqual(r.status_code, 200, r.text)
-        return r.json()
+        tt = r.json()
+        # Grandfather the tee time: this file covers the pre-2026-10-17
+        # named-witness rule, which only applies to witness_rule = 0.
+        run(db._execute(
+            self.db_path,
+            "UPDATE tee_times SET witness_rule = 0 WHERE id = ?",
+            (tt["id"],)))
+        return tt
 
     def _solo(self, fmt="alt_shot"):
         self._mk(fmt)

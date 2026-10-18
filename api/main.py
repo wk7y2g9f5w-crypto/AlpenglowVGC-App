@@ -724,7 +724,18 @@ def _split_name_handle(name: str) -> tuple[str, str | None]:
     return (name or "").strip(), None
 
 
-def _tee_time_json(tt: dict, players: list[dict]) -> dict:
+def _witness_json(w: dict) -> dict:
+    return {
+        "discord_id": w["discord_id"],
+        "display_name": w.get("display_name"),
+        "golfplus_handle": w.get("golfplus_handle"),
+        "joined_at": utc_iso(w.get("joined_at")),
+        "added_by": w.get("added_by"),
+    }
+
+
+def _tee_time_json(tt: dict, players: list[dict],
+                   witnesses: list[dict] | None = None) -> dict:
     return {
         "id": tt["id"],
         "label": tt["label"],
@@ -735,6 +746,11 @@ def _tee_time_json(tt: dict, players: list[dict]) -> dict:
         "started_at": utc_iso(tt.get("started_at")),
         "archived_at": utc_iso(tt.get("archived_at")),
         "players": [_player_json(p) for p in players],
+        # Witness rule (Cayden 2026-10-17): witness_rule marks tee times
+        # created under the solo-witness requirement (older tee times
+        # are grandfathered and report False).
+        "witness_rule": bool(tt.get("witness_rule")),
+        "witnesses": [_witness_json(w) for w in (witnesses or [])],
     }
 
 
@@ -758,7 +774,16 @@ def _card_json(card: dict, pars_csv: str | None) -> dict:
         "thru": thru,
         "status": card["status"],
         "submitted_by": card.get("submitted_by"),
+        "submitted_at": utc_iso(card.get("submitted_at")),
         "witness_name": card.get("witness_name"),
+        # Witness co-submit (Cayden 2026-10-17): a solo card on a
+        # witness-rule tee time waits at awaiting_witness until a joined
+        # witness co-submits; both submission timestamps are exposed so
+        # the app can show when the player submitted and when the
+        # witness co-submitted.
+        "awaiting_witness": bool(card.get("awaiting_witness")),
+        "witness_discord_id": card.get("witness_discord_id"),
+        "witness_submitted_at": utc_iso(card.get("witness_submitted_at")),
         "hole_times": hole_times,
     }
 
@@ -1774,7 +1799,8 @@ async def list_tee_times(tournament_id: int, user: CurrentUser) -> list[dict]:
         if tt.get("archived_at"):
             continue
         players = await db.get_tee_time_players(DB_PATH, tt["id"])
-        out.append(_tee_time_json(tt, players))
+        witnesses = await db.get_tee_time_witnesses(DB_PATH, tt["id"])
+        out.append(_tee_time_json(tt, players, witnesses))
     return out
 
 
@@ -1916,7 +1942,8 @@ async def create_tee_time(
         await db.join_tee_time(DB_PATH, tt_id, user["discord_id"])
     tt = await db.get_tee_time(DB_PATH, tt_id)
     players = await db.get_tee_time_players(DB_PATH, tt_id)
-    return {**_tee_time_json(tt, players), "joined": True}
+    witnesses = await db.get_tee_time_witnesses(DB_PATH, tt_id)
+    return {**_tee_time_json(tt, players, witnesses), "joined": True}
 
 
 class TeeTimeJoin(BaseModel):
@@ -2098,6 +2125,27 @@ async def start_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
                                    "the tee time.",
                     },
                 )
+    # Witness gate (Cayden 2026-10-17): a solo tee time created under
+    # the witness rule cannot start until a witness has joined it. No
+    # exceptions — an admin who wants to start it can join as witness
+    # or add one first. Grandfathered tee times (witness_rule = 0)
+    # never see this gate.
+    if tt.get("witness_rule"):
+        player_count = await db.tee_time_player_count(DB_PATH, tee_time_id)
+        if player_count < 2:
+            witnesses = await db.get_tee_time_witnesses(
+                DB_PATH, tee_time_id)
+            if not witnesses:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "code": "witness_required",
+                        "message": "This is a solo tee time — a witness "
+                                   "must join before the round can "
+                                   "start. Anyone who isn't playing can "
+                                   "tap Join as Witness on the tee time.",
+                    },
+                )
     result = await db.start_tournament_tee_time(
         DB_PATH, tee_time_id, user["discord_id"], is_admin=is_admin)
     if result == "missing":  # pragma: no cover - checked above
@@ -2128,6 +2176,130 @@ async def leave_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
     tt, _ = await _tee_time_or_404(tee_time_id)
     await db.leave_tee_time(DB_PATH, tt["id"], user["discord_id"])
     return {"left": True}
+
+
+# ---------------------------------------------------------------------------
+# Witnesses (Cayden 2026-10-17): solo tournament rounds need a witness.
+# A witness joins THEMSELVES (Join as Witness) or is added by an admin —
+# the tee time creator can never assign one. The witness co-submits the
+# solo player's scorecard when the round is done.
+# ---------------------------------------------------------------------------
+@app.post("/api/tee-times/{tee_time_id}/witness")
+async def join_as_witness(tee_time_id: int, user: CurrentUser) -> dict:
+    tt, _ = await _tee_time_or_404(tee_time_id)
+    if not tt.get("witness_rule"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "witness_not_required",
+                "message": "This tee time doesn't use witnesses.",
+            },
+        )
+    result = await db.add_tee_time_witness(
+        DB_PATH, tt["id"], user["discord_id"],
+        added_by=user["discord_id"])
+    if result == "is_player":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "is_player",
+                "message": "You're playing in this tee time — you can't "
+                           "also be its witness.",
+            },
+        )
+    return {"witness": True, "already": result == "already"}
+
+
+@app.delete("/api/tee-times/{tee_time_id}/witness")
+async def leave_as_witness(tee_time_id: int, user: CurrentUser) -> dict:
+    tt, _ = await _tee_time_or_404(tee_time_id)
+    await db.remove_tee_time_witness(DB_PATH, tt["id"], user["discord_id"])
+    return {"witness": False}
+
+
+@app.post("/api/tee-times/{tee_time_id}/witnesses/{player_id}")
+async def admin_add_witness(tee_time_id: int, player_id: str,
+                            user: AdminUser) -> dict:
+    """Admin adds a witness to a tee time (the only way to put someone
+    ELSE in as witness — the creator can't, and neither can the player)."""
+    tt, _ = await _tee_time_or_404(tee_time_id)
+    if await db.get_player(DB_PATH, player_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Player not found",
+        )
+    result = await db.add_tee_time_witness(
+        DB_PATH, tt["id"], player_id, added_by=user["discord_id"])
+    if result == "is_player":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "is_player",
+                "message": "That player is playing in this tee time — "
+                           "they can't also be its witness.",
+            },
+        )
+    return {"witness": True, "already": result == "already"}
+
+
+@app.delete("/api/tee-times/{tee_time_id}/witnesses/{player_id}")
+async def admin_remove_witness(tee_time_id: int, player_id: str,
+                               user: AdminUser) -> dict:
+    tt, _ = await _tee_time_or_404(tee_time_id)
+    removed = await db.remove_tee_time_witness(
+        DB_PATH, tt["id"], player_id)
+    return {"witness": False, "removed": removed}
+
+
+@app.post("/api/scorecards/{card_id}/witness-submit")
+async def witness_submit_scorecard(card_id: int,
+                                   user: CurrentUser) -> dict:
+    """The witness co-submits a solo scorecard that is waiting on them.
+
+    Only a witness who joined the card's tee time can do this. The card
+    keeps its pending status and enters the normal verify flow; the
+    co-submit (who + when) is recorded on the card next to the player's
+    own submission timestamp.
+    """
+    card = await db.get_scorecard(DB_PATH, card_id)
+    if card is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Scorecard not found",
+        )
+    if not card.get("awaiting_witness"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "not_awaiting_witness",
+                "message": "This scorecard isn't waiting for a witness.",
+            },
+        )
+    tee_time_id = card.get("tee_time_id")
+    witnesses = (
+        await db.get_tee_time_witnesses(DB_PATH, tee_time_id)
+        if tee_time_id is not None else []
+    )
+    if not any(str(w["discord_id"]) == str(user["discord_id"])
+               for w in witnesses):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "not_witness",
+                "message": "Only a witness on this tee time can "
+                           "co-submit its scorecard.",
+            },
+        )
+    result = await db.witness_co_submit_scorecard(
+        DB_PATH, card_id, user["discord_id"])
+    if result != "ok":  # pragma: no cover - state checked above
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": result},
+        )
+    card = await db.get_scorecard(DB_PATH, card_id)
+    t = await db.get_tournament(DB_PATH, card["tournament_id"])
+    return {"card": _card_json(card, t.get("pars") if t else None)}
 
 
 async def _can_manage_tee_time(tt: dict, user: CurrentUser) -> bool:
@@ -2186,7 +2358,8 @@ async def update_tee_time(
         )
     tt = await db.get_tee_time(DB_PATH, tt["id"])
     players = await db.get_tee_time_players(DB_PATH, tt["id"])
-    return _tee_time_json(tt, players)
+    witnesses = await db.get_tee_time_witnesses(DB_PATH, tt["id"])
+    return _tee_time_json(tt, players, witnesses)
 
 
 @app.delete("/api/tee-times/{tee_time_id}")
@@ -2548,8 +2721,9 @@ async def archive_tournament_tee_times(user: AdminUser) -> dict:
             if not tt.get("archived_at"):
                 continue
             players = await db.get_tee_time_players(DB_PATH, tt["id"])
+            witnesses = await db.get_tee_time_witnesses(DB_PATH, tt["id"])
             entry = {
-                **_tee_time_json(tt, players),
+                **_tee_time_json(tt, players, witnesses),
                 "tournament_id": t["id"],
                 "tournament_name": t.get("name"),
             }
@@ -3208,13 +3382,24 @@ async def put_scorecard(
     # present -> auto-verified; solo rounds stay pending.
     player_count = await db.tee_time_player_count(DB_PATH, tt["id"])
     status_value = "verified" if player_count >= 2 else "pending"
-    # Cayden 2026-10-13 (alt-shot only): a tee time with a single team has
-    # nobody to cross-check the card, so a named witness stands in for the
-    # missing team — a witnessed final submit auto-verifies like a
-    # two-team round. Without a witness, a regular member's final submit
-    # is refused; crew/admin can still file it pending (the standing
-    # rescue path, e.g. an admin verifies it afterwards).
-    if fmt == "alt_shot" and player_count < 2 and body.complete:
+    # Witness rule (Cayden 2026-10-17): on a tee time created under the
+    # rule, a solo final submit doesn't finish the card — it waits for a
+    # joined witness to co-submit it (see /witness-submit). The card is
+    # pending meanwhile, like any solo card. Grandfathered tee times
+    # skip this entirely and keep the 2026-10-13 behavior below.
+    witness_rule = bool(tt.get("witness_rule"))
+    awaiting_witness = False
+    if witness_rule and player_count < 2 and body.complete:
+        status_value = "pending"
+        awaiting_witness = True
+    # Cayden 2026-10-13 (alt-shot only, grandfathered tee times): a tee
+    # time with a single team has nobody to cross-check the card, so a
+    # named witness stands in for the missing team — a witnessed final
+    # submit auto-verifies like a two-team round. Without a witness, a
+    # regular member's final submit is refused; crew/admin can still
+    # file it pending (the standing rescue path, e.g. an admin verifies
+    # it afterwards).
+    elif fmt == "alt_shot" and player_count < 2 and body.complete:
         if (body.witness_name or "").strip():
             status_value = "verified"
         elif not is_admin:
@@ -3248,6 +3433,7 @@ async def put_scorecard(
             submitted_by=user["discord_id"],
             round_number=body.round_number,
             witness_name=body.witness_name,
+            awaiting_witness=awaiting_witness,
         )
     else:
         # Live partial save: merge entered holes into the in-progress card.
@@ -5633,6 +5819,8 @@ async def player_rounds(key: str, user: CurrentUser) -> dict:
                 "submitted_at": r["submitted_at"],
                 "status": r["status"],
                 "witness_name": r["witness_name"],
+                "witness_discord_id": r["witness_discord_id"],
+                "witness_submitted_at": r["witness_submitted_at"],
                 "holes": r["holes"],
                 "scores": scores,
                 "pars": pars,

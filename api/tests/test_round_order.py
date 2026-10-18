@@ -36,6 +36,12 @@ class RoundOrderApiTestCase(_ApiTestCase):
         tt_id = run(db.create_tee_time(
             self.db_path, tid, label, "2026-01-02T15:30:00+00:00",
             4, creator, None, round_number=rnd))
+        # Grandfathered: the 2026-10-17 witness rule is not under test
+        # here (see test_witness_rule.py).
+        run(db._execute(
+            self.db_path,
+            "UPDATE tee_times SET witness_rule = 0 WHERE id = ?",
+            (tt_id,)))
         run(db.join_tee_time(self.db_path, tt_id, creator))
         return tt_id
 

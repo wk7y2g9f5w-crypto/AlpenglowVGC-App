@@ -602,6 +602,18 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()
 
+    def _grandfather_witness(self, tt_id):
+        """Exempt a tee time from the 2026-10-17 witness rule.
+
+        Tests whose subject isn't the witness rule use this so their
+        solo tee times keep the pre-rule behavior (no witness needed
+        to start). The rule itself is covered in test_witness_rule.py.
+        """
+        run(db._execute(
+            self.db_path,
+            "UPDATE tee_times SET witness_rule = 0 WHERE id = ?",
+            (tt_id,)))
+
     def test_scorecard_get_none(self):
         self.with_tz("123")
         tt_id = self._past_tee_time(self.t_open)
@@ -1118,7 +1130,7 @@ class ApiTestCase(unittest.TestCase):
         r = self.client.get("/api/courses", headers=self.h("123"))
         self.assertEqual(r.status_code, 200, r.text)
         courses = r.json()
-        self.assertEqual(len(courses), 19)
+        self.assertEqual(len(courses), 20)
         pebble = next(
             c for c in courses if c["name"] == "Pebble Beach Golf Links")
         self.assertEqual(len(pebble["pars"]), 18)
@@ -1477,6 +1489,7 @@ class ApiTestCase(unittest.TestCase):
         # A different round is fine — once Round 1 is submitted, since
         # tournament rounds are played in order.
         run(db.register_player(self.db_path, tid, "123"))
+        self._grandfather_witness(tt1)
         self._start_tee_time(tt1, "123")
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "round_number": 1, "complete": True}
@@ -1519,6 +1532,7 @@ class ApiTestCase(unittest.TestCase):
 
         tt1 = make_tt("123", "Morning")   # 123 auto-joins
         tt2 = make_tt("456", "Afternoon")  # 456 auto-joins
+        self._grandfather_witness(tt1)
         self._start_tee_time(tt1, "123")
         body = {"player_discord_id": "123", "scores": [4] * 18,
                 "round_number": 1}
@@ -1568,6 +1582,7 @@ class ApiTestCase(unittest.TestCase):
         tt1 = r.json()["id"]
         # 123 completes Round 1 first (rounds are played in order).
         run(db.register_player(self.db_path, tid, "123"))
+        self._grandfather_witness(tt1)
         self._start_tee_time(tt1, "123")
         r = self.client.put(
             f"/api/tee-times/{tt1}/scorecard", headers=self.h("123"),

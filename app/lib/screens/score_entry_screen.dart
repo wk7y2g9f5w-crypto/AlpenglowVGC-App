@@ -74,6 +74,12 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   bool get _isSharedCard =>
       const {'alt_shot', 'scramble'}.contains(widget.tournament.format);
 
+  /// Joined-witness rule (Cayden 2026-10-17): on a witness-rule tee
+  /// time played solo, the card waits for the joined witness to
+  /// co-submit — the typed witness name is not used there.
+  bool get _joinedWitnessRule =>
+      widget.teeTime.witnessRule && widget.teeTime.isSolo;
+
   /// Solo alt-shot: only one team on this tee time — its card needs a
   /// witness to count (Cayden 2026-10-13).
   bool get _soloAltShot {
@@ -479,12 +485,14 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         holeCount: _holeCount,
         roundNumber: _roundNumber,
         witnessOptions: _witnessOptions,
-        witnessRequired: _soloAltShot,
+        witnessRequired: _soloAltShot && !_joinedWitnessRule,
+        joinedWitness: _joinedWitnessRule,
       ),
     );
     if (result == null || result.isEmpty) return;
     setState(() => _submitting = true);
     var ok = 0;
+    var awaitingWitness = false;
     final failures = <String>[];
     for (final entry in result.entries) {
       final card = _cards[entry.key];
@@ -503,6 +511,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         card.cardId ??= sc.id;
         card.editedAfterSubmit = false;
         card.witness = entry.value;
+        if (sc.awaitingWitness) awaitingWitness = true;
         ok++;
       } on ApiException catch (e) {
         failures.add('${_cardTitle(card)}: ${friendlyApiMessage(e)}');
@@ -518,6 +527,9 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
           'Submitted $ok card${ok == 1 ? '' : 's'}. Failed: '
           '${failures.join('; ')}',
           error: true);
+    } else if (awaitingWitness) {
+      showSnack(context,
+          'Submitted — waiting for your witness to co-submit.');
     } else {
       showSnack(
           context,
@@ -689,6 +701,10 @@ class _SubmitAllDialog extends StatefulWidget {
   final List<String> witnessOptions;
   final bool witnessRequired;
 
+  /// Joined-witness rule (2026-10-17): no typed witness name — the
+  /// witness who joined the tee time co-submits after this submit.
+  final bool joinedWitness;
+
   const _SubmitAllDialog({
     required this.cards,
     required this.titles,
@@ -698,6 +714,7 @@ class _SubmitAllDialog extends StatefulWidget {
     required this.roundNumber,
     this.witnessOptions = const [],
     this.witnessRequired = false,
+    this.joinedWitness = false,
   });
 
   @override
@@ -752,6 +769,16 @@ class _SubmitAllDialogState extends State<_SubmitAllDialog> {
                   style: TextStyle(fontSize: 13, color: Colors.grey),
                 ),
               ),
+            if (widget.joinedWitness)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'This is a solo round — after you submit, your '
+                  'witness co-submits the card to confirm they were '
+                  'there for it.',
+                  style: TextStyle(fontSize: 13, color: Colors.grey),
+                ),
+              ),
             const SizedBox(height: 12),
             for (var i = 0; i < widget.cards.length; i++) ...[
               Row(
@@ -767,7 +794,7 @@ class _SubmitAllDialogState extends State<_SubmitAllDialog> {
                       style: const TextStyle(fontSize: 13)),
                 ],
               ),
-              if (widget.cards[i].submittable)
+              if (widget.cards[i].submittable && !widget.joinedWitness)
                 Padding(
                   padding: const EdgeInsets.only(top: 4, bottom: 10),
                   child: Autocomplete<String>(

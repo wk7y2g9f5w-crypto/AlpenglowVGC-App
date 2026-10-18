@@ -229,6 +229,36 @@ class TeeTimePlayer {
       );
 }
 
+/// A witness on a tournament tee time (solo-round witness rule,
+/// 2026-10-17). Witnesses join themselves or are added by an admin;
+/// [joinedAtUtc] is when they attached to the tee time.
+class TeeTimeWitness {
+  final String discordId;
+  final String displayName;
+  final String? golfplusHandle;
+  final DateTime? joinedAtUtc;
+  final String? addedBy;
+
+  TeeTimeWitness({
+    required this.discordId,
+    required this.displayName,
+    this.golfplusHandle,
+    this.joinedAtUtc,
+    this.addedBy,
+  });
+
+  factory TeeTimeWitness.fromJson(Map<String, dynamic> j) =>
+      TeeTimeWitness(
+        discordId: j['discord_id'].toString(),
+        displayName: (j['display_name'] ?? j['discord_id']).toString(),
+        golfplusHandle: j['golfplus_handle']?.toString(),
+        joinedAtUtc: TeeTime._parseOpt(j['joined_at']),
+        addedBy: j['added_by']?.toString(),
+      );
+
+  String get handleName => golferDisplayName(displayName, golfplusHandle);
+}
+
 class TeeTime {
   final String id;
   final String label;
@@ -240,6 +270,11 @@ class TeeTime {
   final DateTime? startedAtUtc;
   final DateTime? archivedAtUtc;
 
+  /// True for tee times created under the solo-witness rule
+  /// (2026-10-17). Grandfathered tee times report false.
+  final bool witnessRule;
+  final List<TeeTimeWitness> witnesses;
+
   TeeTime({
     required this.id,
     required this.label,
@@ -250,6 +285,8 @@ class TeeTime {
     required this.players,
     this.startedAtUtc,
     this.archivedAtUtc,
+    this.witnessRule = false,
+    this.witnesses = const [],
   });
 
   static DateTime? _parseOpt(dynamic v) {
@@ -280,6 +317,10 @@ class TeeTime {
           .toList(),
       startedAtUtc: _parseOpt(j['started_at']),
       archivedAtUtc: _parseOpt(j['archived_at']),
+      witnessRule: j['witness_rule'] == true,
+      witnesses: ((j['witnesses'] as List?) ?? [])
+          .map((e) => TeeTimeWitness.fromJson(e as Map<String, dynamic>))
+          .toList(),
     );
   }
 
@@ -289,6 +330,13 @@ class TeeTime {
   bool get isFull => spotsFilled >= maxPlayers;
   bool get isStarted => startedAtUtc != null;
   bool get isArchived => archivedAtUtc != null;
+
+  /// Solo sheet: one player (stroke/best-ball) or one team rep
+  /// (team formats) — the case the witness rule exists for.
+  bool get isSolo => players.length < 2;
+
+  /// A witness must join before this tee time can start.
+  bool get witnessNeeded => witnessRule && isSolo && witnesses.isEmpty;
   bool hasPassed(DateTime now) => !startsAtUtc.isAfter(now);
 }
 
@@ -329,6 +377,18 @@ class Scorecard {
   final String? submittedBy;
   final int roundNumber;
   final String? witnessName;
+
+  /// When the player submitted the card (ISO-8601 UTC string).
+  final String? submittedAt;
+
+  /// Witness co-submit (2026-10-17): true while a solo card on a
+  /// witness-rule tee time waits for its witness to co-submit.
+  final bool awaitingWitness;
+  final String? witnessDiscordId;
+
+  /// When the witness co-submitted (ISO-8601 UTC string).
+  final String? witnessSubmittedAt;
+
   /// Per-hole entry timestamps (ISO-8601 UTC), parallel to [scores].
   /// Null entries = hole scored before time tracking existed.
   final List<String?> holeTimes;
@@ -344,6 +404,10 @@ class Scorecard {
     this.submittedBy,
     this.roundNumber = 1,
     this.witnessName,
+    this.submittedAt,
+    this.awaitingWitness = false,
+    this.witnessDiscordId,
+    this.witnessSubmittedAt,
     this.holeTimes = const [],
   });
 
@@ -363,6 +427,10 @@ class Scorecard {
         submittedBy: j['submitted_by']?.toString(),
         roundNumber: (j['round_number'] as num?)?.toInt() ?? 1,
         witnessName: j['witness_name']?.toString(),
+        submittedAt: j['submitted_at']?.toString(),
+        awaitingWitness: j['awaiting_witness'] == true,
+        witnessDiscordId: j['witness_discord_id']?.toString(),
+        witnessSubmittedAt: j['witness_submitted_at']?.toString(),
         holeTimes: ((j['hole_times'] as List?) ?? [])
             .map((e) => e?.toString())
             .toList(),

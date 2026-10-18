@@ -97,13 +97,28 @@ CREATE TABLE IF NOT EXISTS tee_times(
   channel_id TEXT,
   round_number INTEGER NOT NULL DEFAULT 1,
   reminded_30 INTEGER NOT NULL DEFAULT 0,
-  reminded_5 INTEGER NOT NULL DEFAULT 0
+  reminded_5 INTEGER NOT NULL DEFAULT 0,
+  witness_rule INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tee_time_players(
   tee_time_id INTEGER NOT NULL REFERENCES tee_times(id) ON DELETE CASCADE,
   player_discord_id TEXT NOT NULL,
   team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
   UNIQUE(tee_time_id, player_discord_id)
+);
+-- Witnesses on tournament tee times (Cayden 2026-10-17): a solo tee time
+-- created under the witness rule (tee_times.witness_rule = 1) cannot start
+-- until at least one witness has joined here, and its scorecard stays
+-- 'awaiting witness' until a witness co-submits it. Witnesses join
+-- themselves (added_by = their own id) or are added by an admin; the tee
+-- time creator can never assign one. A witness is never a player on the
+-- same tee time.
+CREATE TABLE IF NOT EXISTS tee_time_witnesses(
+  tee_time_id INTEGER NOT NULL REFERENCES tee_times(id) ON DELETE CASCADE,
+  player_discord_id TEXT NOT NULL,
+  joined_at TEXT NOT NULL,
+  added_by TEXT,
+  PRIMARY KEY (tee_time_id, player_discord_id)
 );
 CREATE TABLE IF NOT EXISTS boards(
   guild_id TEXT NOT NULL,
@@ -127,6 +142,9 @@ CREATE TABLE IF NOT EXISTS scorecards(
   verified_by TEXT,
   submitted_by TEXT,
   witness_name TEXT,
+  awaiting_witness INTEGER NOT NULL DEFAULT 0,
+  witness_discord_id TEXT,
+  witness_submitted_at TEXT,
   hole_times_json TEXT,
   CHECK((tournament_id IS NULL) != (casual_tee_time_id IS NULL))
 );
@@ -604,6 +622,24 @@ async def _migrate(db_path: str) -> None:
             await con.execute(
                 "ALTER TABLE scorecards ADD COLUMN hole_times_json TEXT")
             await con.commit()
+        # Witness co-submit (Cayden 2026-10-17): a solo card on a
+        # witness-rule tee time waits at awaiting_witness = 1 until a
+        # joined witness co-submits; witness_discord_id /
+        # witness_submitted_at record who co-submitted and when (the
+        # player's own submission time is submitted_at).
+        if "awaiting_witness" not in card_cols:
+            await con.execute(
+                "ALTER TABLE scorecards ADD COLUMN awaiting_witness"
+                " INTEGER NOT NULL DEFAULT 0")
+            await con.commit()
+        if "witness_discord_id" not in card_cols:
+            await con.execute(
+                "ALTER TABLE scorecards ADD COLUMN witness_discord_id TEXT")
+            await con.commit()
+        if "witness_submitted_at" not in card_cols:
+            await con.execute(
+                "ALTER TABLE scorecards ADD COLUMN witness_submitted_at TEXT")
+            await con.commit()
 
         # hole_shots.putts — putt count on a green shot instead of one
         # point per putt (0 = not putt-counted; older rows default to 0).
@@ -659,6 +695,15 @@ async def _migrate(db_path: str) -> None:
         if "archived_at" not in tt_cols:
             await con.execute(
                 "ALTER TABLE tee_times ADD COLUMN archived_at TEXT")
+            await con.commit()
+        # tee_times.witness_rule (Cayden 2026-10-17): 1 = the solo-round
+        # witness requirement applies to this tee time. Existing tee
+        # times default to 0 — grandfathered, the rule never applies to
+        # them. create_tee_time sets 1 for every new tee time.
+        if "witness_rule" not in tt_cols:
+            await con.execute(
+                "ALTER TABLE tee_times ADD COLUMN witness_rule INTEGER"
+                " NOT NULL DEFAULT 0")
             await con.commit()
 
         # casual_tee_times.archived_at / completed_at / completed_by
@@ -1748,7 +1793,8 @@ async def create_tee_time(db_path, tournament_id, label, starts_at, max_players,
     lastrowid, _ = await _execute(
         db_path,
         "INSERT INTO tee_times (tournament_id, label, starts_at, max_players,"
-        " created_by, channel_id, round_number) VALUES (?,?,?,?,?,?,?)",
+        " created_by, channel_id, round_number, witness_rule)"
+        " VALUES (?,?,?,?,?,?,?,1)",
         (tournament_id, label, starts_at, max_players, created_by, channel_id,
          round_number),
     )
@@ -2015,6 +2061,83 @@ async def tee_time_player_count(db_path, tee_time_id) -> int:
         (tee_time_id,),
     )
     return row["c"] if row else 0
+
+
+async def get_tee_time_witnesses(db_path, tee_time_id) -> list[dict]:
+    return await _fetchall(
+        db_path,
+        "SELECT w.player_discord_id AS discord_id,"
+        " COALESCE(p.display_name, w.player_discord_id) AS display_name,"
+        " p.golfplus_handle, w.joined_at, w.added_by"
+        " FROM tee_time_witnesses w"
+        " LEFT JOIN players p ON p.discord_id = w.player_discord_id"
+        " WHERE w.tee_time_id = ? ORDER BY w.joined_at ASC",
+        (tee_time_id,),
+    )
+
+
+async def add_tee_time_witness(db_path, tee_time_id, discord_id,
+                               added_by) -> str:
+    """Attach a witness to a tee time. Returns 'ok', 'already',
+    'is_player' (a player on the tee time can't witness it), or
+    'missing' (no such tee time). Callers enforce who may add: the
+    witness themselves, or an admin — never the tee time creator
+    assigning someone else."""
+    tt = await get_tee_time(db_path, tee_time_id)
+    if tt is None:
+        return "missing"
+    row = await _fetchone(
+        db_path,
+        "SELECT 1 AS x FROM tee_time_players WHERE tee_time_id = ?"
+        " AND player_discord_id = ?",
+        (tee_time_id, discord_id),
+    )
+    if row:
+        return "is_player"
+    existing = await _fetchone(
+        db_path,
+        "SELECT 1 AS x FROM tee_time_witnesses WHERE tee_time_id = ?"
+        " AND player_discord_id = ?",
+        (tee_time_id, discord_id),
+    )
+    if existing:
+        return "already"
+    await _execute(
+        db_path,
+        "INSERT INTO tee_time_witnesses (tee_time_id, player_discord_id,"
+        " joined_at, added_by) VALUES (?,?,?,?)",
+        (tee_time_id, discord_id, utcnow_iso(), added_by),
+    )
+    return "ok"
+
+
+async def remove_tee_time_witness(db_path, tee_time_id, discord_id) -> bool:
+    _, rowcount = await _execute(
+        db_path,
+        "DELETE FROM tee_time_witnesses WHERE tee_time_id = ?"
+        " AND player_discord_id = ?",
+        (tee_time_id, discord_id),
+    )
+    return rowcount > 0
+
+
+async def witness_co_submit_scorecard(db_path, card_id, witness_id) -> str:
+    """A joined witness co-submits an awaiting scorecard: records who
+    co-submitted and when, and clears the awaiting flag so the card
+    enters the normal verify flow. Returns 'ok', 'missing', or
+    'not_awaiting'."""
+    card = await get_scorecard(db_path, card_id)
+    if card is None:
+        return "missing"
+    if not card.get("awaiting_witness"):
+        return "not_awaiting"
+    await _execute(
+        db_path,
+        "UPDATE scorecards SET awaiting_witness = 0,"
+        " witness_discord_id = ?, witness_submitted_at = ? WHERE id = ?",
+        (witness_id, utcnow_iso(), card_id),
+    )
+    return "ok"
 
 
 async def join_tee_time(db_path, tee_time_id, discord_id) -> str:
@@ -2633,7 +2756,8 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
                            submitted_by: str | None = None,
                            round_number: int = 1,
                            witness_name: str | None = None,
-                           casual_tee_time_id: str | None = None) -> int:
+                           casual_tee_time_id: str | None = None,
+                           awaiting_witness: bool = False) -> int:
     """Insert or update a scorecard. scores may contain None for holes not
     yet played (live entry); total covers entered holes only.
 
@@ -2693,9 +2817,12 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
             db_path,
             "UPDATE scorecards SET holes_json = ?, total = ?, status = ?,"
             " submitted_at = ?, verified_by = NULL, submitted_by = ?,"
-            " witness_name = ?, hole_times_json = ? WHERE id = ?",
+            " witness_name = ?, hole_times_json = ?, awaiting_witness = ?,"
+            " witness_discord_id = NULL, witness_submitted_at = NULL"
+            " WHERE id = ?",
             (holes_json, total, status, now, submitted_by, witness_name,
-             json.dumps(new_times), existing["id"]),
+             json.dumps(new_times), 1 if awaiting_witness else 0,
+             existing["id"]),
         )
         return existing["id"]
     new_times = [now if s is not None else None for s in scores]
@@ -2704,11 +2831,11 @@ async def upsert_scorecard(db_path, tournament_id, player_id, team_id, tee_time_
         "INSERT INTO scorecards (tournament_id, casual_tee_time_id,"
         " round_number, player_discord_id,"
         " team_id, tee_time_id, holes_json, total, status, submitted_at,"
-        " submitted_by, witness_name, hole_times_json)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " submitted_by, witness_name, hole_times_json, awaiting_witness)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tournament_id, casual_tee_time_id, round_number, player_id, team_id,
          tee_time_id, holes_json, total, status, now, submitted_by,
-         witness_name, json.dumps(new_times)),
+         witness_name, json.dumps(new_times), 1 if awaiting_witness else 0),
     )
     return lastrowid
 
@@ -3060,9 +3187,14 @@ async def get_latest_team_card(db_path, tournament_id, team_id,
 
 
 async def verify_scorecard(db_path, card_id, verified_by) -> bool:
+    # Verifying a card that is still awaiting its witness is the crew
+    # override for a witness who never co-submitted: the flag clears,
+    # and witness_discord_id stays NULL so the record honestly shows no
+    # witness co-submit happened.
     _, rowcount = await _execute(
         db_path,
-        "UPDATE scorecards SET status = 'verified', verified_by = ? WHERE id = ?",
+        "UPDATE scorecards SET status = 'verified', verified_by = ?,"
+        " awaiting_witness = 0 WHERE id = ?",
         (verified_by, card_id),
     )
     return rowcount > 0
@@ -3165,6 +3297,7 @@ async def get_player_round_history(db_path, guild_id,
         "SELECT 'tournament' AS kind, s.id AS scorecard_id,"
         " s.round_number, s.holes_json, s.total, s.status,"
         " s.submitted_at, s.witness_name,"
+        " s.witness_discord_id, s.witness_submitted_at,"
         " t.id AS tournament_id, t.name AS tournament_name,"
         " t.course AS course, t.pars AS pars, t.holes AS holes,"
         " tt.starts_at AS starts_at,"
@@ -3177,6 +3310,7 @@ async def get_player_round_history(db_path, guild_id,
         " SELECT 'casual' AS kind, s.id AS scorecard_id,"
         " s.round_number, s.holes_json, s.total, s.status,"
         " s.submitted_at, s.witness_name,"
+        " s.witness_discord_id, s.witness_submitted_at,"
         " NULL AS tournament_id, NULL AS tournament_name,"
         " c.course AS course, c.pars AS pars, 18 AS holes,"
         " c.starts_at AS starts_at,"

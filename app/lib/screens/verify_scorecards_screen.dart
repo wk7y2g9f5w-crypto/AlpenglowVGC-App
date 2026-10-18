@@ -206,7 +206,9 @@ class _VerifyScorecardsScreenState extends State<VerifyScorecardsScreen> {
                                 : Text(
                                     'Total ${card.total ?? '–'}'
                                     '${card.toPar != null ? ' (${card.toPar! > 0 ? '+' : ''}${card.toPar})' : ''}'
-                                    ' • ${card.status}',
+                                    ' • ${card.status}'
+                                    '${card.awaitingWitness ? ' • awaiting witness co-submit' : ''}'
+                                    '${card.witnessSubmittedAt != null ? ' • witness co-submitted' : ''}',
                                     style: TextStyle(
                                       color: card.status == 'verified'
                                           ? Colors.green

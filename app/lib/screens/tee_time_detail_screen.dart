@@ -83,12 +83,33 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
         // Team-aware actions just stay hidden.
       }
     }
+    // The solo card, for the witness co-submit status block.
+    Scorecard? soloCard;
+    if (tt.witnessRule && tt.isSolo && tt.isStarted) {
+      try {
+        final first = tt.players.first;
+        if (_isSharedFormat) {
+          soloCard = await _api.getScorecard(tt.id,
+              roundNumber: tt.roundNumber, teamId: first.teamId);
+        } else {
+          soloCard = await _api.getScorecard(tt.id,
+              roundNumber: tt.roundNumber,
+              playerDiscordId: first.discordId,
+              teamId: widget.tournament.format == 'best_ball'
+                  ? first.teamId
+                  : null);
+        }
+      } catch (_) {
+        // The witness status block just stays hidden.
+      }
+    }
     return _DetailData(
         teeTime: tt,
         requests: requests,
         isCrew: isCrew,
         isAdmin: isAdmin,
-        teams: teams);
+        teams: teams,
+        soloCard: soloCard);
   }
 
   Future<void> _refresh() async {
@@ -111,6 +132,10 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
 
   bool get _isTeamFormat => const {'best_ball', 'alt_shot', 'scramble'}
       .contains(widget.tournament.format);
+
+  /// Formats whose card belongs to the team, not a player.
+  bool get _isSharedFormat =>
+      const {'alt_shot', 'scramble'}.contains(widget.tournament.format);
 
   /// Join (or request to join) a tee time. Team formats ask which team
   /// is being repped first.
@@ -339,6 +364,153 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
     }
   }
 
+  /// Admin adds a witness from the tournament's player list (the only
+  /// way to put someone else in as witness — Cayden 2026-10-17).
+  Future<void> _addWitnessAdmin(TeeTime tt) async {
+    List<TournamentPlayer> players;
+    try {
+      players = await _api.getTournamentPlayers(widget.tournament.id);
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
+      return;
+    } catch (e) {
+      if (mounted) showSnack(context, 'Failed: $e', error: true);
+      return;
+    }
+    final taken = <String>{
+      for (final p in tt.players) p.discordId,
+      for (final w in tt.witnesses) w.discordId,
+    };
+    final options =
+        players.where((p) => !taken.contains(p.discordId)).toList();
+    if (!mounted) return;
+    if (options.isEmpty) {
+      showSnack(context, 'No one else available to add as witness.');
+      return;
+    }
+    final picked = await showDialog<TournamentPlayer>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add witness'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: options.length,
+            itemBuilder: (_, i) => ListTile(
+              title: Text(golferDisplayName(
+                  options[i].displayName, options[i].golfplusHandle)),
+              onTap: () => Navigator.of(ctx).pop(options[i]),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (picked == null) return;
+    await _act(() => _api.adminAddWitness(tt.id, picked.discordId),
+        'Witness added.');
+  }
+
+  /// The witness reviews the finished card and co-submits it.
+  Future<void> _reviewAndCoSubmit(TeeTime tt, Scorecard card) async {
+    final pars = widget.tournament.pars;
+    String fmtTime(String? iso) {
+      final d = iso == null ? null : DateTime.tryParse(iso)?.toUtc();
+      return d == null ? '—' : formatLocal(d);
+    }
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Co-submit this scorecard?'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Submitted ${fmtTime(card.submittedAt)}'),
+              const SizedBox(height: 4),
+              Text('Total ${card.total ?? '–'}'
+                  '${card.toPar != null ? ' (${card.toPar! > 0 ? '+' : ''}${card.toPar})' : ''}'),
+              const SizedBox(height: 12),
+              for (var nine = 0; nine < 2; nine++) ...[
+                Row(
+                  children: [
+                    for (var h = nine * 9; h < nine * 9 + 9; h++)
+                      Expanded(
+                        child: Text('${h + 1}',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.grey)),
+                      ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    for (var h = nine * 9; h < nine * 9 + 9; h++)
+                      Expanded(
+                        child: Text(
+                            h < card.scores.length &&
+                                    card.scores[h] != null
+                                ? '${card.scores[h]}'
+                                : '–',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold)),
+                      ),
+                  ],
+                ),
+                if (pars != null && pars.length >= 18)
+                  Row(
+                    children: [
+                      for (var h = nine * 9; h < nine * 9 + 9; h++)
+                        Expanded(
+                          child: Text('par ${pars[h]}',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  fontSize: 10, color: Colors.grey)),
+                        ),
+                    ],
+                  ),
+                const SizedBox(height: 8),
+              ],
+              const Text(
+                'Co-submitting confirms you were there for this round. '
+                'The card then goes through the normal verify flow.',
+                style: TextStyle(fontSize: 13, color: Colors.grey),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Not yet'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Co-submit'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || card.id == null) return;
+    await _act(() => _api.witnessSubmitScorecard(card.id!),
+        'Scorecard co-submitted.');
+  }
+
+  /// Format an ISO-8601 UTC timestamp string for display (local time).
+  String _fmtIsoLocal(String? iso) {
+    final d = iso == null ? null : DateTime.tryParse(iso)?.toUtc();
+    return d == null ? '—' : formatLocal(d);
+  }
+
   String _dateStr(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
@@ -527,6 +699,8 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                   sheetTeamIds.contains((tm['id'] as num?)?.toInt()) &&
                   _teamHasMember(tm, widget.myDiscordId));
           final canEnterScores = inIt || data.isAdmin || onSheetTeam;
+          final isWitness = tt.witnesses
+              .any((w) => w.discordId == widget.myDiscordId);
           final pending = data.requests
               .where((r) => r.status.toLowerCase() == 'pending')
               .toList();
@@ -597,6 +771,129 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                             visualDensity: VisualDensity.compact)
                         : null,
                   )),
+              if (tt.witnessRule) ...[
+                const SizedBox(height: 16),
+                const Text('Witness',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                if (tt.witnesses.isEmpty && tt.isSolo)
+                  Text(
+                      tt.isStarted
+                          ? 'No witness joined this tee time.'
+                          : 'A witness is required before this round can '
+                              'start. Anyone who isn\'t playing can join '
+                              'as witness.',
+                      style: TextStyle(
+                          color: tt.isStarted
+                              ? Colors.grey
+                              : Colors.orange.shade800)),
+                if (tt.witnesses.isEmpty && !tt.isSolo)
+                  const Text(
+                      'Not required — this tee time has multiple players.',
+                      style: TextStyle(color: Colors.grey)),
+                ...tt.witnesses.map((w) => ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.visibility),
+                      title: Text(w.handleName),
+                      subtitle: w.joinedAtUtc != null
+                          ? Text('Joined ${formatLocal(w.joinedAtUtc!)}')
+                          : null,
+                      trailing: data.isAdmin
+                          ? IconButton(
+                              icon: const Icon(Icons.close),
+                              tooltip: 'Remove witness',
+                              onPressed: () => _act(
+                                  () => _api.adminRemoveWitness(
+                                      tt.id, w.discordId),
+                                  'Witness removed.'),
+                            )
+                          : null,
+                    )),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    if (!inIt && !isWitness)
+                      OutlinedButton.icon(
+                        onPressed: () => _act(
+                            () => _api.joinAsWitness(tt.id),
+                            'You are the witness for this tee time.'),
+                        icon: const Icon(Icons.visibility),
+                        label: const Text('Join as Witness'),
+                      ),
+                    if (isWitness)
+                      OutlinedButton.icon(
+                        onPressed: () => _act(
+                            () => _api.leaveAsWitness(tt.id),
+                            'Witness removed.'),
+                        icon: const Icon(Icons.visibility_off),
+                        label: const Text('Leave as Witness'),
+                      ),
+                    if (data.isAdmin)
+                      OutlinedButton.icon(
+                        onPressed: () => _addWitnessAdmin(tt),
+                        icon: const Icon(Icons.person_add),
+                        label: const Text('Add witness (admin)'),
+                      ),
+                  ],
+                ),
+                if (data.soloCard != null &&
+                    (data.soloCard!.awaitingWitness ||
+                        data.soloCard!.witnessSubmittedAt != null)) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: data.soloCard!.awaitingWitness
+                          ? Colors.amber.shade50
+                          : Colors.green.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                          color: data.soloCard!.awaitingWitness
+                              ? Colors.amber.shade700
+                              : Colors.green.shade700),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Player submitted: '
+                          '${_fmtIsoLocal(data.soloCard!.submittedAt)}',
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        const SizedBox(height: 4),
+                        if (data.soloCard!.awaitingWitness) ...[
+                          const Text(
+                            'Waiting for the witness to co-submit.',
+                            style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold),
+                          ),
+                          if (isWitness) ...[
+                            const SizedBox(height: 8),
+                            ElevatedButton.icon(
+                              onPressed: () => _reviewAndCoSubmit(
+                                  tt, data.soloCard!),
+                              icon: const Icon(Icons.fact_check),
+                              label: const Text('Review & co-submit'),
+                            ),
+                          ],
+                        ] else
+                          Text(
+                            'Witness co-submitted: '
+                            '${_fmtIsoLocal(data.soloCard!.witnessSubmittedAt)}',
+                            style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
               const SizedBox(height: 16),
               Wrap(
                 spacing: 8,
@@ -642,7 +939,8 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                     ),
                   if (!tt.isStarted && isCreator) ...[
                     ElevatedButton.icon(
-                      onPressed: (data.isAdmin || _startUnlocked(tt))
+                      onPressed: (!tt.witnessNeeded &&
+                              (data.isAdmin || _startUnlocked(tt)))
                           ? () => _startRound(tt.id)
                           : null,
                       icon: const Icon(Icons.play_arrow),
@@ -652,7 +950,17 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                         foregroundColor: Colors.white,
                       ),
                     ),
-                    if (!data.isAdmin && !_startUnlocked(tt))
+                    if (tt.witnessNeeded)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text(
+                          'Waiting for a witness — a solo round can\'t '
+                          'start without one.',
+                          style:
+                              TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                      )
+                    else if (!data.isAdmin && !_startUnlocked(tt))
                       const Padding(
                         padding: EdgeInsets.only(top: 4),
                         child: Text(
@@ -664,10 +972,12 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                   ],
                   if (!inIt && data.isAdmin && !tt.isStarted)
                     OutlinedButton.icon(
-                      onPressed: () => _act(
-                        () => _api.startTeeTime(tt.id),
-                        'Round started.',
-                      ),
+                      onPressed: tt.witnessNeeded
+                          ? null
+                          : () => _act(
+                                () => _api.startTeeTime(tt.id),
+                                'Round started.',
+                              ),
                       icon: const Icon(Icons.play_arrow),
                       label: const Text('Start Round (admin)'),
                     ),
@@ -786,10 +1096,14 @@ class _DetailData {
   /// viewer is on a team in this foursome (partners aren't on the sheet)
   /// and for the admin Add team picker.
   final List<Map<String, dynamic>> teams;
+
+  /// The solo card on a witness-rule tee time (witness status block).
+  final Scorecard? soloCard;
   _DetailData(
       {required this.teeTime,
       required this.requests,
       this.isCrew = false,
       this.isAdmin = false,
-      this.teams = const []});
+      this.teams = const [],
+      this.soloCard});
 }
