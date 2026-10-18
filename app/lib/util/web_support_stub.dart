@@ -2,6 +2,10 @@
 /// native app behaves exactly as before.
 String? readWebOAuthToken() => null;
 
+String? readWebOAuthRefresh() => null;
+
+int? readWebOAuthExpiresIn() => null;
+
 String? readWebOAuthError() => null;
 
 void clearUrlFragment() {}

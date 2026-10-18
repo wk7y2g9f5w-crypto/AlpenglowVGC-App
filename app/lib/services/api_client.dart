@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/models.dart';
+import 'auth.dart';
 
 /// Error thrown for non-2xx API responses. [code] is the backend's
 /// machine-readable error code (e.g. "timezone_required"), when present.
@@ -76,6 +77,19 @@ class ApiClient {
 
   ApiClient({required this.baseUrl, required this.token});
 
+  /// Session-renewal hooks, wired once in main(). Statics so the many
+  /// ApiClient construction sites (each snapshotting the token when a
+  /// screen builds) need no changes: requests prefer the LIVE token over
+  /// the snapshot, and a definitive 401 (the backend answers 401 only
+  /// when the token is truly dead — a couldn't-verify failure is a 503)
+  /// triggers one silent renewal and a retry with the fresh token. If
+  /// renewal is impossible, [onSessionExpired] fires and the app shows
+  /// the login overlay; screens and in-progress score entries are never
+  /// torn down from here.
+  static String? Function()? liveToken;
+  static Future<RefreshOutcome> Function()? sessionRefresher;
+  static void Function()? onSessionExpired;
+
   Uri _uri(String path, [Map<String, String>? query]) {
     final base = baseUrl.endsWith('/')
         ? baseUrl.substring(0, baseUrl.length - 1)
@@ -83,11 +97,37 @@ class ApiClient {
     return Uri.parse('$base$path').replace(queryParameters: query);
   }
 
-  Map<String, String> get _headers => {
-        'Authorization': 'Bearer $token',
+  Map<String, String> _headersFor(String tok) => {
+        'Authorization': 'Bearer $tok',
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       };
+
+  /// Runs one request; on a definitive 401, renews the session once and
+  /// retries with the fresh token before decoding the response.
+  Future<dynamic> _send(
+      Future<http.Response> Function(String tok) make) async {
+    var tok = token;
+    final live = liveToken?.call();
+    if (live != null && live.isNotEmpty) tok = live;
+    var res = await make(tok);
+    if (res.statusCode == 401 && tok.isNotEmpty) {
+      final refresher = sessionRefresher;
+      if (refresher != null) {
+        final outcome = await refresher();
+        if (outcome == RefreshOutcome.refreshed) {
+          res = await make(liveToken?.call() ?? tok);
+          if (res.statusCode == 401) onSessionExpired?.call();
+        } else if (outcome == RefreshOutcome.rejected ||
+            outcome == RefreshOutcome.notApplicable) {
+          onSessionExpired?.call();
+        }
+        // unavailable: renewal couldn't run (Discord/server hiccup) —
+        // the session is left alone and this request's error surfaces.
+      }
+    }
+    return _decode(res);
+  }
 
   dynamic _decode(http.Response res) {
     dynamic body;
@@ -112,34 +152,25 @@ class ApiClient {
     throw ApiException(message, code: code, statusCode: res.statusCode);
   }
 
-  Future<dynamic> _get(String path, [Map<String, String>? query]) async {
-    final res = await http.get(_uri(path, query), headers: _headers);
-    return _decode(res);
-  }
+  Future<dynamic> _get(String path, [Map<String, String>? query]) =>
+      _send((tok) => http.get(_uri(path, query), headers: _headersFor(tok)));
 
-  Future<dynamic> _post(String path, [Map<String, dynamic>? json]) async {
-    final res = await http.post(_uri(path),
-        headers: _headers, body: json == null ? null : jsonEncode(json));
-    return _decode(res);
-  }
+  Future<dynamic> _post(String path, [Map<String, dynamic>? json]) =>
+      _send((tok) => http.post(_uri(path),
+          headers: _headersFor(tok),
+          body: json == null ? null : jsonEncode(json)));
 
-  Future<dynamic> _put(String path, Map<String, dynamic> json) async {
-    final res =
-        await http.put(_uri(path), headers: _headers, body: jsonEncode(json));
-    return _decode(res);
-  }
+  Future<dynamic> _put(String path, Map<String, dynamic> json) =>
+      _send((tok) => http.put(_uri(path),
+          headers: _headersFor(tok), body: jsonEncode(json)));
 
-  Future<dynamic> _patch(String path, Map<String, dynamic> json) async {
-    final res =
-        await http.patch(_uri(path), headers: _headers, body: jsonEncode(json));
-    return _decode(res);
-  }
+  Future<dynamic> _patch(String path, Map<String, dynamic> json) =>
+      _send((tok) => http.patch(_uri(path),
+          headers: _headersFor(tok), body: jsonEncode(json)));
 
-  Future<dynamic> _delete(String path,
-      [Map<String, String>? query]) async {
-    final res = await http.delete(_uri(path, query), headers: _headers);
-    return _decode(res);
-  }
+  Future<dynamic> _delete(String path, [Map<String, String>? query]) =>
+      _send((tok) =>
+          http.delete(_uri(path, query), headers: _headersFor(tok)));
 
   // --- Tournaments ---------------------------------------------------------
 

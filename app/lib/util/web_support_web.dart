@@ -14,6 +14,22 @@ String? readWebOAuthToken() {
   return (token == null || token.isEmpty) ? null : token;
 }
 
+/// Reads `#discord_refresh=<token>` from the page URL fragment (the
+/// long-lived renewal token the web-callback passes through with login).
+String? readWebOAuthRefresh() {
+  final frag = Uri.base.fragment;
+  if (frag.isEmpty) return null;
+  final v = Uri.splitQueryString(frag)['discord_refresh'];
+  return (v == null || v.isEmpty) ? null : v;
+}
+
+/// Reads `#discord_expires=<seconds>` from the page URL fragment.
+int? readWebOAuthExpiresIn() {
+  final frag = Uri.base.fragment;
+  if (frag.isEmpty) return null;
+  return int.tryParse(Uri.splitQueryString(frag)['discord_expires'] ?? '');
+}
+
 /// Reads `#oauth_error=<code>` from the page URL fragment.
 String? readWebOAuthError() {
   final frag = Uri.base.fragment;

@@ -39,10 +39,7 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   bool _busy = false;
 
-  String get _clientId {
-    const defined = String.fromEnvironment('DISCORD_CLIENT_ID');
-    return defined.isNotEmpty ? defined : widget.settings.clientId;
-  }
+  String get _clientId => discordClientId(widget.settings);
 
   String get _redirectUri {
     const defined = String.fromEnvironment('DISCORD_REDIRECT_URI');
@@ -111,13 +108,24 @@ class _LoginScreenState extends State<LoginScreen> {
         throw Exception('No authorization code in the OAuth response.');
       }
 
-      final token = await _exchangeCodeForToken(
+      final session = await _exchangeCodeForToken(
         code: code,
         clientId: clientId,
         redirectUri: redirectUri,
         verifier: verifier,
       );
-      await widget.auth.saveToken(token);
+      // Keep the refresh token too: with it, the session renews itself
+      // when the access token dies (~weekly) instead of logging the
+      // player out from under whatever they're doing.
+      if (session.refresh != null && session.refresh!.isNotEmpty) {
+        await widget.auth.saveDiscordSession(
+          accessToken: session.access,
+          refreshToken: session.refresh!,
+          expiresInSeconds: session.expiresIn,
+        );
+      } else {
+        await widget.auth.saveToken(session.access);
+      }
     } catch (e) {
       if (mounted) showSnack(context, 'Login failed: $e', error: true);
     } finally {
@@ -182,8 +190,11 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  /// Exchanges the authorization code for an access token (PKCE, no secret).
-  static Future<String> _exchangeCodeForToken({
+  /// Exchanges the authorization code for a token pair (PKCE, no secret).
+  /// Returns the access token plus the refresh token and lifetime when
+  /// Discord issues them (it does for the authorization-code flow).
+  static Future<({String access, String? refresh, int? expiresIn})>
+      _exchangeCodeForToken({
     required String code,
     required String clientId,
     required String redirectUri,
@@ -209,7 +220,11 @@ class _LoginScreenState extends State<LoginScreen> {
     if (token == null || token.isEmpty) {
       throw Exception('No access token in the token response.');
     }
-    return token;
+    return (
+      access: token,
+      refresh: data['refresh_token'] as String?,
+      expiresIn: (data['expires_in'] as num?)?.toInt(),
+    );
   }
 
   /// Random 64-char verifier from the PKCE unreserved charset.

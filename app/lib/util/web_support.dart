@@ -11,6 +11,13 @@ import 'web_support_stub.dart'
 /// server's /oauth/web-callback redirect). Null when absent.
 String? readWebOAuthToken() => impl.readWebOAuthToken();
 
+/// Reads `#discord_refresh=<token>` from the page URL fragment. Null when
+/// absent.
+String? readWebOAuthRefresh() => impl.readWebOAuthRefresh();
+
+/// Reads `#discord_expires=<seconds>` from the page URL fragment.
+int? readWebOAuthExpiresIn() => impl.readWebOAuthExpiresIn();
+
 /// Reads `#oauth_error=<code>` from the page URL fragment. Null when absent.
 String? readWebOAuthError() => impl.readWebOAuthError();
 

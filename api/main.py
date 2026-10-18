@@ -90,6 +90,39 @@ _DISCORD_USER_CACHE_TTL_S = 300.0
 _DISCORD_USER_CACHE_MAX = 2048
 _discord_user_cache: dict[str, tuple[float, dict]] = {}
 
+# Failure verdicts from the most recent validation attempt per token, so
+# the auth dependency can answer honestly: a token Discord *definitively*
+# rejected (401/403 from /users/@me) is a dead session (401 to the app,
+# which then renews or re-logs-in), while a validation that could not be
+# completed (Discord rate-limiting us, 5xx, timeout, transport error,
+# unparseable body) must never masquerade as a verdict about the token —
+# the app gets a 503 and keeps its session. Keyed by the same SHA-256
+# token hash as the success cache; raw tokens are never stored.
+_DISCORD_VERDICT_TTL_S = 60.0
+_DISCORD_VERDICT_MAX = 4096
+_discord_token_verdicts: dict[str, tuple[float, str]] = {}
+
+
+def _record_discord_verdict(cache_key: str, verdict: str) -> None:
+    if len(_discord_token_verdicts) >= _DISCORD_VERDICT_MAX:
+        _discord_token_verdicts.clear()
+    _discord_token_verdicts[cache_key] = (
+        time.monotonic() + _DISCORD_VERDICT_TTL_S, verdict)
+
+
+def discord_token_verdict(token: str) -> str:
+    """Latest validation verdict for a token: "invalid" or "unknown".
+
+    Defaults to "invalid" when no verdict was recorded (e.g. tests that
+    monkeypatch fetch_discord_user), preserving the long-standing
+    401-on-failure behavior for anything but a recorded transient failure.
+    """
+    cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    rec = _discord_token_verdicts.get(cache_key)
+    if rec is not None and rec[0] > time.monotonic():
+        return rec[1]
+    return "invalid"
+
 
 async def fetch_discord_user(token: str) -> dict | None:
     """Validate an OAuth bearer token with Discord.
@@ -97,7 +130,9 @@ async def fetch_discord_user(token: str) -> dict | None:
     Returns ``{"id": ..., "display_name": ...}`` on success, None on any
     failure (bad/expired token, network error, unexpected response). Single
     function so unit tests can monkeypatch it. The token is never stored
-    or logged; successful results are cached briefly (see above).
+    or logged; successful results are cached briefly (see above). Each
+    real failure also records a verdict (see _discord_token_verdicts):
+    "invalid" only when Discord itself rejected the token.
     """
     cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
     now = time.monotonic()
@@ -113,18 +148,27 @@ async def fetch_discord_user(token: str) -> dict | None:
                 headers={"Authorization": f"Bearer {token}"},
             )
     except httpx.HTTPError:
+        _record_discord_verdict(cache_key, "unknown")
         return None
     except (httpx.InvalidURL, ValueError, OSError):
         # httpx.InvalidURL: malformed proxy/URL config in the environment
         # (raised at client construction, outside HTTPError). ValueError /
         # OSError: other transport or parsing failures.
+        _record_discord_verdict(cache_key, "unknown")
+        return None
+    if resp.status_code in (401, 403):
+        # Discord's definitive answer about this token: it is dead.
+        _record_discord_verdict(cache_key, "invalid")
         return None
     if resp.status_code != 200:
+        # Rate-limited (429), Discord 5xx, anything else: no verdict.
+        _record_discord_verdict(cache_key, "unknown")
         return None
     try:
         data = resp.json()
         discord_id = str(data["id"])
     except (ValueError, KeyError, TypeError):
+        _record_discord_verdict(cache_key, "unknown")
         return None
     display_name = (data.get("global_name") or data.get("username") or "Player")[:80]
     info = {"id": discord_id, "display_name": display_name}
@@ -138,6 +182,7 @@ async def fetch_discord_user(token: str) -> dict | None:
             _discord_user_cache.clear()
     _discord_user_cache[cache_key] = (
         now + _DISCORD_USER_CACHE_TTL_S, info)
+    _discord_token_verdicts.pop(cache_key, None)
     return info
 
 
@@ -161,6 +206,16 @@ async def get_current_user(request: Request) -> dict:
         return player
     info = await fetch_discord_user(token) if token else None
     if not info:
+        if token and discord_token_verdict(token) == "unknown":
+            # Discord could not be checked (rate limit, outage, timeout):
+            # that is not a verdict about this token. 503 keeps the app's
+            # session intact — it retries later instead of treating the
+            # player as logged out.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify your session with Discord "
+                       "right now — try again in a moment.",
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid Discord token",
@@ -5953,12 +6008,146 @@ async def oauth_web_callback(request: Request):
     if resp.status_code != 200:
         return RedirectResponse("/#oauth_error=exchange_failed", status_code=302)
     try:
-        token = resp.json().get("access_token") or ""
+        token_data = resp.json()
+        token = token_data.get("access_token") or ""
+        refresh = token_data.get("refresh_token") or ""
+        expires_in = token_data.get("expires_in") or ""
     except Exception:
-        token = ""
+        token, refresh, expires_in = "", "", ""
     if not token:
         return RedirectResponse("/#oauth_error=no_token", status_code=302)
-    return RedirectResponse(f"/#discord_token={quote(token, safe='')}", status_code=302)
+    # Pass the refresh token + lifetime through as well (fragment only,
+    # like the access token): the app stores them and renews the session
+    # silently instead of letting it die a week later.
+    frag = f"discord_token={quote(token, safe='')}"
+    if refresh:
+        frag += f"&discord_refresh={quote(str(refresh), safe='')}"
+    if expires_in:
+        frag += f"&discord_expires={quote(str(expires_in), safe='')}"
+    return RedirectResponse(f"/#{frag}", status_code=302)
+
+
+# --------------------------------------------------------------------------
+# Discord session renewal
+# --------------------------------------------------------------------------
+# Discord access tokens live ~1 week; the refresh token issued alongside
+# them is long-lived. The app stores both on-device and asks this endpoint
+# to trade the refresh token for a fresh pair when the access token dies,
+# so a session renews invisibly instead of surfacing as broken screens.
+# The exchange happens server-side (one implementation for web + native,
+# no CORS detour); the app is a PKCE public client, so no client secret
+# is required — DISCORD_CLIENT_SECRET is forwarded when configured, for
+# deployments whose Discord app is set up as a confidential client.
+_REFRESH_RATE_WINDOW_S = 600.0
+_REFRESH_RATE_MAX = 30
+_refresh_attempts: dict[str, list[float]] = {}
+
+
+def _refresh_rate_ok(ip: str) -> bool:
+    now = time.monotonic()
+    hits = [t for t in _refresh_attempts.get(ip, [])
+            if now - t < _REFRESH_RATE_WINDOW_S]
+    if len(hits) >= _REFRESH_RATE_MAX:
+        _refresh_attempts[ip] = hits
+        return False
+    hits.append(now)
+    _refresh_attempts[ip] = hits
+    return True
+
+
+@app.post("/api/oauth/refresh", include_in_schema=False)
+async def oauth_refresh(request: Request) -> dict:
+    """Trade a Discord refresh token for a fresh access/refresh pair.
+
+    Unauthenticated by design: the refresh token itself is the credential
+    (same trust level as the access token the app already holds). Answers
+    deliberately distinguish the outcomes the app must handle differently:
+      200 — new pair (Discord rotates the refresh token; store both).
+      401 — Discord rejected the refresh token (revoked / password
+            changed): renewing is impossible, the user must log in again.
+      503 — Discord unreachable, or this server cannot perform renewals:
+            the session is NOT declared dead; the app keeps it and the
+            user retries later.
+    """
+    ip = request.client.host if request.client else "unknown"
+    if not _refresh_rate_ok(ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many session renewal attempts — try again shortly.",
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+    refresh_token = str(body.get("refresh_token", ""))
+    client_id = str(body.get("client_id", ""))
+    ok = (
+        re.fullmatch(r"\d{8,32}", client_id) is not None
+        and 16 <= len(refresh_token) <= 1024
+        and not any(c.isspace() for c in refresh_token)
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail="invalid parameters")
+    form = {
+        "client_id": client_id,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    client_secret = os.environ.get("DISCORD_CLIENT_SECRET") or ""
+    if client_secret:
+        form["client_secret"] = client_secret
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://discord.com/api/oauth2/token",
+                data=form,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not reach Discord to renew your session.",
+        )
+    if resp.status_code != 200:
+        error = ""
+        try:
+            error = str(resp.json().get("error", ""))
+        except Exception:
+            error = ""
+        if error == "invalid_grant":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Discord session can no longer be renewed — "
+                       "log in again.",
+            )
+        if error == "invalid_client":
+            # The Discord app demands a client secret this server does not
+            # have configured: an operator problem, not a dead session.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Session renewal is not configured on this server.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not renew your session right now.",
+        )
+    try:
+        data = resp.json()
+        access = str(data.get("access_token") or "")
+        new_refresh = str(data.get("refresh_token") or refresh_token)
+        expires_in = int(data.get("expires_in") or 0)
+    except (ValueError, TypeError):
+        access, new_refresh, expires_in = "", refresh_token, 0
+    if not access:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not renew your session right now.",
+        )
+    return {
+        "access_token": access,
+        "refresh_token": new_refresh,
+        "expires_in": expires_in,
+    }
 
 
 @app.get("/", include_in_schema=False)

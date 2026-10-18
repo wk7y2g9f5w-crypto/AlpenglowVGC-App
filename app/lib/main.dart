@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -27,10 +29,27 @@ void main() async {
   if (kIsWeb) {
     final webToken = readWebOAuthToken();
     if (webToken != null && webToken.isNotEmpty) {
-      await auth.saveToken(webToken);
+      final webRefresh = readWebOAuthRefresh();
+      if (webRefresh != null && webRefresh.isNotEmpty) {
+        await auth.saveDiscordSession(
+          accessToken: webToken,
+          refreshToken: webRefresh,
+          expiresInSeconds: readWebOAuthExpiresIn(),
+        );
+      } else {
+        await auth.saveToken(webToken);
+      }
       clearUrlFragment();
     }
   }
+
+  // Session renewal wiring: ApiClient prefers the live token, renews a
+  // definitively-dead session silently, and reports an unrecoverable
+  // session via expireSession() (the app shows the login overlay —
+  // nothing on screen is torn down).
+  ApiClient.liveToken = () => auth.token;
+  ApiClient.sessionRefresher = () => auth.tryRefresh(settings);
+  ApiClient.onSessionExpired = () => unawaited(auth.expireSession());
 
   runApp(AlpenglowApp(auth: auth, settings: settings));
 }
@@ -48,6 +67,9 @@ class AlpenglowApp extends StatefulWidget {
 
 class _AlpenglowAppState extends State<AlpenglowApp> {
   bool _wasLoggedIn = false;
+  bool _loginOverlayShowing = false;
+  Route<void>? _loginOverlayRoute;
+  final GlobalKey<NavigatorState> _navKey = GlobalKey<NavigatorState>();
 
   @override
   void initState() {
@@ -58,6 +80,10 @@ class _AlpenglowAppState extends State<AlpenglowApp> {
     // device's push token is registered with the server.
     if (_wasLoggedIn) {
       PushService.onLogin(widget.auth, widget.settings);
+      // Renew in the background when the access token is near expiry,
+      // so it never dies mid-round.
+      unawaited(widget.auth
+          .refreshIfExpiringSoon(widget.settings, const Duration(days: 2)));
     }
   }
 
@@ -77,12 +103,45 @@ class _AlpenglowAppState extends State<AlpenglowApp> {
       PushService.onLogout(widget.auth, widget.settings);
     }
     _wasLoggedIn = now;
+    if (widget.auth.sessionExpired) {
+      _showLoginOverlay();
+    } else if (_loginOverlayShowing) {
+      // Session restored (fresh login through the overlay): remove the
+      // overlay route itself — it may not be on top (the email sign-in
+      // screen sits above it and pops itself right after this).
+      _loginOverlayShowing = false;
+      final route = _loginOverlayRoute;
+      _loginOverlayRoute = null;
+      if (route != null) _navKey.currentState?.removeRoute(route);
+    }
     if (mounted) setState(() {});
+  }
+
+  /// Push the login screen as a non-dismissible overlay when the session
+  /// dies unrecoverably. A pushed route — NOT a home swap — so every
+  /// screen underneath (including a scorecard being entered) stays
+  /// mounted and untouched; after logging in, the overlay pops and the
+  /// player is right back where they were.
+  void _showLoginOverlay() {
+    if (_loginOverlayShowing) return;
+    _loginOverlayShowing = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final route = MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => PopScope(
+          canPop: false,
+          child: LoginScreen(auth: widget.auth, settings: widget.settings),
+        ),
+      );
+      _loginOverlayRoute = route;
+      _navKey.currentState?.push(route);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: _navKey,
       title: 'Alpenglow VGC',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
