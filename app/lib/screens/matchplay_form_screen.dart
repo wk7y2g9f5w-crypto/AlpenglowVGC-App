@@ -110,6 +110,7 @@ class _MatchPlayFormScreenState extends State<MatchPlayFormScreen> {
     final time = await showTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(_when ?? now),
+      initialEntryMode: TimePickerEntryMode.input,
     );
     if (time == null) return;
     setState(() {

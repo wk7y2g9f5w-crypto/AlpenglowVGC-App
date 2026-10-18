@@ -2293,13 +2293,15 @@ async def start_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
     # the witness rule cannot start until a witness has joined it. No
     # exceptions — an admin who wants to start it can join as witness
     # or add one first. Grandfathered tee times (witness_rule = 0)
-    # never see this gate.
+    # never see this gate. Solo-role exemption (Cayden 2026-10-18):
+    # a participant holding the Solo role needs no witness at all.
     if tt.get("witness_rule"):
         player_count = await db.tee_time_player_count(DB_PATH, tee_time_id)
         if player_count < 2:
             witnesses = await db.get_tee_time_witnesses(
                 DB_PATH, tee_time_id)
-            if not witnesses:
+            if not witnesses and not await _tee_time_solo_exempt(
+                    tee_time_id):
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail={
@@ -2416,193 +2418,21 @@ async def admin_remove_witness(tee_time_id: int, player_id: str,
 
 
 # ---------------------------------------------------------------------------
-# Solo-role witness input (Cayden 2026-10-18): a player holding the
-# Discord "Solo" role may input a witness for their OWN solo tee time —
-# the one exception to "the player can never assign a witness". The
-# named witness must be crew (admin / Mod / Tournament Director — never
-# a regular player), still co-submits the card like any witness, and
-# the designation locks the moment the round starts. Every other
-# witness path (self-join by anyone, admin add) is unchanged.
+# Solo-role witness exemption (Cayden 2026-10-18, replacing the same-day
+# witness-input path at his direction): a player holding the Discord
+# "Solo" role needs NO witness at all — none to start the round and no
+# co-submit afterwards; their card goes to the normal crew-verify pile
+# like any group card. For an alt-shot team, any member holding the
+# role covers the team. An unknown role check (Discord unreachable)
+# counts as NOT exempt — the witness rule applies; the safe default.
 # ---------------------------------------------------------------------------
-class WitnessDesignate(BaseModel):
-    player_id: str
+async def _tee_time_solo_exempt(tee_time_id: int) -> bool:
+    participants = await db.tee_time_participant_ids(DB_PATH, tee_time_id)
+    for pid in participants:
+        if await fetch_solo_status(pid) is True:
+            return True
+    return False
 
-
-async def _require_solo_designator(tee_time_id: int,
-                                   user: dict) -> tuple[dict, set]:
-    """Shared gates for the Solo-input endpoints: returns (tee_time,
-    participant_ids) or raises. Order: rule applies → round not
-    started → caller is playing in the tee time → caller holds Solo."""
-    tt, _ = await _tee_time_or_404(tee_time_id)
-    if not tt.get("witness_rule"):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "witness_not_required",
-                "message": "This tee time doesn't use witnesses.",
-            },
-        )
-    if tt.get("started_at"):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "round_started",
-                "message": "The round has started — the witness can't "
-                           "be changed now.",
-            },
-        )
-    participants = await db.tee_time_participant_ids(DB_PATH, tt["id"])
-    if str(user["discord_id"]) not in participants:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "not_on_tee_time",
-                "message": "You can only input a witness for a tee "
-                           "time you're playing in.",
-            },
-        )
-    solo = await fetch_solo_status(user["discord_id"])
-    if solo is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not verify your Solo role — try again shortly.",
-        )
-    if not solo:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "solo_role_required",
-                "message": "Only players with the Solo role can input "
-                           "their own witness.",
-            },
-        )
-    return tt, participants
-
-
-@app.get("/api/tee-times/{tee_time_id}/witness-candidates")
-async def witness_candidates(tee_time_id: int,
-                             user: CurrentUser) -> list[dict]:
-    """Crew members a Solo-role player could input as their witness:
-    registered players who are admin/Mod/Tournament Director, minus
-    anyone playing in this tee time."""
-    tt, participants = await _require_solo_designator(tee_time_id, user)
-    out = []
-    for p in await db.list_players(DB_PATH):
-        pid = str(p["discord_id"])
-        if pid in participants or pid.startswith(LOCAL_KEY_PREFIX):
-            continue
-        if await fetch_crew_status(pid):
-            out.append(await _player_with_handle(DB_PATH, pid))
-    return out
-
-
-@app.post("/api/tee-times/{tee_time_id}/witness/designate")
-async def designate_witness(tee_time_id: int, body: WitnessDesignate,
-                            user: CurrentUser) -> dict:
-    """The Solo-role player inputs their witness (must be crew)."""
-    tt, participants = await _require_solo_designator(tee_time_id, user)
-    target = str(body.player_id)
-    if await db.get_player(DB_PATH, target) is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Player not found",
-        )
-    if target in participants:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "is_player",
-                "message": "That player is playing in this tee time — "
-                           "they can't also be its witness.",
-            },
-        )
-    crew = await fetch_crew_status(target)
-    if crew is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not verify that player's crew status — "
-                   "try again shortly.",
-        )
-    if not crew:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "witness_must_be_crew",
-                "message": "A witness you input yourself must be an "
-                           "admin, Mod, or Tournament Director.",
-            },
-        )
-    result = await db.add_tee_time_witness(
-        DB_PATH, tt["id"], target, added_by=user["discord_id"])
-    if result == "is_player":  # pragma: no cover - checked above
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "is_player",
-                "message": "That player is playing in this tee time — "
-                           "they can't also be its witness.",
-            },
-        )
-    if result != "already":
-        # Notify the witness (Cayden 2026-10-18): being INPUT as a
-        # witness pushes to the designee — a self-join does not (they
-        # already know) and neither does an admin add. Gated by the
-        # witness's own witness_designated pref + having a device.
-        # Failure-safe: a push problem never breaks the designation.
-        try:
-            t = await db.get_tournament(DB_PATH, tt["tournament_id"])
-            tname = t["name"] if t else "a tournament"
-            who = user.get("display_name") or "A player"
-            await db.notify_player(
-                DB_PATH, target, "witness_designated",
-                "You've been named a witness",
-                f"{who} picked you as their witness for {tname}. "
-                "You'll co-submit their scorecard after the round.",
-                data={"kind": "witness_designated",
-                      "tee_time_id": tt["id"],
-                      "tournament_id": tt["tournament_id"]},
-            )
-        except Exception as e:  # noqa: BLE001 - designation must survive
-            print(f"witness-designated push failed for tee time "
-                  f"{tt['id']}: {e}")
-    return {"witness": True, "already": result == "already"}
-
-
-@app.delete("/api/tee-times/{tee_time_id}/witness/designate/{player_id}")
-async def undesignate_witness(tee_time_id: int, player_id: str,
-                              user: CurrentUser) -> dict:
-    """Remove a witness the caller input themselves (only their own
-    designation, and only before the round starts)."""
-    tt, _ = await _tee_time_or_404(tee_time_id)
-    if tt.get("started_at"):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "round_started",
-                "message": "The round has started — the witness can't "
-                           "be changed now.",
-            },
-        )
-    witnesses = await db.get_tee_time_witnesses(DB_PATH, tt["id"])
-    row = next(
-        (w for w in witnesses
-         if str(w["discord_id"]) == str(player_id)),
-        None,
-    )
-    if row is None:
-        return {"witness": False, "removed": False}
-    if str(row.get("added_by")) != str(user["discord_id"]):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "not_your_witness",
-                "message": "You can only remove a witness you input "
-                           "yourself.",
-            },
-        )
-    removed = await db.remove_tee_time_witness(
-        DB_PATH, tt["id"], player_id)
-    return {"witness": False, "removed": removed}
 
 
 @app.post("/api/scorecards/{card_id}/witness-submit")
@@ -3747,8 +3577,11 @@ async def put_scorecard(
     witness_rule = bool(tt.get("witness_rule"))
     awaiting_witness = False
     if witness_rule and player_count < 2 and body.complete:
-        status_value = "pending"
-        awaiting_witness = True
+        # Solo-role exemption (Cayden 2026-10-18): a Solo holder's card
+        # skips the witness wait and stays in the normal verify pile.
+        if not await _tee_time_solo_exempt(tt["id"]):
+            status_value = "pending"
+            awaiting_witness = True
     # Cayden 2026-10-13 (alt-shot only, grandfathered tee times): a tee
     # time with a single team has nobody to cross-check the card, so a
     # named witness stands in for the missing team — a witnessed final
@@ -5987,7 +5820,6 @@ class NotificationPrefsUpdate(BaseModel):
     ace: bool | None = None
     albatross: bool | None = None
     top3_changes: bool | None = None
-    witness_designated: bool | None = None
 
 
 @app.get("/api/notifications/prefs")

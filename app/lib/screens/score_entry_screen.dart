@@ -63,6 +63,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
   bool _submitting = false;
   bool _isCrew = false;
   bool _isAdmin = false;
+  bool _viewerSolo = false;
   List<String> _witnessOptions = [];
   final Map<int, Timer> _saveTimers = {};
   bool _saving = false;
@@ -200,6 +201,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         setState(() {
           _isCrew = me.isCrew;
           _isAdmin = me.isAdmin;
+          _viewerSolo = me.isSolo;
         });
         _ensureSelectableRound();
       }
@@ -486,7 +488,9 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         roundNumber: _roundNumber,
         witnessOptions: _witnessOptions,
         witnessRequired: _soloAltShot && !_joinedWitnessRule,
-        joinedWitness: _joinedWitnessRule,
+        // Solo-role holders are exempt (2026-10-18): no co-submit
+        // wait follows their submit, so the note would be wrong.
+        joinedWitness: _joinedWitnessRule && !_viewerSolo,
       ),
     );
     if (result == null || result.isEmpty) return;

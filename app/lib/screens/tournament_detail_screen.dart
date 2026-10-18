@@ -971,7 +971,9 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                       child: OutlinedButton(
                         onPressed: () async {
                           final picked = await showTimePicker(
-                              context: ctx, initialTime: time);
+                              context: ctx,
+                              initialTime: time,
+                              initialEntryMode: TimePickerEntryMode.input);
                           if (picked != null) setDlg(() => time = picked);
                         },
                         child: Text(time.format(ctx)),

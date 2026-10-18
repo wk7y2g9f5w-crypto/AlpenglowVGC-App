@@ -395,30 +395,6 @@ class ApiClient {
     await _delete('/api/tee-times/$teeTimeId/witnesses/$playerId');
   }
 
-  /// Crew members a Solo-role player could input as their witness
-  /// (admin/Mod/Tournament Director, not playing in this tee time).
-  Future<List<TournamentPlayer>> getWitnessCandidates(
-      String teeTimeId) async {
-    final body = await _get('/api/tee-times/$teeTimeId/witness-candidates');
-    final list = body as List? ?? [];
-    return list
-        .map((e) => TournamentPlayer.fromJson(e as Map<String, dynamic>))
-        .toList();
-  }
-
-  /// A player holding the Discord "Solo" role inputs their own witness.
-  /// The server enforces: caller plays in the tee time, holds the role,
-  /// the round hasn't started, and the witness is crew.
-  Future<void> designateWitness(String teeTimeId, String playerId) async {
-    await _post('/api/tee-times/$teeTimeId/witness/designate',
-        {'player_id': playerId});
-  }
-
-  /// Remove a witness the caller input themselves (pre-start only).
-  Future<void> undesignateWitness(String teeTimeId, String playerId) async {
-    await _delete('/api/tee-times/$teeTimeId/witness/designate/$playerId');
-  }
-
   /// The witness co-submits a solo scorecard that is waiting on them.
   Future<Scorecard> witnessSubmitScorecard(int cardId) async {
     final body = await _post('/api/scorecards/$cardId/witness-submit');
@@ -784,8 +760,7 @@ class ApiClient {
         'round_starts',
         'ace',
         'albatross',
-        'top3_changes',
-        'witness_designated'
+        'top3_changes'
       ])
         k: map[k] == true,
     };

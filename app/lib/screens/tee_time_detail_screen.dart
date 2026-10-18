@@ -85,15 +85,6 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
         // Team-aware actions just stay hidden.
       }
     }
-    // The viewer's own tournament teams (for the Solo-witness input:
-    // a partner who isn't the sheet rep is still "playing in" a solo
-    // team tee time and may input its witness).
-    final myTeamIds = <int>{
-      for (final tm in teams)
-        if (_teamHasMember(tm, widget.myDiscordId))
-          if ((tm['id'] as num?)?.toInt() != null)
-            (tm['id'] as num).toInt(),
-    };
     // The solo card, for the witness co-submit status block.
     Scorecard? soloCard;
     if (tt.witnessRule && tt.isSolo && tt.isStarted) {
@@ -120,7 +111,6 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
         isCrew: isCrew,
         isAdmin: isAdmin,
         isSolo: isSolo,
-        myTeamIds: myTeamIds,
         teams: teams,
         soloCard: soloCard);
   }
@@ -430,56 +420,6 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
         'Witness added.');
   }
 
-  /// A Solo-role player inputs their own witness (Cayden 2026-10-18).
-  /// The candidate list comes from the server and holds only crew
-  /// members who aren't playing in this tee time.
-  Future<void> _designateWitness(TeeTime tt) async {
-    List<TournamentPlayer> options;
-    try {
-      options = await _api.getWitnessCandidates(tt.id);
-    } on ApiException catch (e) {
-      if (mounted) showSnack(context, friendlyApiMessage(e), error: true);
-      return;
-    } catch (e) {
-      if (mounted) showSnack(context, 'Failed: $e', error: true);
-      return;
-    }
-    if (!mounted) return;
-    if (options.isEmpty) {
-      showSnack(context,
-          'No crew members available to input as your witness.');
-      return;
-    }
-    final picked = await showDialog<TournamentPlayer>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Input your witness'),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: ListView.builder(
-            shrinkWrap: true,
-            itemCount: options.length,
-            itemBuilder: (_, i) => ListTile(
-              title: Text(golferDisplayName(
-                  options[i].displayName, options[i].golfplusHandle)),
-              subtitle: const Text('Crew'),
-              onTap: () => Navigator.of(ctx).pop(options[i]),
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-        ],
-      ),
-    );
-    if (picked == null) return;
-    await _act(() => _api.designateWitness(tt.id, picked.discordId),
-        'Witness set — they will co-submit your card.');
-  }
-
   /// The witness reviews the finished card and co-submits it.
   Future<void> _reviewAndCoSubmit(TeeTime tt, Scorecard card) async {
     final pars = widget.tournament.pars;
@@ -653,7 +593,9 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                     child: OutlinedButton(
                       onPressed: () async {
                         final picked = await showTimePicker(
-                            context: ctx, initialTime: time);
+                            context: ctx,
+                            initialTime: time,
+                            initialEntryMode: TimePickerEntryMode.input);
                         if (picked != null) setDlg(() => time = picked);
                       },
                       child: Text(time.format(ctx)),
@@ -764,20 +706,6 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
           final canEnterScores = inIt || data.isAdmin || onSheetTeam;
           final isWitness = tt.witnesses
               .any((w) => w.discordId == widget.myDiscordId);
-          // Solo-role witness input (Cayden 2026-10-18): the viewer
-          // holds the Solo role, is playing in this (solo) tee time —
-          // directly or as a partner on its team — and the round hasn't
-          // started (the designation locks at start).
-          final playingInIt = inIt ||
-              (_isTeamFormat &&
-                  tt.players.any((p) =>
-                      p.teamId != null &&
-                      data.myTeamIds.contains(p.teamId)));
-          final canDesignate = data.isSolo &&
-              tt.witnessRule &&
-              tt.isSolo &&
-              !tt.isStarted &&
-              playingInIt;
           final pending = data.requests
               .where((r) => r.status.toLowerCase() == 'pending')
               .toList();
@@ -858,11 +786,14 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                   Text(
                       tt.isStarted
                           ? 'No witness joined this tee time.'
-                          : 'A witness is required before this round can '
-                              'start. Anyone who isn\'t playing can join '
-                              'as witness.',
+                          : (inIt && data.isSolo)
+                              ? 'No witness needed — your Solo role '
+                                  'covers this tee time.'
+                              : 'A witness is required before this round '
+                                  'can start. Anyone who isn\'t playing '
+                                  'can join as witness.',
                       style: TextStyle(
-                          color: tt.isStarted
+                          color: (tt.isStarted || (inIt && data.isSolo))
                               ? Colors.grey
                               : Colors.orange.shade800)),
                 if (tt.witnesses.isEmpty && !tt.isSolo)
@@ -885,17 +816,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                                       tt.id, w.discordId),
                                   'Witness removed.'),
                             )
-                          : (w.addedBy == widget.myDiscordId &&
-                                  !tt.isStarted)
-                              ? IconButton(
-                                  icon: const Icon(Icons.close),
-                                  tooltip: 'Remove my witness',
-                                  onPressed: () => _act(
-                                      () => _api.undesignateWitness(
-                                          tt.id, w.discordId),
-                                      'Witness removed.'),
-                                )
-                              : null,
+                          : null,
                     )),
                 const SizedBox(height: 8),
                 Wrap(
@@ -923,12 +844,6 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                         onPressed: () => _addWitnessAdmin(tt),
                         icon: const Icon(Icons.person_add),
                         label: const Text('Add witness (admin)'),
-                      ),
-                    if (canDesignate)
-                      OutlinedButton.icon(
-                        onPressed: () => _designateWitness(tt),
-                        icon: const Icon(Icons.how_to_reg),
-                        label: const Text('Input my witness'),
                       ),
                   ],
                 ),
@@ -1190,7 +1105,6 @@ class _DetailData {
   final bool isSolo;
 
   /// Tournament team ids the viewer belongs to (team formats).
-  final Set<int> myTeamIds;
 
   /// Tournament teams (team formats only) — used to tell whether the
   /// viewer is on a team in this foursome (partners aren't on the sheet)
@@ -1205,7 +1119,6 @@ class _DetailData {
       this.isCrew = false,
       this.isAdmin = false,
       this.isSolo = false,
-      this.myTeamIds = const {},
       this.teams = const [],
       this.soloCard});
 }
