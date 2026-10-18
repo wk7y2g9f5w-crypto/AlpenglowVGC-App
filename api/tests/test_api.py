@@ -49,6 +49,11 @@ async def fake_fetch_mod_admin_status(discord_id: str):
     return False
 
 
+async def fake_fetch_solo_status(discord_id: str):
+    """Default: no Solo role. Suites override with their own fake."""
+    return False
+
+
 async def fake_discord_guild_roles():
     """Default: Discord unreachable. Override per-case."""
     return None
@@ -87,6 +92,7 @@ class ApiTestCase(unittest.TestCase):
         main.fetch_crew_status = fake_fetch_crew_status
         main.fetch_admin_status = fake_fetch_admin_status
         main.fetch_mod_admin_status = fake_fetch_mod_admin_status
+        main.fetch_solo_status = fake_fetch_solo_status
         main.discord_guild_roles = fake_discord_guild_roles
         main.discord_guild_members = fake_discord_guild_members
         main.discord_modify_member_role = fake_discord_modify_member_role

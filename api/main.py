@@ -466,7 +466,10 @@ async def _fetch_guild_standing_uncached(
                 if r.get("id") in member_role_ids
             }
             return privileged, names
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
+        # InvalidURL: malformed proxy/URL config in the environment,
+        # raised at client construction (same lesson as
+        # fetch_discord_user) — a couldn't-check, never a crash.
         return None
     except (ValueError, TypeError, KeyError):
         return None
@@ -538,6 +541,27 @@ async def fetch_mod_admin_status(discord_id: str) -> bool | None:
     return privileged or bool(names & MOD_ADMIN_ROLE_NAMES)
 
 
+# The "Solo" Discord role (Cayden 2026-10-18): holders may input their
+# own witness for a solo tournament tee time (the witness must be crew).
+SOLO_ROLE_NAMES = frozenset({"Solo"})
+
+
+async def fetch_solo_status(discord_id: str) -> bool | None:
+    """Does this Discord user hold the "Solo" role?
+
+    Returns True/False when Discord answered, None when the check could
+    not be performed. Local (email) accounts have no Discord roles, so
+    they are always False.
+    """
+    if str(discord_id).startswith(LOCAL_KEY_PREFIX):
+        return False
+    standing = await _fetch_guild_standing(discord_id)
+    if standing is None:
+        return None
+    _privileged, names = standing
+    return bool(names & SOLO_ROLE_NAMES)
+
+
 # --------------------------------------------------------------------------
 # Discord REST helpers for the in-app crew management screen.
 # Module-level functions so unit tests can monkeypatch them, mirroring the
@@ -576,7 +600,7 @@ async def discord_guild_roles() -> list[dict] | None:
                 f"https://discord.com/api/v10/guilds/{guild_id}/roles",
                 headers=headers,
             )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return None
     if resp.status_code != 200:
         return None
@@ -602,7 +626,7 @@ async def discord_guild_members() -> list[dict] | None:
                 params={"limit": 1000},
                 headers=headers,
             )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return None
     if resp.status_code != 200:
         return None
@@ -632,7 +656,7 @@ async def discord_modify_member_role(discord_id: str, role_id: str,
                 f"/members/{discord_id}/roles/{role_id}",
                 headers=headers,
             )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return None
     return resp.status_code
 
@@ -2301,6 +2325,174 @@ async def admin_add_witness(tee_time_id: int, player_id: str,
 async def admin_remove_witness(tee_time_id: int, player_id: str,
                                user: AdminUser) -> dict:
     tt, _ = await _tee_time_or_404(tee_time_id)
+    removed = await db.remove_tee_time_witness(
+        DB_PATH, tt["id"], player_id)
+    return {"witness": False, "removed": removed}
+
+
+# ---------------------------------------------------------------------------
+# Solo-role witness input (Cayden 2026-10-18): a player holding the
+# Discord "Solo" role may input a witness for their OWN solo tee time —
+# the one exception to "the player can never assign a witness". The
+# named witness must be crew (admin / Mod / Tournament Director — never
+# a regular player), still co-submits the card like any witness, and
+# the designation locks the moment the round starts. Every other
+# witness path (self-join by anyone, admin add) is unchanged.
+# ---------------------------------------------------------------------------
+class WitnessDesignate(BaseModel):
+    player_id: str
+
+
+async def _require_solo_designator(tee_time_id: int,
+                                   user: dict) -> tuple[dict, set]:
+    """Shared gates for the Solo-input endpoints: returns (tee_time,
+    participant_ids) or raises. Order: rule applies → round not
+    started → caller is playing in the tee time → caller holds Solo."""
+    tt, _ = await _tee_time_or_404(tee_time_id)
+    if not tt.get("witness_rule"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "witness_not_required",
+                "message": "This tee time doesn't use witnesses.",
+            },
+        )
+    if tt.get("started_at"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "round_started",
+                "message": "The round has started — the witness can't "
+                           "be changed now.",
+            },
+        )
+    participants = await db.tee_time_participant_ids(DB_PATH, tt["id"])
+    if str(user["discord_id"]) not in participants:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "not_on_tee_time",
+                "message": "You can only input a witness for a tee "
+                           "time you're playing in.",
+            },
+        )
+    solo = await fetch_solo_status(user["discord_id"])
+    if solo is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify your Solo role — try again shortly.",
+        )
+    if not solo:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "solo_role_required",
+                "message": "Only players with the Solo role can input "
+                           "their own witness.",
+            },
+        )
+    return tt, participants
+
+
+@app.get("/api/tee-times/{tee_time_id}/witness-candidates")
+async def witness_candidates(tee_time_id: int,
+                             user: CurrentUser) -> list[dict]:
+    """Crew members a Solo-role player could input as their witness:
+    registered players who are admin/Mod/Tournament Director, minus
+    anyone playing in this tee time."""
+    tt, participants = await _require_solo_designator(tee_time_id, user)
+    out = []
+    for p in await db.list_players(DB_PATH):
+        pid = str(p["discord_id"])
+        if pid in participants or pid.startswith(LOCAL_KEY_PREFIX):
+            continue
+        if await fetch_crew_status(pid):
+            out.append(await _player_with_handle(DB_PATH, pid))
+    return out
+
+
+@app.post("/api/tee-times/{tee_time_id}/witness/designate")
+async def designate_witness(tee_time_id: int, body: WitnessDesignate,
+                            user: CurrentUser) -> dict:
+    """The Solo-role player inputs their witness (must be crew)."""
+    tt, participants = await _require_solo_designator(tee_time_id, user)
+    target = str(body.player_id)
+    if await db.get_player(DB_PATH, target) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Player not found",
+        )
+    if target in participants:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "is_player",
+                "message": "That player is playing in this tee time — "
+                           "they can't also be its witness.",
+            },
+        )
+    crew = await fetch_crew_status(target)
+    if crew is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify that player's crew status — "
+                   "try again shortly.",
+        )
+    if not crew:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "witness_must_be_crew",
+                "message": "A witness you input yourself must be an "
+                           "admin, Mod, or Tournament Director.",
+            },
+        )
+    result = await db.add_tee_time_witness(
+        DB_PATH, tt["id"], target, added_by=user["discord_id"])
+    if result == "is_player":  # pragma: no cover - checked above
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "is_player",
+                "message": "That player is playing in this tee time — "
+                           "they can't also be its witness.",
+            },
+        )
+    return {"witness": True, "already": result == "already"}
+
+
+@app.delete("/api/tee-times/{tee_time_id}/witness/designate/{player_id}")
+async def undesignate_witness(tee_time_id: int, player_id: str,
+                              user: CurrentUser) -> dict:
+    """Remove a witness the caller input themselves (only their own
+    designation, and only before the round starts)."""
+    tt, _ = await _tee_time_or_404(tee_time_id)
+    if tt.get("started_at"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "round_started",
+                "message": "The round has started — the witness can't "
+                           "be changed now.",
+            },
+        )
+    witnesses = await db.get_tee_time_witnesses(DB_PATH, tt["id"])
+    row = next(
+        (w for w in witnesses
+         if str(w["discord_id"]) == str(player_id)),
+        None,
+    )
+    if row is None:
+        return {"witness": False, "removed": False}
+    if str(row.get("added_by")) != str(user["discord_id"]):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "not_your_witness",
+                "message": "You can only remove a witness you input "
+                           "yourself.",
+            },
+        )
     removed = await db.remove_tee_time_witness(
         DB_PATH, tt["id"], player_id)
     return {"witness": False, "removed": removed}
@@ -5534,7 +5726,8 @@ async def update_season_dates(
 # --------------------------------------------------------------------------
 def _profile_json(row: dict, is_crew: bool = False,
                   is_admin: bool = False,
-                  can_manage_scores: bool = False) -> dict:
+                  can_manage_scores: bool = False,
+                  is_solo: bool = False) -> dict:
     return {
         "discord_id": row["discord_id"],
         "display_name": row["display_name"],
@@ -5544,6 +5737,7 @@ def _profile_json(row: dict, is_crew: bool = False,
         "is_crew": is_crew,
         "is_admin": is_admin,
         "can_manage_scores": can_manage_scores,
+        "is_solo": is_solo,
     }
 
 
@@ -5552,8 +5746,10 @@ async def get_me(user: CurrentUser) -> dict:
     crew = await fetch_crew_status(user["discord_id"])
     admin = await fetch_admin_status(user["discord_id"])
     mod_admin = await fetch_mod_admin_status(user["discord_id"])
+    solo = await fetch_solo_status(user["discord_id"])
     return _profile_json(user, is_crew=bool(crew), is_admin=bool(admin),
-                         can_manage_scores=bool(mod_admin))
+                         can_manage_scores=bool(mod_admin),
+                         is_solo=bool(solo))
 
 
 @app.patch("/api/players/me")
@@ -6003,7 +6199,7 @@ async def oauth_web_callback(request: Request):
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return RedirectResponse("/#oauth_error=exchange_failed", status_code=302)
     if resp.status_code != 200:
         return RedirectResponse("/#oauth_error=exchange_failed", status_code=302)
@@ -6103,7 +6299,7 @@ async def oauth_refresh(request: Request) -> dict:
                 data=form,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not reach Discord to renew your session.",

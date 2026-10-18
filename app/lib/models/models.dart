@@ -846,6 +846,10 @@ class PlayerMe {
   final bool isCrew;
   final bool isAdmin;
   final bool canManageScores;
+
+  /// Holds the Discord "Solo" role: may input their own witness for a
+  /// solo tournament tee time (the witness must be crew).
+  final bool isSolo;
   final bool statsPrivate;
 
   PlayerMe({
@@ -856,6 +860,7 @@ class PlayerMe {
     this.isCrew = false,
     this.isAdmin = false,
     this.canManageScores = false,
+    this.isSolo = false,
     this.statsPrivate = false,
   });
 
@@ -867,6 +872,7 @@ class PlayerMe {
         isCrew: j['is_crew'] == true,
         isAdmin: j['is_admin'] == true,
         canManageScores: j['can_manage_scores'] == true,
+        isSolo: j['is_solo'] == true,
         statsPrivate: j['stats_private'] == true,
       );
 }

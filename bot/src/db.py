@@ -2121,6 +2121,24 @@ async def remove_tee_time_witness(db_path, tee_time_id, discord_id) -> bool:
     return rowcount > 0
 
 
+async def tee_time_participant_ids(db_path, tee_time_id) -> set:
+    """Everyone playing in a tee time: the direct roster rows plus every
+    member of any team on the roster (a team row names its rep; the
+    whole team is playing). Used where "is this person in the tee
+    time" must include team partners, not just roster reps."""
+    rows = await _fetchall(
+        db_path,
+        "SELECT player_discord_id AS pid FROM tee_time_players"
+        " WHERE tee_time_id = ?"
+        " UNION"
+        " SELECT tm.player_discord_id AS pid FROM tee_time_players tp"
+        " JOIN team_members tm ON tm.team_id = tp.team_id"
+        " WHERE tp.tee_time_id = ? AND tp.team_id IS NOT NULL",
+        (tee_time_id, tee_time_id),
+    )
+    return {str(r["pid"]) for r in rows}
+
+
 async def witness_co_submit_scorecard(db_path, card_id, witness_id) -> str:
     """A joined witness co-submits an awaiting scorecard: records who
     co-submitted and when, and clears the awaiting flag so the card
