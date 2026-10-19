@@ -17,6 +17,8 @@ restarts. View instances are cached on the bot and re-registered in
 than swapping instances, so ``add_view`` mappings never go stale.
 """
 
+import asyncio
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -314,29 +316,48 @@ def get_view(bot, guild_id: str, kind: str) -> discord.ui.View:
     return view
 
 
-async def refresh_boards(bot, guild_id: str) -> None:
-    """Rebuild both board messages in place; re-posts if one was deleted."""
+async def refresh_boards(bot, guild_id: str) -> dict:
+    """Rebuild both board messages in place; re-posts if one was deleted.
+
+    Each board is refreshed independently: a failure on one is logged with
+    a full traceback and reported in the result instead of raised, so the
+    other board still updates and callers can always tell the user what
+    happened. Returns {kind: None} per refreshed board and
+    {kind: "error"} per failed board; boards never posted are absent.
+    """
     builders = (
         (REGISTER_KIND, build_register_board),
         (TEESHEET_KIND, build_teesheet_board),
     )
+    results: dict = {}
     for kind, builder in builders:
-        rec = await db.get_board(bot.db_path, guild_id, kind)
-        if not rec:
-            continue
-        embed, payload = await builder(bot, guild_id)
-        view = get_view(bot, guild_id, kind)
-        view.rebuild(payload)
-        channel = bot.get_channel(int(rec["channel_id"]))
-        if channel is None:
-            continue
         try:
-            msg = await channel.fetch_message(int(rec["message_id"]))
-            await msg.edit(embed=embed, view=view)
-        except (discord.NotFound, discord.HTTPException):
-            msg = await channel.send(embed=embed, view=view)
-            await db.set_board(bot.db_path, guild_id, kind,
-                               rec["channel_id"], msg.id)
+            rec = await db.get_board(bot.db_path, guild_id, kind)
+            if not rec:
+                continue
+            embed, payload = await builder(bot, guild_id)
+            view = get_view(bot, guild_id, kind)
+            view.rebuild(payload)
+            channel = bot.get_channel(int(rec["channel_id"]))
+            if channel is None:
+                raise RuntimeError(
+                    f"board channel {rec['channel_id']} not found")
+            try:
+                msg = await channel.fetch_message(int(rec["message_id"]))
+                await msg.edit(embed=embed, view=view)
+            except (discord.NotFound, discord.HTTPException):
+                msg = await channel.send(embed=embed, view=view)
+                await db.set_board(bot.db_path, guild_id, kind,
+                                   rec["channel_id"], msg.id)
+            results[kind] = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - one board must not block the other
+            print(f"tee-sheet refresh failed for guild {guild_id} "
+                  f"board {kind}: {e!r}")
+            traceback.print_exc()
+            results[kind] = f"{type(e).__name__}: {e}"
+    return results
 
 
 async def post_boards(bot, guild_id: str, channel) -> None:

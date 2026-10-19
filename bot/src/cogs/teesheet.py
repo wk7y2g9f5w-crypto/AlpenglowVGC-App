@@ -1,4 +1,6 @@
 """The Tee Sheet board: /tee_sheet post|refresh (admin only)."""
+import asyncio
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -48,16 +50,53 @@ class TeeSheet(commands.Cog):
         if not await require_admin(interaction):
             return
         await interaction.response.defer(ephemeral=True)
-        rec = await db.get_board(self.bot.db_path, str(interaction.guild_id),
-                                 ts.REGISTER_KIND)
-        if not rec:
+        try:
+            rec = await db.get_board(self.bot.db_path,
+                                     str(interaction.guild_id),
+                                     ts.REGISTER_KIND)
+            if not rec:
+                await interaction.followup.send(
+                    "No boards posted yet — run `/tee_sheet post` in #⛳️tee-times first.",
+                    ephemeral=True,
+                )
+                return
+            results = await asyncio.wait_for(
+                ts.refresh_boards(self.bot, str(interaction.guild_id)),
+                timeout=90,
+            )
+        except asyncio.TimeoutError:
             await interaction.followup.send(
-                "No boards posted yet — run `/tee_sheet post` in #⛳️tee-times first.",
+                "❌ Refresh timed out — the boards may be partially "
+                "updated. Try again; if it keeps happening, the bot logs "
+                "have the details.",
                 ephemeral=True,
             )
             return
-        await ts.refresh_boards(self.bot, str(interaction.guild_id))
-        await interaction.followup.send("✅ Boards refreshed.", ephemeral=True)
+        except Exception as e:  # noqa: BLE001 - the admin must always get an answer
+            await interaction.followup.send(
+                f"❌ Refresh failed: {e}", ephemeral=True
+            )
+            return
+        names = {ts.REGISTER_KIND: "Open for Registration",
+                 ts.TEESHEET_KIND: "Tee Sheet"}
+        failed = [(names.get(k, k), err)
+                  for k, err in results.items() if err]
+        if not failed:
+            await interaction.followup.send(
+                "✅ Boards refreshed.", ephemeral=True)
+        elif len(failed) == len(results):
+            detail = "; ".join(f"{name} ({err})" for name, err in failed)
+            await interaction.followup.send(
+                f"❌ Refresh failed: {detail}. Details are in the bot logs.",
+                ephemeral=True,
+            )
+        else:
+            detail = "; ".join(f"{name} ({err})" for name, err in failed)
+            await interaction.followup.send(
+                f"⚠️ Boards partially refreshed — failed: {detail}. "
+                "Details are in the bot logs.",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):
