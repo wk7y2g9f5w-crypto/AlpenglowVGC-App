@@ -30,7 +30,6 @@ class MultiRoundDbTest(unittest.IsolatedAsyncioTestCase):
         return await db.create_tournament(
             self.db_path, "guild1", kw.get("name", "MR"), "stroke", 18,
             "Pebble Beach Golf Links", PARS_18, None, "admin1",
-            start_date="2026-10-03", end_date="2026-10-10",
             rounds=kw["rounds"],
         )
 
