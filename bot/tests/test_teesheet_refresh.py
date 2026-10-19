@@ -94,5 +94,18 @@ class RefreshBoardsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, {})
 
 
+class TeeSheetViewDedupeTest(unittest.TestCase):
+    def test_rebuild_never_repeats_a_custom_id(self):
+        # Even if sections repeat a tournament, Discord must never see
+        # two components with the same custom_id (error 50035).
+        view = ts_mod.BoardTeeSheetView()
+        t = {"id": 7, "name": "Cup"}
+        tt = {"id": 3, "label": "Sat"}
+        view.rebuild([(t, [tt]), (t, [tt])])
+        ids = [btn.custom_id for btn in view.children]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(sorted(ids), ["board_ttleave:7", "board_ttreq:3"])
+
+
 if __name__ == "__main__":
     unittest.main()

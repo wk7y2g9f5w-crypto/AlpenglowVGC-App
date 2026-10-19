@@ -403,6 +403,37 @@ class TestTeeSheetBoards(TempDbTest):
         field_names = [f.name for f in embed.fields]
         self.assertTrue(any("Saturday AM" in n for n in field_names))
 
+    async def test_teesheet_board_groups_interleaved_tournaments(self):
+        # Tee times from two tournaments interleave by start time; the
+        # board must still emit ONE section per tournament — a repeated
+        # section repeats the Leave button's custom_id and Discord
+        # rejects the whole board edit (error 50035).
+        bot = self._fake_bot()
+        a = await self._make_tournament(name="Alpha Cup")
+        b = await self._make_tournament(name="Beta Cup")
+        now = datetime.now(timezone.utc)
+        await db.create_tee_time(self.db_path, a, "A early",
+                                 (now + timedelta(days=1)).isoformat(),
+                                 4, "p1", "chan1")
+        await db.create_tee_time(self.db_path, b, "B mid",
+                                 (now + timedelta(days=2)).isoformat(),
+                                 4, "p1", "chan1")
+        await db.create_tee_time(self.db_path, a, "A late",
+                                 (now + timedelta(days=3)).isoformat(),
+                                 4, "p1", "chan1")
+        embed, sections = await ts_mod.build_teesheet_board(bot, "guild1")
+        self.assertEqual([s[0]["name"] for s in sections],
+                         ["Alpha Cup", "Beta Cup"])
+        self.assertEqual([len(s[1]) for s in sections], [2, 1])
+        view = ts_mod.BoardTeeSheetView()
+        view.rebuild(sections)
+        ids = [btn.custom_id for btn in view.children]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(
+            sorted(i for i in ids if i.startswith("board_ttleave:")),
+            [f"board_ttleave:{a}", f"board_ttleave:{b}"],
+        )
+
     async def test_teesheet_board_drops_stale_tee_times(self):
         bot = self._fake_bot()
         tid = await self._make_tournament(name="Open Cup")

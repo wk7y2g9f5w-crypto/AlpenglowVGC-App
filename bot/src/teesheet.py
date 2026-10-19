@@ -82,22 +82,31 @@ class BoardTeeSheetView(discord.ui.View):
     def rebuild(self, sections: list[tuple[dict, list[dict]]]) -> None:
         """sections: [(tournament, [tee_time, ...]), ...]."""
         self.clear_items()
+        seen: set[str] = set()
         for t, tee_times in sections:
             for tt in tee_times:
                 # Started rounds lock joining — no Request button.
                 if tt.get("started_at"):
                     continue
+                custom_id = f"board_ttreq:{tt['id']}"
+                if custom_id in seen:
+                    continue
+                seen.add(custom_id)
                 btn = discord.ui.Button(
                     label=f"Request: {tt['label'][:40]}",
                     style=discord.ButtonStyle.primary,
-                    custom_id=f"board_ttreq:{tt['id']}",
+                    custom_id=custom_id,
                 )
                 btn.callback = self._make_request(tt["id"])
                 self.add_item(btn)
+            custom_id = f"board_ttleave:{t['id']}"
+            if custom_id in seen:
+                continue
+            seen.add(custom_id)
             leave = discord.ui.Button(
                 label=f"Leave ({t['name'][:28]})",
                 style=discord.ButtonStyle.secondary,
-                custom_id=f"board_ttleave:{t['id']}",
+                custom_id=custom_id,
             )
             leave.callback = self._make_leave(t["id"])
             self.add_item(leave)
@@ -270,29 +279,36 @@ async def build_teesheet_board(bot, guild_id):
             text=f"Showing {MAX_TEETIME_BUTTONS} of {len(rows)} tee times — "
                  "see the rest with /tee_times"
         )
+    # Group by tournament, in each tournament's earliest-tee-time order.
+    # Tee times from different tournaments interleave in the soonest-first
+    # list; one section per tournament is what keeps the view's
+    # per-tournament Leave button custom_ids unique (Discord rejects a
+    # message whose components repeat a custom_id).
+    grouped: dict[int, tuple[dict, list]] = {}
+    for row in shown:
+        grouped.setdefault(row[0]["id"], (row[0], []))[1].append(row)
     sections: list[tuple[dict, list[dict]]] = []
-    for t, tt, players, pending in shown:
-        if not sections or sections[-1][0]["id"] != t["id"]:
-            fmt = FORMAT_LABELS.get(t["format"], t["format"])
-            dates = sl.format_date_range(t.get("start_date"), t.get("end_date"))
-            rounds_line = await _rounds_line(bot.db_path, t["id"])
-            value = (f"{fmt} • {t['holes']} holes • {t['course']}\n"
-                     f"⛳ {sl.format_settings(t)} • 🗓️ {dates}")
-            if rounds_line:
-                value += f"\n{rounds_line}"
-            embed.add_field(
-                name=f"━━ {t['name']} ━━",
-                value=value,
-                inline=False,
-            )
-            sections.append((t, []))
-        sections[-1][1].append(tt)
-        round_tag = f" [R{tt.get('round_number') or 1}]"
+    for t, trows in grouped.values():
+        fmt = FORMAT_LABELS.get(t["format"], t["format"])
+        dates = sl.format_date_range(t.get("start_date"), t.get("end_date"))
+        rounds_line = await _rounds_line(bot.db_path, t["id"])
+        value = (f"{fmt} • {t['holes']} holes • {t['course']}\n"
+                 f"⛳ {sl.format_settings(t)} • 🗓️ {dates}")
+        if rounds_line:
+            value += f"\n{rounds_line}"
         embed.add_field(
-            name=f"🕐 {tt['label']}{round_tag} (ID {tt['id']})",
-            value=_tee_time_value(tt, players, pending),
+            name=f"━━ {t['name']} ━━",
+            value=value,
             inline=False,
         )
+        sections.append((t, [tt for _, tt, _, _ in trows]))
+        for _, tt, players, pending in trows:
+            round_tag = f" [R{tt.get('round_number') or 1}]"
+            embed.add_field(
+                name=f"🕐 {tt['label']}{round_tag} (ID {tt['id']})",
+                value=_tee_time_value(tt, players, pending),
+                inline=False,
+            )
     return embed, sections
 
 
