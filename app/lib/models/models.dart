@@ -48,6 +48,30 @@ List<int> _csvInts(dynamic v) {
       .toList();
 }
 
+/// Today's date (YYYY-MM-DD) in America/Los_Angeles.
+///
+/// Round end dates are Pacific dates (Cayden 2026-10-21): a round stays
+/// open through the end of its end date Pacific time, whatever the
+/// phone's own timezone is — this mirrors the server's cutoff. US Pacific
+/// DST: PDT (UTC-7) runs from the second Sunday of March at 10:00 UTC to
+/// the first Sunday of November at 09:00 UTC; PST (UTC-8) otherwise.
+String pacificTodayKey() {
+  final nowUtc = DateTime.now().toUtc();
+  int nthSunday(int year, int month, int n) {
+    final firstWeekday = DateTime.utc(year, month, 1).weekday; // Mon 1..Sun 7
+    return 1 + (7 - firstWeekday) % 7 + 7 * (n - 1);
+  }
+
+  final dstStart =
+      DateTime.utc(nowUtc.year, 3, nthSunday(nowUtc.year, 3, 2), 10);
+  final dstEnd =
+      DateTime.utc(nowUtc.year, 11, nthSunday(nowUtc.year, 11, 1), 9);
+  final inDst = !nowUtc.isBefore(dstStart) && nowUtc.isBefore(dstEnd);
+  final pacific = nowUtc.add(Duration(hours: inDst ? -7 : -8));
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${pacific.year.toString().padLeft(4, '0')}-${two(pacific.month)}-${two(pacific.day)}';
+}
+
 /// One round of a multi-round tournament: same course as the tournament,
 /// with its own tee/pin/wind settings. Green speed is tournament-wide.
 class TournamentRound {
@@ -86,12 +110,11 @@ class TournamentRound {
   }
 
   /// True when the round's window has closed (hard cutoff for non-crew).
+  /// The end date is a Pacific date — the round closes at Pacific
+  /// midnight, not the phone's local midnight (see [pacificTodayKey]).
   bool get hasEnded {
     if (endDate == null || endDate!.isEmpty) return false;
-    final today = DateTime.now();
-    final todayKey =
-        '${today.year.toString().padLeft(4, '0')}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
-    return todayKey.compareTo(endDate!) > 0;
+    return pacificTodayKey().compareTo(endDate!) > 0;
   }
 
   String get settingsSummary {

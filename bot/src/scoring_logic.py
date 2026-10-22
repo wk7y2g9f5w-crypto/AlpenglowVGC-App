@@ -8,6 +8,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Iterable, Optional
+from zoneinfo import ZoneInfo
 
 
 # Golf+ round settings stored on each tournament.
@@ -316,16 +317,24 @@ def round_has_started(start_date_iso: str | None) -> bool:
     return datetime.now(timezone.utc).date() >= start
 
 
+# Round END dates are Pacific dates (Cayden 2026-10-21): a round stays
+# open through the end of its end date in America/Los_Angeles, so the
+# cutoff lands at Pacific midnight instead of 5pm Pacific (midnight UTC).
+# Round starts are unchanged — round_has_started keeps the UTC-date rule.
+ROUND_END_TIMEZONE = ZoneInfo("America/Los_Angeles")
+
+
 def round_has_ended(end_date_iso: str | None) -> bool:
     """Has a round's play window closed? A round with no end date (or an
-    unparseable one) never closes."""
+    unparseable one) never closes. The end day itself counts as open
+    through midnight Pacific."""
     if not end_date_iso:
         return False
     try:
         end = parse_date(end_date_iso)
     except ValueError:
         return False
-    return datetime.now(timezone.utc).date() > end
+    return datetime.now(ROUND_END_TIMEZONE).date() > end
 
 
 def validate_round_dates(start_s: str | None, end_s: str | None,

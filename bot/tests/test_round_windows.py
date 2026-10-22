@@ -114,14 +114,17 @@ class RoundWindowLogicTest(unittest.TestCase):
         self.assertFalse(sl.round_has_ended("not-a-date"))
         self.assertTrue(sl.round_has_ended("2000-01-01"))
         self.assertFalse(sl.round_has_ended("2999-01-01"))
-        # Today counts as still open (inclusive end).
-        from datetime import datetime, timezone
+        # End dates are Pacific dates (Cayden 2026-10-21): the end day
+        # counts as still open through midnight Pacific, and the day
+        # before Pacific today has closed.
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
 
-        self.assertFalse(
-            sl.round_has_ended(
-                datetime.now(timezone.utc).date().isoformat()
-            )
-        )
+        pacific_today = datetime.now(
+            ZoneInfo("America/Los_Angeles")).date()
+        self.assertFalse(sl.round_has_ended(pacific_today.isoformat()))
+        self.assertTrue(sl.round_has_ended(
+            (pacific_today - timedelta(days=1)).isoformat()))
 
     def test_validate_round_dates_ok(self):
         s, e = sl.validate_round_dates(
