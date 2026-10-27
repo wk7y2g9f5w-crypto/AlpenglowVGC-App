@@ -9,6 +9,13 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
+# Viewer is a built-in stand-in witness (Cayden 2026-10-27), not a real
+# Discord/local account. The reserved ID can appear in
+# tee_time_witnesses without a players row; UI/API code treats it as a
+# crew/admin-added witness who cannot log in or co-submit.
+VIEWER_WITNESS_ID = "viewer"
+VIEWER_WITNESS_NAME = "Viewer"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tournaments(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +119,9 @@ CREATE TABLE IF NOT EXISTS tee_time_players(
 -- 'awaiting witness' until a witness co-submits it. Witnesses join
 -- themselves (added_by = their own id) or are added by an admin; the tee
 -- time creator can never assign one. A witness is never a player on the
--- same tee time.
+-- same tee time. Viewer (VIEWER_WITNESS_ID, Cayden 2026-10-27) is the
+-- one stand-in exception: crew/admin may add that reserved ID, and a
+-- Viewer-witnessed final submit skips the co-submit wait.
 CREATE TABLE IF NOT EXISTS tee_time_witnesses(
   tee_time_id INTEGER NOT NULL REFERENCES tee_times(id) ON DELETE CASCADE,
   player_discord_id TEXT NOT NULL,
@@ -2077,12 +2086,14 @@ async def get_tee_time_witnesses(db_path, tee_time_id) -> list[dict]:
     return await _fetchall(
         db_path,
         "SELECT w.player_discord_id AS discord_id,"
-        " COALESCE(p.display_name, w.player_discord_id) AS display_name,"
+        " COALESCE(p.display_name,"
+        " CASE WHEN w.player_discord_id = ? THEN ?"
+        " ELSE w.player_discord_id END) AS display_name,"
         " p.golfplus_handle, w.joined_at, w.added_by"
         " FROM tee_time_witnesses w"
         " LEFT JOIN players p ON p.discord_id = w.player_discord_id"
         " WHERE w.tee_time_id = ? ORDER BY w.joined_at ASC",
-        (tee_time_id,),
+        (VIEWER_WITNESS_ID, VIEWER_WITNESS_NAME, tee_time_id),
     )
 
 
@@ -2092,7 +2103,7 @@ async def add_tee_time_witness(db_path, tee_time_id, discord_id,
     'is_player' (a player on the tee time can't witness it), or
     'missing' (no such tee time). Callers enforce who may add: the
     witness themselves, or an admin — never the tee time creator
-    assigning someone else."""
+    assigning someone else. The reserved Viewer ID is crew/admin-only."""
     tt = await get_tee_time(db_path, tee_time_id)
     if tt is None:
         return "missing"

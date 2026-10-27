@@ -268,11 +268,17 @@ class TeeTimePlayer {
 /// 2026-10-17). Witnesses join themselves or are added by an admin;
 /// [joinedAtUtc] is when they attached to the tee time.
 class TeeTimeWitness {
+  /// Reserved ID of the built-in Viewer stand-in witness (Cayden
+  /// 2026-10-27): crew/admin can add him; he has no login and never
+  /// co-submits.
+  static const String viewerId = 'viewer';
+
   final String discordId;
   final String displayName;
   final String? golfplusHandle;
   final DateTime? joinedAtUtc;
   final String? addedBy;
+  final bool isViewer;
 
   TeeTimeWitness({
     required this.discordId,
@@ -280,6 +286,7 @@ class TeeTimeWitness {
     this.golfplusHandle,
     this.joinedAtUtc,
     this.addedBy,
+    this.isViewer = false,
   });
 
   factory TeeTimeWitness.fromJson(Map<String, dynamic> j) =>
@@ -289,6 +296,8 @@ class TeeTimeWitness {
         golfplusHandle: j['golfplus_handle']?.toString(),
         joinedAtUtc: TeeTime._parseOpt(j['joined_at']),
         addedBy: j['added_by']?.toString(),
+        isViewer: j['is_viewer'] == true ||
+            j['discord_id'].toString() == viewerId,
       );
 
   String get handleName => golferDisplayName(displayName, golfplusHandle);
@@ -372,6 +381,10 @@ class TeeTime {
 
   /// A witness must join before this tee time can start.
   bool get witnessNeeded => witnessRule && isSolo && witnesses.isEmpty;
+
+  /// The Viewer stand-in is attached as witness: the round may start,
+  /// and its submit skips the co-submit wait (he has no login).
+  bool get hasViewerWitness => witnesses.any((w) => w.isViewer);
   bool hasPassed(DateTime now) => !startsAtUtc.isAfter(now);
 }
 

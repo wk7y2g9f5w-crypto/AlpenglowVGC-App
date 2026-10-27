@@ -810,6 +810,8 @@ def _witness_json(w: dict) -> dict:
         "golfplus_handle": w.get("golfplus_handle"),
         "joined_at": utc_iso(w.get("joined_at")),
         "added_by": w.get("added_by"),
+        # Viewer is the reserved stand-in witness, not a login account.
+        "is_viewer": str(w["discord_id"]) == db.VIEWER_WITNESS_ID,
     }
 
 
@@ -2348,8 +2350,44 @@ async def leave_tee_time(tee_time_id: int, user: CurrentUser) -> dict:
 # Witnesses (Cayden 2026-10-17): solo tournament rounds need a witness.
 # A witness joins THEMSELVES (Join as Witness) or is added by an admin —
 # the tee time creator can never assign one. The witness co-submits the
-# solo player's scorecard when the round is done.
+# solo player's scorecard when the round is done. Viewer (Cayden
+# 2026-10-27) is a crew/admin-added stand-in who cannot log in or
+# co-submit; a Viewer-witnessed submit goes straight to crew verify.
 # ---------------------------------------------------------------------------
+async def _require_witness_admin(user: CurrentUser) -> None:
+    """Manual form of AdminUser for the witness endpoints, whose Viewer
+    path uses a different gate."""
+    ok = await fetch_admin_status(user["discord_id"])
+    if ok is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify admin status — try again shortly.",
+        )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin only: requires the Admin role.",
+        )
+
+
+async def _require_viewer_manager(user: CurrentUser) -> None:
+    """Crew/admin gate for adding or removing the Viewer stand-in."""
+    is_admin = await fetch_admin_status(user["discord_id"])
+    is_crew = await fetch_crew_status(user["discord_id"])
+    if is_admin or is_crew:
+        return
+    if is_admin is None or is_crew is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify crew/admin status — try again shortly.",
+        )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Crew/admin only: Viewer can only be added or removed "
+               "by crew or an admin.",
+    )
+
+
 @app.post("/api/tee-times/{tee_time_id}/witness")
 async def join_as_witness(tee_time_id: int, user: CurrentUser) -> dict:
     tt, _ = await _tee_time_or_404(tee_time_id)
@@ -2385,15 +2423,41 @@ async def leave_as_witness(tee_time_id: int, user: CurrentUser) -> dict:
 
 @app.post("/api/tee-times/{tee_time_id}/witnesses/{player_id}")
 async def admin_add_witness(tee_time_id: int, player_id: str,
-                            user: AdminUser) -> dict:
+                            user: CurrentUser) -> dict:
     """Admin adds a witness to a tee time (the only way to put someone
-    ELSE in as witness — the creator can't, and neither can the player)."""
+    ELSE in as witness — the creator can't, and neither can the player).
+
+    The reserved Viewer ID is the stand-in exception: crew or an admin
+    may add him to a solo witness-rule tee time, and no player row or
+    login exists for him."""
     tt, _ = await _tee_time_or_404(tee_time_id)
-    if await db.get_player(DB_PATH, player_id) is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Player not found",
-        )
+    if player_id == db.VIEWER_WITNESS_ID:
+        await _require_viewer_manager(user)
+        if not tt.get("witness_rule"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "witness_not_required",
+                    "message": "This tee time doesn't use witnesses.",
+                },
+            )
+        player_count = await db.tee_time_player_count(DB_PATH, tt["id"])
+        if player_count >= 2:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "viewer_solo_only",
+                    "message": "Viewer is only for solo tee times — "
+                               "this tee time has multiple players.",
+                },
+            )
+    else:
+        await _require_witness_admin(user)
+        if await db.get_player(DB_PATH, player_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Player not found",
+            )
     result = await db.add_tee_time_witness(
         DB_PATH, tt["id"], player_id, added_by=user["discord_id"])
     if result == "is_player":
@@ -2410,8 +2474,12 @@ async def admin_add_witness(tee_time_id: int, player_id: str,
 
 @app.delete("/api/tee-times/{tee_time_id}/witnesses/{player_id}")
 async def admin_remove_witness(tee_time_id: int, player_id: str,
-                               user: AdminUser) -> dict:
+                               user: CurrentUser) -> dict:
     tt, _ = await _tee_time_or_404(tee_time_id)
+    if player_id == db.VIEWER_WITNESS_ID:
+        await _require_viewer_manager(user)
+    else:
+        await _require_witness_admin(user)
     removed = await db.remove_tee_time_witness(
         DB_PATH, tt["id"], player_id)
     return {"witness": False, "removed": removed}
@@ -2433,6 +2501,13 @@ async def _tee_time_solo_exempt(tee_time_id: int) -> bool:
             return True
     return False
 
+
+async def _tee_time_has_viewer_witness(tee_time_id: int) -> bool:
+    """Viewer stand-in attached? He satisfies the witness requirement
+    but cannot co-submit, so his rounds skip the awaiting-witness park."""
+    witnesses = await db.get_tee_time_witnesses(DB_PATH, tee_time_id)
+    return any(str(w["discord_id"]) == db.VIEWER_WITNESS_ID
+               for w in witnesses)
 
 
 @app.post("/api/scorecards/{card_id}/witness-submit")
@@ -3576,12 +3651,21 @@ async def put_scorecard(
     # skip this entirely and keep the 2026-10-13 behavior below.
     witness_rule = bool(tt.get("witness_rule"))
     awaiting_witness = False
+    viewer_witness = False
     if witness_rule and player_count < 2 and body.complete:
         # Solo-role exemption (Cayden 2026-10-18): a Solo holder's card
         # skips the witness wait and stays in the normal verify pile.
+        # Viewer (Cayden 2026-10-27) does the same when crew/admin
+        # attached him as the witness: he can't co-submit, so there is
+        # nobody to wait for — but the card records his name so the
+        # round history still shows who witnessed it.
         if not await _tee_time_solo_exempt(tt["id"]):
-            status_value = "pending"
-            awaiting_witness = True
+            if await _tee_time_has_viewer_witness(tt["id"]):
+                viewer_witness = True
+                status_value = "pending"
+            else:
+                status_value = "pending"
+                awaiting_witness = True
     # Cayden 2026-10-13 (alt-shot only, grandfathered tee times): a tee
     # time with a single team has nobody to cross-check the card, so a
     # named witness stands in for the missing team — a witnessed final
@@ -3622,7 +3706,8 @@ async def put_scorecard(
             status_value,
             submitted_by=user["discord_id"],
             round_number=body.round_number,
-            witness_name=body.witness_name,
+            witness_name=(db.VIEWER_WITNESS_NAME if viewer_witness
+                          else body.witness_name),
             awaiting_witness=awaiting_witness,
         )
     else:

@@ -490,7 +490,14 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
         witnessRequired: _soloAltShot && !_joinedWitnessRule,
         // Solo-role holders are exempt (2026-10-18): no co-submit
         // wait follows their submit, so the note would be wrong.
-        joinedWitness: _joinedWitnessRule && !_viewerSolo,
+        // Viewer (2026-10-27) also skips the wait — he's a stand-in
+        // with no login — and gets his own note instead.
+        joinedWitness: _joinedWitnessRule &&
+            !_viewerSolo &&
+            !widget.teeTime.hasViewerWitness,
+        viewerWitness: _joinedWitnessRule &&
+            !_viewerSolo &&
+            widget.teeTime.hasViewerWitness,
       ),
     );
     if (result == null || result.isEmpty) return;
@@ -709,6 +716,10 @@ class _SubmitAllDialog extends StatefulWidget {
   /// witness who joined the tee time co-submits after this submit.
   final bool joinedWitness;
 
+  /// Viewer stand-in witness (2026-10-27): no co-submit follows; the
+  /// card goes straight to crew verification.
+  final bool viewerWitness;
+
   const _SubmitAllDialog({
     required this.cards,
     required this.titles,
@@ -719,6 +730,7 @@ class _SubmitAllDialog extends StatefulWidget {
     this.witnessOptions = const [],
     this.witnessRequired = false,
     this.joinedWitness = false,
+    this.viewerWitness = false,
   });
 
   @override
@@ -783,6 +795,16 @@ class _SubmitAllDialogState extends State<_SubmitAllDialog> {
                   style: TextStyle(fontSize: 13, color: Colors.grey),
                 ),
               ),
+            if (widget.viewerWitness)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Viewer is witnessing this solo round — after you '
+                  'submit, the card goes straight to crew verification. '
+                  'No co-submit is needed.',
+                  style: TextStyle(fontSize: 13, color: Colors.grey),
+                ),
+              ),
             const SizedBox(height: 12),
             for (var i = 0; i < widget.cards.length; i++) ...[
               Row(
@@ -798,7 +820,9 @@ class _SubmitAllDialogState extends State<_SubmitAllDialog> {
                       style: const TextStyle(fontSize: 13)),
                 ],
               ),
-              if (widget.cards[i].submittable && !widget.joinedWitness)
+              if (widget.cards[i].submittable &&
+                  !widget.joinedWitness &&
+                  !widget.viewerWitness)
                 Padding(
                   padding: const EdgeInsets.only(top: 4, bottom: 10),
                   child: Autocomplete<String>(

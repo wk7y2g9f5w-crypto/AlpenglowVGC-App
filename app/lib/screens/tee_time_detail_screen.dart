@@ -804,19 +804,24 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.visibility),
                       title: Text(w.handleName),
-                      subtitle: w.joinedAtUtc != null
-                          ? Text('Joined ${formatLocal(w.joinedAtUtc!)}')
-                          : null,
-                      trailing: data.isAdmin
-                          ? IconButton(
-                              icon: const Icon(Icons.close),
-                              tooltip: 'Remove witness',
-                              onPressed: () => _act(
-                                  () => _api.adminRemoveWitness(
-                                      tt.id, w.discordId),
-                                  'Witness removed.'),
-                            )
-                          : null,
+                      subtitle: w.isViewer
+                          ? const Text(
+                              'Stand-in witness — no co-submit needed')
+                          : (w.joinedAtUtc != null
+                              ? Text(
+                                  'Joined ${formatLocal(w.joinedAtUtc!)}')
+                              : null),
+                      trailing:
+                          (data.isAdmin || (w.isViewer && data.isCrew))
+                              ? IconButton(
+                                  icon: const Icon(Icons.close),
+                                  tooltip: 'Remove witness',
+                                  onPressed: () => _act(
+                                      () => _api.adminRemoveWitness(
+                                          tt.id, w.discordId),
+                                      'Witness removed.'),
+                                )
+                              : null,
                     )),
                 const SizedBox(height: 8),
                 Wrap(
@@ -838,6 +843,15 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                             'Witness removed.'),
                         icon: const Icon(Icons.visibility_off),
                         label: const Text('Leave as Witness'),
+                      ),
+                    if (data.isCrew && tt.isSolo && !tt.hasViewerWitness)
+                      OutlinedButton.icon(
+                        onPressed: () => _act(
+                            () => _api.adminAddWitness(
+                                tt.id, TeeTimeWitness.viewerId),
+                            'Viewer added as witness.'),
+                        icon: const Icon(Icons.visibility),
+                        label: const Text('Add Viewer (crew)'),
                       ),
                     if (data.isAdmin)
                       OutlinedButton.icon(

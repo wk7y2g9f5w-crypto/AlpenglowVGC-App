@@ -15,6 +15,11 @@ time) may not play solo:
 - Grandfathered tee times (witness_rule = 0) are exempt from all of it
   (their named-witness alt-shot path lives in
   test_solo_altshot_witness.py).
+- Viewer (2026-10-27) is a reserved stand-in witness ID with no player
+  row or login: only crew/admin may add or remove him, only on a solo
+  witness-rule tee time; his rounds start normally and their final
+  submit skips the co-submit wait (witness_name records "Viewer", and
+  no co-submit fields are ever filled in for him).
 
 Fresh temp DB, monkeypatched fetch_* — see test_api.ApiTestCase.
 Run with: python -m pytest api/tests/ -q
@@ -152,6 +157,104 @@ class WitnessRuleTestCase(ApiTestCase):
             f"/api/tee-times/{tt['id']}/witnesses/3", headers=self.h("1"))
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(self._listed_tt(tt["id"])["witnesses"], [])
+
+    # -- Viewer stand-in (Cayden 2026-10-27) ----------------------------
+    def test_regular_player_cannot_add_viewer(self):
+        self._mk()
+        tt = self._tt()
+        self._crew(False)
+        self._admin(False)
+        r = self.client.post(
+            f"/api/tee-times/{tt['id']}/witnesses/viewer",
+            headers=self.h("1"))
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(self._listed_tt(tt["id"])["witnesses"], [])
+
+    def test_crew_non_admin_can_add_and_remove_viewer(self):
+        self._mk()
+        tt = self._tt()
+        self._crew(True)
+        self._admin(False)
+        r = self.client.post(
+            f"/api/tee-times/{tt['id']}/witnesses/viewer",
+            headers=self.h("2"))
+        self.assertEqual(r.status_code, 200, r.text)
+        listed = self._listed_tt(tt["id"])
+        self.assertEqual(len(listed["witnesses"]), 1)
+        w = listed["witnesses"][0]
+        self.assertEqual(w["discord_id"], "viewer")
+        self.assertEqual(w["display_name"], "Viewer")
+        self.assertIsNone(w["golfplus_handle"])
+        self.assertTrue(w["is_viewer"])
+        self.assertEqual(w["added_by"], "2")
+        # Viewer has no player row — he is not a login account.
+        self.assertIsNone(run(db.get_player(self.db_path, "viewer")))
+        r = self.client.delete(
+            f"/api/tee-times/{tt['id']}/witnesses/viewer",
+            headers=self.h("2"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self._listed_tt(tt["id"])["witnesses"], [])
+
+    def test_admin_can_add_viewer_without_crew_fake(self):
+        self._mk()
+        tt = self._tt()
+        self._crew(False)
+        self._admin(True)
+        r = self.client.post(
+            f"/api/tee-times/{tt['id']}/witnesses/viewer",
+            headers=self.h("1"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(
+            [w["discord_id"] for w in self._listed_tt(tt["id"])["witnesses"]],
+            ["viewer"])
+
+    def test_viewer_refused_on_grandfathered_or_multi_player(self):
+        self._mk()
+        tt = self._tt()
+        self._crew(True)
+        self._grandfather(tt["id"])
+        r = self.client.post(
+            f"/api/tee-times/{tt['id']}/witnesses/viewer",
+            headers=self.h("2"))
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(_code(r), "witness_not_required")
+
+        tt2 = self._tt(uid="3")
+        r = self.client.post(
+            f"/api/tee-times/{tt2['id']}/join", headers=self.h("2"))
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(
+            f"/api/tee-times/{tt2['id']}/witnesses/viewer",
+            headers=self.h("4"))
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(_code(r), "viewer_solo_only")
+
+    def test_viewer_starts_round_and_submit_skips_co_submit(self):
+        self._mk()
+        tt = self._tt()
+        self._crew(True)
+        r = self.client.post(
+            f"/api/tee-times/{tt['id']}/witnesses/viewer",
+            headers=self.h("2"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self._admin(True)
+        r = self._start_via_api(tt["id"])
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self._submit_stroke(tt["id"])
+        self.assertEqual(r.status_code, 200, r.text)
+        card = r.json()["card"]
+        self.assertEqual(card["status"], "pending")
+        self.assertFalse(card["awaiting_witness"])
+        # Honest record: Viewer witnessed, but nobody co-submitted.
+        self.assertEqual(card["witness_name"], "Viewer")
+        self.assertIsNone(card["witness_discord_id"])
+        self.assertIsNone(card["witness_submitted_at"])
+        # And there is no co-submit step waiting to happen.
+        r = self.client.post(
+            f"/api/scorecards/{card['id']}/witness-submit",
+            headers=self.h("3"))
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(_code(r), "not_awaiting_witness")
 
     def test_witness_join_on_grandfathered_tee_time_refused(self):
         self._mk()
