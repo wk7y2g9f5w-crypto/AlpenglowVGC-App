@@ -90,6 +90,7 @@ flutter:
     - assets/hole_maps/pinehurst-no-2/
     - assets/hole_maps/riviera-country-club/
     - assets/hole_maps/torrey-pines-north/
+    - assets/hole_maps/torrey-pines-south/
     - assets/hole_maps/tpc-sawgrass/
     - assets/hole_maps/tpc-scottsdale/
     - assets/hole_maps/tpc-southwind/

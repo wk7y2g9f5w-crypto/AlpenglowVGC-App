@@ -124,6 +124,11 @@ COURSES = [
     # exact-name boundary keeps us on the North.
     dict(slug="torrey-pines-north", display="Torrey Pines North Course",
          lat=32.9075, lon=-117.2445, boundaries=["Torrey Pines North Course"]),
+    # Added to Golf+ 2026-10-28, same note as the North: OSM maps the
+    # South as its own boundary sharing refs 1-18; the exact-name
+    # boundary keeps us on the South.
+    dict(slug="torrey-pines-south", display="Torrey Pines South Course",
+         lat=32.8980, lon=-117.2475, boundaries=["Torrey Pines South Course"]),
 ]
 
 # --------------------------------------------------------------------------
