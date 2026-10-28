@@ -27,6 +27,8 @@ COURSES = [
     "Lofoten Links",
     "Medinah Country Club",
     "Payne's Valley",
+    "Torrey Pines North Course",
+    "Torrey Pines South Course",
 ]
 
 
@@ -121,6 +123,13 @@ COURSE_PARS = {
     # Source: Golf+ in-game GPS screenshots (total par 72), verified hole-by-hole 2026-10-17 — matches the real-world Hole19 card (Blue tees).
     # Note: the bonus 19th hole ("The Big Rock", par 3) doesn't count toward the course par.
     "Payne's Valley": [4, 3, 4, 5, 3, 4, 4, 5, 4, 3, 4, 4, 5, 4, 4, 3, 4, 5],
+
+    # Source: https://www.espn.ph/golf/player/scorecards/_/id/4699329/tournamentId/401811930 (total par 72, 2026 Farmers Insurance Open North Course card; corroborated by Hole19 and Gallus Golf scorecards)
+    # Note: the North's par 5s are holes 5, 9, 10 and 17 — hole 10 opens the back nine as a par 5.
+    "Torrey Pines North Course": [4, 4, 3, 4, 5, 4, 4, 3, 5, 5, 4, 3, 4, 4, 3, 4, 5, 4],
+
+    # Source: https://www.espn.ph/golf/player/scorecards/_/id/4425906/tournamentId/401811930 (total par 72, 2026 Farmers Insurance Open South Course card; corroborated by Gallus Golf scorecards)
+    "Torrey Pines South Course": [4, 4, 3, 4, 4, 5, 4, 3, 5, 4, 3, 4, 5, 4, 4, 3, 4, 5],
 }
 
 
