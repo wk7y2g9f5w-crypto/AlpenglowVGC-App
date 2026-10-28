@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS rounds(
     CHECK(wind_strength IN ('low','moderate','severe')),
   start_date TEXT,
   end_date TEXT,
+  course TEXT,
+  pars TEXT,
   UNIQUE(tournament_id, round_number)
 );
 CREATE TABLE IF NOT EXISTS players(
@@ -766,6 +768,15 @@ async def _migrate(db_path: str) -> None:
         )
         await con.commit()
 
+        # rounds.course / pars (per-round course selection, Cayden
+        # 2026-10-28). Nullable: NULL means the round inherits the
+        # tournament's course/pars, so existing rows need no backfill.
+        for col in ("course", "pars"):
+            if col not in round_cols:
+                await con.execute(
+                    f"ALTER TABLE rounds ADD COLUMN {col} TEXT")
+                await con.commit()
+
         # seasons.start_date / end_date (nullable; older seasons have none).
         cur = await con.execute("PRAGMA table_info(seasons)")
         season_cols = [r[1] for r in await cur.fetchall()]
@@ -1135,7 +1146,9 @@ async def create_tournament(db_path, guild_id, name, format, holes, course,
     wind_strength/start_date/end_date keys (round numbers implied by order,
     1-based). When omitted, a single round copies the tournament-level
     settings. Round dates left blank default to an even split of the
-    tournament's overall date range.
+    tournament's overall date range. A round dict may also carry
+    course/pars (per-round course selection); a round without them stores
+    the tournament's course/pars explicitly.
     """
     lastrowid, _ = await _execute(
         db_path,
@@ -1161,6 +1174,8 @@ async def create_tournament(db_path, guild_id, name, format, holes, course,
             r.get("wind_strength") or "moderate",
             start_date=r.get("start_date") or dflt_start,
             end_date=r.get("end_date") or dflt_end,
+            course=r.get("course") or course,
+            pars=r.get("pars") or pars,
         )
     return lastrowid
 
@@ -1196,20 +1211,30 @@ async def create_round(db_path, tournament_id: int, round_number: int,
                        pin_position: str = "white",
                        wind_strength: str = "moderate",
                        start_date: str | None = None,
-                       end_date: str | None = None) -> int:
+                       end_date: str | None = None,
+                       course: str | None = None,
+                       pars: str | None = None) -> int:
+    """Insert (or overwrite) one round row.
+
+    course/pars default to None = the round inherits the tournament's
+    course/pars wherever an effective value is needed.
+    """
     lastrowid, _ = await _execute(
         db_path,
         "INSERT INTO rounds (tournament_id, round_number,"
-        " tee_position, pin_position, wind_strength, start_date, end_date)"
-        " VALUES (?,?,?,?,?,?,?)"
+        " tee_position, pin_position, wind_strength, start_date, end_date,"
+        " course, pars)"
+        " VALUES (?,?,?,?,?,?,?,?,?)"
         " ON CONFLICT(tournament_id, round_number) DO UPDATE SET"
         " tee_position = excluded.tee_position,"
         " pin_position = excluded.pin_position,"
         " wind_strength = excluded.wind_strength,"
         " start_date = excluded.start_date,"
-        " end_date = excluded.end_date",
+        " end_date = excluded.end_date,"
+        " course = excluded.course,"
+        " pars = excluded.pars",
         (tournament_id, round_number, tee_position, pin_position,
-         wind_strength, start_date, end_date),
+         wind_strength, start_date, end_date, course, pars),
     )
     return lastrowid
 
@@ -1254,21 +1279,27 @@ async def update_round(db_path, tournament_id: int, round_number: int,
                        pin_position: str | None = None,
                        wind_strength: str | None = None,
                        start_date: str | None = None,
-                       end_date: str | None = None) -> dict | None:
-    """Patch a round's settings/dates; returns the updated round (or None)."""
+                       end_date: str | None = None,
+                       course: str | None = None,
+                       pars: str | None = None) -> dict | None:
+    """Patch a round's settings/dates/course; returns the updated round
+    (or None). A None argument leaves the stored value untouched."""
     rnd = await get_round(db_path, tournament_id, round_number)
     if rnd is None:
         return None
     await _execute(
         db_path,
         "UPDATE rounds SET tee_position = ?, pin_position = ?,"
-        " wind_strength = ?, start_date = ?, end_date = ?"
+        " wind_strength = ?, start_date = ?, end_date = ?,"
+        " course = ?, pars = ?"
         " WHERE tournament_id = ? AND round_number = ?",
         (tee_position or rnd["tee_position"],
          pin_position or rnd["pin_position"],
          wind_strength or rnd["wind_strength"],
          start_date or rnd["start_date"],
          end_date or rnd["end_date"],
+         course if course is not None else rnd.get("course"),
+         pars if pars is not None else rnd.get("pars"),
          tournament_id, round_number),
     )
     return await get_round(db_path, tournament_id, round_number)
@@ -3319,8 +3350,11 @@ async def get_player_verified_cards(db_path, guild_id,
     """
     return await _fetchall(
         db_path,
-        "SELECT s.holes_json, t.pars, t.holes, s.submitted_at FROM scorecards s"
+        "SELECT s.holes_json, COALESCE(r.pars, t.pars) AS pars, t.holes,"
+        " s.submitted_at FROM scorecards s"
         " JOIN tournaments t ON t.id = s.tournament_id"
+        " LEFT JOIN rounds r ON r.tournament_id = s.tournament_id"
+        " AND r.round_number = s.round_number"
         " WHERE t.guild_id = ? AND s.player_discord_id = ?"
         " AND s.team_id IS NULL AND s.status = 'verified'"
         " UNION ALL"
@@ -3345,8 +3379,11 @@ async def get_player_stat_cards(db_path, guild_id,
     """
     return await _fetchall(
         db_path,
-        "SELECT s.id, s.holes_json, s.total, s.submitted_at, t.pars, t.holes"
+        "SELECT s.id, s.holes_json, s.total, s.submitted_at,"
+        " COALESCE(r.pars, t.pars) AS pars, t.holes"
         " FROM scorecards s JOIN tournaments t ON t.id = s.tournament_id"
+        " LEFT JOIN rounds r ON r.tournament_id = s.tournament_id"
+        " AND r.round_number = s.round_number"
         " WHERE t.guild_id = ? AND s.player_discord_id = ?"
         " AND s.team_id IS NULL AND s.status = 'verified'"
         " UNION ALL"
@@ -3376,10 +3413,13 @@ async def get_player_round_history(db_path, guild_id,
         " s.submitted_at, s.witness_name,"
         " s.witness_discord_id, s.witness_submitted_at,"
         " t.id AS tournament_id, t.name AS tournament_name,"
-        " t.course AS course, t.pars AS pars, t.holes AS holes,"
+        " COALESCE(r.course, t.course) AS course,"
+        " COALESCE(r.pars, t.pars) AS pars, t.holes AS holes,"
         " tt.starts_at AS starts_at,"
         " NULL AS label, NULL AS format"
         " FROM scorecards s JOIN tournaments t ON t.id = s.tournament_id"
+        " LEFT JOIN rounds r ON r.tournament_id = s.tournament_id"
+        " AND r.round_number = s.round_number"
         " LEFT JOIN tee_times tt ON tt.id = s.tee_time_id"
         " WHERE t.guild_id = ? AND s.player_discord_id = ?"
         " AND s.team_id IS NULL AND s.status != 'in_progress'"

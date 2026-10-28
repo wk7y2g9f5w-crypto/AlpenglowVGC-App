@@ -27,6 +27,22 @@ def _pars_list(tournament: dict) -> list[int] | None:
     return None
 
 
+def _round_pars(t: dict, rnd: dict) -> list[int] | None:
+    """Effective pars for one round: the round's own pars when set
+    (per-round course selection), else the tournament's."""
+    if rnd.get("pars"):
+        try:
+            return [int(x) for x in str(rnd["pars"]).split(",")]
+        except ValueError:
+            pass
+    return _pars_list(t)
+
+
+def _pars_by_round(t: dict, rounds: list[dict]) -> dict[int, list[int] | None]:
+    """{round_number: effective pars} for every round of a tournament."""
+    return {r["round_number"]: _round_pars(t, r) for r in rounds}
+
+
 def _format_label(fmt: str) -> str:
     return {
         "stroke": "Stroke play",
@@ -197,8 +213,9 @@ async def _stroke_ranked(db_path: str, t: dict,
     """
     rounds = await db.list_rounds(db_path, t["id"])
     cards = await db.get_scorecards(db_path, t["id"])
-    pars = _pars_list(t)
-    par_round = sum(pars) if pars else None
+    pars_by_round = _pars_by_round(t, rounds)
+    par_sum = {rn: (sum(p) if p else None)
+               for rn, p in pars_by_round.items()}
 
     latest: dict[tuple[str, int], dict] = {}
     for c in sorted(cards, key=lambda c: c["submitted_at"]):
@@ -250,8 +267,8 @@ async def _stroke_ranked(db_path: str, t: dict,
             if c is not None and c["status"] == "verified":
                 detail.append({
                     "round_number": rn, "total": c["total"],
-                    "to_par": (c["total"] - par_round
-                               if par_round is not None else None),
+                    "to_par": (c["total"] - par_sum[rn]
+                               if par_sum.get(rn) is not None else None),
                     "status": "verified",
                     "thru": t["holes"],
                 })
@@ -259,15 +276,15 @@ async def _stroke_ranked(db_path: str, t: dict,
                 ac = awaiting[rn]
                 detail.append({
                     "round_number": rn, "total": ac["total"],
-                    "to_par": (ac["total"] - par_round
-                               if par_round is not None else None),
+                    "to_par": (ac["total"] - par_sum[rn]
+                               if par_sum.get(rn) is not None else None),
                     "status": "pending",
                     "thru": t["holes"],
                 })
             elif rn in live:
                 scores = json.loads(c["holes_json"])
-                subtotal, sub_to_par, thru = _partial_round_score(scores,
-                                                                 pars)
+                subtotal, sub_to_par, thru = _partial_round_score(
+                    scores, pars_by_round.get(rn))
                 total += subtotal
                 if sub_to_par is not None:
                     pars_entered += subtotal - sub_to_par
@@ -286,13 +303,16 @@ async def _stroke_ranked(db_path: str, t: dict,
                 })
         for rn, c in verified.items():
             total += c["total"]
-            if par_round is not None:
-                pars_entered += par_round
+            if par_sum.get(rn) is not None:
+                pars_entered += par_sum[rn]
         for rn, c in awaiting.items():
             total += c["total"]
-            if par_round is not None:
-                pars_entered += par_round
-        to_par = (total - pars_entered) if par_round is not None else None
+            if par_sum.get(rn) is not None:
+                pars_entered += par_sum[rn]
+        # Cumulative to-par needs pars for every counted round; a round
+        # whose course has no known pars leaves the aggregate unknown.
+        pars_complete = all(par_sum.get(rn) is not None for rn in counted)
+        to_par = (total - pars_entered) if pars_complete else None
         sort_key = to_par if to_par is not None else total
         ranked.append({
             "player_discord_id": pid, "name": name,
@@ -428,8 +448,7 @@ async def _team_rows(db_path: str, t: dict,
     """
     teams = await db.get_teams(db_path, t["id"])
     rounds = await db.list_rounds(db_path, t["id"])
-    pars = _pars_list(t)
-    par_round = sum(pars) if pars else None
+    pars_by_round = _pars_by_round(t, rounds)
     rows: list[dict] = []
     scoreless: list[str] = []
     for team in teams:
@@ -440,6 +459,7 @@ async def _team_rows(db_path: str, t: dict,
         mismatch = False
         detail: list[dict] = []
         pars_entered = 0
+        pars_complete = True
         for r in rounds:
             rn = r["round_number"]
             round_pending = False
@@ -480,14 +500,15 @@ async def _team_rows(db_path: str, t: dict,
                                "status": "pending" if round_pending
                                else "not_started"})
                 continue
+            rpars = pars_by_round.get(rn)
             try:
                 if t["format"] == "best_ball":
                     rt, rt_par, thru = _best_ball_live(
-                        verified_scores + live_scores, pars)
+                        verified_scores + live_scores, rpars)
                 else:  # alt_shot / scramble: one shared team card
                     scores = (verified_scores[0] if verified_scores
                               else live_scores[0])
-                    rt, rt_par, thru = _partial_round_score(scores, pars)
+                    rt, rt_par, thru = _partial_round_score(scores, rpars)
             except ValueError:
                 mismatch = True
                 break
@@ -496,6 +517,8 @@ async def _team_rows(db_path: str, t: dict,
             round_totals[rn] = rt
             if rt_par is not None:
                 pars_entered += rt - rt_par
+            else:
+                pars_complete = False
             detail.append({
                 "round_number": rn, "total": rt, "to_par": rt_par,
                 "thru": thru,
@@ -508,8 +531,7 @@ async def _team_rows(db_path: str, t: dict,
             scoreless.append(team["name"])
             continue
         total = sum(round_totals.values())
-        to_par = (total - pars_entered
-                  if par_round is not None else None)
+        to_par = (total - pars_entered) if pars_complete else None
         sort_key = to_par if to_par is not None else total
         rows.append({"team_id": team["id"], "name": team["name"],
                      "total": total, "to_par": to_par,

@@ -123,13 +123,19 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
     return widget.tournament.holes ?? 18;
   }
 
+  /// Pars for the round being scored: rounds may play different
+  /// courses, so the round's own pars win over the tournament's.
   List<int>? get _pars {
-    final pars = widget.tournament.pars;
+    final pars = widget.tournament.parsForRound(_roundNumber);
     if (pars != null && pars.length >= _holeCount) {
       return pars.sublist(0, _holeCount);
     }
     return null;
   }
+
+  /// Course for the round being scored (hole maps key off this name).
+  String get _roundCourse =>
+      widget.tournament.courseForRound(_roundNumber) ?? '';
 
   bool get _locked => widget.teeTime.startsAtUtc.isAfter(DateTime.now());
 
@@ -401,7 +407,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       context: context,
       api: _api,
       cardId: cardId,
-      courseName: widget.tournament.course ?? '',
+      courseName: _roundCourse,
       holeNumber: hole + 1,
       par: _pars?[hole] ?? 4,
       strokes: card.scores[hole],
@@ -419,7 +425,7 @@ class _ScoreEntryScreenState extends State<ScoreEntryScreen> {
       context: context,
       api: _api,
       cardId: card.cardId!,
-      courseName: widget.tournament.course ?? '',
+      courseName: _roundCourse,
       pars: _pars ?? List.filled(_holeCount, 4),
       strokes: List.of(card.scores),
     );

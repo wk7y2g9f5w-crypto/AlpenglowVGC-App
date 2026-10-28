@@ -185,9 +185,11 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
       onSelected: _onCrewAction,
       itemBuilder: (_) => [
         const PopupMenuItem(value: 'edit', child: Text('Edit details')),
-        if (t.isMultiRound)
-          const PopupMenuItem(
-              value: 'rounds', child: Text('Edit round dates & settings')),
+        // Offered for single-round tournaments too: round 1 carries its
+        // own course now, and this editor is where it changes.
+        const PopupMenuItem(
+            value: 'rounds',
+            child: Text('Edit round dates, settings & course')),
         if (!done)
           const PopupMenuItem(
               value: 'complete', child: Text('Complete tournament')),
@@ -401,7 +403,7 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
     }
   }
 
-  /// Crew editor for each round's Golf+ settings and date window.
+  /// Crew editor for each round's course, Golf+ settings and date window.
   Future<void> _editRounds() async {
     final rounds = _tournament.rounds;
     if (rounds.isEmpty) return;
@@ -413,6 +415,27 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
     final teeVals = rounds.map((r) => r.teePosition ?? 'middle').toList();
     final pinVals = rounds.map((r) => r.pinPosition ?? 'white').toList();
     final windVals = rounds.map((r) => r.windStrength ?? 'moderate').toList();
+    // Course catalog for the per-round course pickers (best-effort: if
+    // it can't load, the dialog still edits dates/settings and every
+    // round keeps its current course).
+    var courseNames = <String>[];
+    try {
+      courseNames = (await _api.getCourses()).map((c) => c.name).toList();
+    } catch (_) {
+      courseNames = [];
+    }
+    if (!mounted) return;
+    final courseVals = rounds
+        .map((r) => r.course ?? _tournament.course ?? '')
+        .toList();
+    // A round's current course is always selectable, even if it is a
+    // free-text name outside the catalog.
+    List<String> courseOptions(int i) {
+      final opts = List<String>.of(courseNames);
+      final cur = courseVals[i];
+      if (cur.isNotEmpty && !opts.contains(cur)) opts.insert(0, cur);
+      return opts;
+    }
 
     final saved = await showDialog<bool>(
       context: context,
@@ -457,7 +480,7 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
           }
 
           return AlertDialog(
-            title: const Text('Round dates & settings'),
+            title: const Text('Round dates, settings & course'),
             content: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -467,6 +490,28 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
                     Text('Round ${rounds[i].roundNumber}',
                         style: const TextStyle(fontWeight: FontWeight.bold)),
                     const SizedBox(height: 6),
+                    if (courseOptions(i).isNotEmpty) ...[
+                      DropdownButtonFormField<String>(
+                        initialValue:
+                            courseVals[i].isEmpty ? null : courseVals[i],
+                        decoration: const InputDecoration(
+                            labelText: 'Course',
+                            border: OutlineInputBorder(),
+                            isDense: true),
+                        isExpanded: true,
+                        items: courseOptions(i)
+                            .map((name) => DropdownMenuItem(
+                                  value: name,
+                                  child: Text(name,
+                                      overflow: TextOverflow.ellipsis),
+                                ))
+                            .toList(),
+                        onChanged: (v) {
+                          if (v != null) setDlg(() => courseVals[i] = v);
+                        },
+                      ),
+                      const SizedBox(height: 6),
+                    ],
                     Row(
                       children: [
                         Expanded(
@@ -542,6 +587,10 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
         final eIso = ends[i] == null ? null : _iso(ends[i]!);
         if (sIso != rounds[i].startDate) fields['start_date'] = sIso;
         if (eIso != rounds[i].endDate) fields['end_date'] = eIso;
+        final origCourse = rounds[i].course ?? _tournament.course ?? '';
+        if (courseVals[i].isNotEmpty && courseVals[i] != origCourse) {
+          fields['course'] = courseVals[i];
+        }
         if (fields.isEmpty) continue;
         latest = await _api.editRound(
             _tournament.id, rounds[i].roundNumber, fields);
@@ -745,8 +794,12 @@ class _TournamentDetailScreenState extends State<TournamentDetailScreen> {
               ...t.rounds.map((r) => Padding(
                     padding: const EdgeInsets.only(top: 2),
                     child: Text(
-                      'Round ${r.roundNumber}: ${r.settingsSummary}'
-                      '${r.datesSummary.isNotEmpty ? ' · ${r.datesSummary}' : ''}',
+                      [
+                        'Round ${r.roundNumber}',
+                        if (r.course != null) r.course!,
+                        if (r.settingsSummary.isNotEmpty) r.settingsSummary,
+                        if (r.datesSummary.isNotEmpty) r.datesSummary,
+                      ].join(' · '),
                       style: const TextStyle(
                           color: Colors.white70, fontSize: 13),
                     ),
@@ -1092,7 +1145,8 @@ class _TeeTimesTabState extends State<_TeeTimesTab> {
                   tt.players.any((p) => p.discordId == data.me.discordId);
               final isCreator = tt.createdBy == data.me.discordId;
               return CourseTeeTimeCard(
-                course: widget.tournament.course,
+                course: tt.course ??
+                    widget.tournament.courseForRound(tt.roundNumber),
                 title: tt.label,
                 line1:
                     '${formatLocal(tt.startsAtUtc)} · ${tt.spotsFilled}/${tt.maxPlayers} players${tt.roundNumber > 1 ? ' · Round ${tt.roundNumber}' : ''}${isCreator ? ' · yours' : ''}',

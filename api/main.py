@@ -739,6 +739,30 @@ async def _tee_time_or_404(tee_time_id: int) -> tuple[dict, dict]:
     return tt, t
 
 
+def _round_effective(t: dict, rnd: dict | None) -> tuple[str, str | None]:
+    """A round's effective (course, pars_csv) — per-round course
+    selection (Cayden 2026-10-28): the round's own values when set,
+    else the tournament's. Clients always see resolved values and
+    never implement this fallback themselves."""
+    if rnd is not None:
+        return (rnd.get("course") or t["course"],
+                rnd.get("pars") or t.get("pars"))
+    return t["course"], t.get("pars")
+
+
+async def _pars_for_round(t: dict, round_number: int) -> str | None:
+    """Effective pars CSV for one round of a tournament."""
+    rnd = await db.get_round(DB_PATH, t["id"], round_number)
+    return _round_effective(t, rnd)[1]
+
+
+async def _course_pars_for_round(t: dict,
+                                 round_number: int) -> tuple[str, str | None]:
+    """Effective (course, pars_csv) for one round of a tournament."""
+    rnd = await db.get_round(DB_PATH, t["id"], round_number)
+    return _round_effective(t, rnd)
+
+
 async def _require_previous_round_played(tournament_id: int,
                                          player_discord_id: str,
                                          round_number: int) -> None:
@@ -816,7 +840,9 @@ def _witness_json(w: dict) -> dict:
 
 
 def _tee_time_json(tt: dict, players: list[dict],
-                   witnesses: list[dict] | None = None) -> dict:
+                   witnesses: list[dict] | None = None,
+                   course: str | None = None,
+                   pars_csv: str | None = None) -> dict:
     return {
         "id": tt["id"],
         "label": tt["label"],
@@ -824,6 +850,10 @@ def _tee_time_json(tt: dict, players: list[dict],
         "max_players": tt["max_players"],
         "created_by": tt["created_by"],
         "round_number": tt.get("round_number") or 1,
+        # The round's effective course/pars (per-round course
+        # selection); populated by callers that have the tournament.
+        "course": course,
+        "pars": _parse_pars(pars_csv),
         "started_at": utc_iso(tt.get("started_at")),
         "archived_at": utc_iso(tt.get("archived_at")),
         "players": [_player_json(p) for p in players],
@@ -915,6 +945,11 @@ def _tournament_json(t: dict, registered: bool,
                 "wind_strength": r["wind_strength"],
                 "start_date": r.get("start_date"),
                 "end_date": r.get("end_date"),
+                # Effective per-round course/pars (the round's own when
+                # set, else the tournament's) so clients never resolve
+                # the fallback themselves.
+                "course": r.get("course") or t["course"],
+                "pars": _parse_pars(r.get("pars") or pars_csv),
             }
             for r in rounds
         ],
@@ -1079,6 +1114,18 @@ class RoundCreate(BaseModel):
     # tournament's overall date range evenly across rounds.
     start_date: str | None = None
     end_date: str | None = None
+    # Optional per-round course (Cayden 2026-10-28). Validated against
+    # the course database in _validated_round (unknown → 422); when
+    # omitted the round plays the tournament course.
+    course: str | None = None
+
+    @field_validator("course")
+    @classmethod
+    def _course_clean(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v[:80] or None
 
     @field_validator("tee_position")
     @classmethod
@@ -1534,6 +1581,11 @@ def _validated_round(r: "RoundCreate", body: "TournamentCreate") -> dict:
     Raises HTTPException(400) on a bad range or a window outside the
     tournament's overall dates. Nones fall back to the even-split default
     in db.create_tournament.
+
+    A round course is validated against the course database exactly like
+    tournament tee times (unknown → 422) and always takes that course's
+    pars; a round without a course stores the tournament's course/pars
+    (db.create_tournament fills them in).
     """
     try:
         start_iso, end_iso = sl.validate_round_dates(
@@ -1542,12 +1594,25 @@ def _validated_round(r: "RoundCreate", body: "TournamentCreate") -> dict:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
         )
+    course = None
+    pars_csv = None
+    if r.course:
+        auto = gc.course_pars(r.course, body.holes)
+        if not auto:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Unknown course — pick one from the course list.",
+            )
+        course = r.course
+        pars_csv = ",".join(str(p) for p in auto)
     return {
         "tee_position": r.tee_position,
         "pin_position": r.pin_position,
         "wind_strength": r.wind_strength,
         "start_date": start_iso,
         "end_date": end_iso,
+        "course": course,
+        "pars": pars_csv,
     }
 
 
@@ -1959,6 +2024,8 @@ async def _resolve_team_rep(team: dict, user: dict, is_admin: bool) -> str:
 async def list_tee_times(tournament_id: int, user: CurrentUser) -> list[dict]:
     t = await _tournament_or_404(tournament_id)
     rows = await db.list_tee_times(DB_PATH, t["id"])
+    by_rn = {r["round_number"]: r
+             for r in await db.list_rounds(DB_PATH, t["id"])}
     out = []
     for tt in rows:
         # Archived tee times live in the admin-only Archive, not here.
@@ -1966,7 +2033,10 @@ async def list_tee_times(tournament_id: int, user: CurrentUser) -> list[dict]:
             continue
         players = await db.get_tee_time_players(DB_PATH, tt["id"])
         witnesses = await db.get_tee_time_witnesses(DB_PATH, tt["id"])
-        out.append(_tee_time_json(tt, players, witnesses))
+        course, pars_csv = _round_effective(
+            t, by_rn.get(tt.get("round_number") or 1))
+        out.append(_tee_time_json(tt, players, witnesses,
+                                  course=course, pars_csv=pars_csv))
     return out
 
 
@@ -2109,7 +2179,11 @@ async def create_tee_time(
     tt = await db.get_tee_time(DB_PATH, tt_id)
     players = await db.get_tee_time_players(DB_PATH, tt_id)
     witnesses = await db.get_tee_time_witnesses(DB_PATH, tt_id)
-    return {**_tee_time_json(tt, players, witnesses), "joined": True}
+    course, pars_csv = await _course_pars_for_round(
+        t, tt.get("round_number") or 1)
+    return {**_tee_time_json(tt, players, witnesses,
+                             course=course, pars_csv=pars_csv),
+            "joined": True}
 
 
 class TeeTimeJoin(BaseModel):
@@ -2558,7 +2632,9 @@ async def witness_submit_scorecard(card_id: int,
         )
     card = await db.get_scorecard(DB_PATH, card_id)
     t = await db.get_tournament(DB_PATH, card["tournament_id"])
-    return {"card": _card_json(card, t.get("pars") if t else None)}
+    pars_csv = (await _pars_for_round(t, card.get("round_number") or 1)
+                if t else None)
+    return {"card": _card_json(card, pars_csv)}
 
 
 async def _can_manage_tee_time(tt: dict, user: CurrentUser) -> bool:
@@ -2618,7 +2694,10 @@ async def update_tee_time(
     tt = await db.get_tee_time(DB_PATH, tt["id"])
     players = await db.get_tee_time_players(DB_PATH, tt["id"])
     witnesses = await db.get_tee_time_witnesses(DB_PATH, tt["id"])
-    return _tee_time_json(tt, players, witnesses)
+    course, pars_csv = await _course_pars_for_round(
+        t, tt.get("round_number") or 1)
+    return _tee_time_json(tt, players, witnesses,
+                          course=course, pars_csv=pars_csv)
 
 
 @app.delete("/api/tee-times/{tee_time_id}")
@@ -2678,6 +2757,21 @@ class RoundUpdate(BaseModel):
     wind_strength: str | None = None
     start_date: str | None = None  # YYYY-MM-DD
     end_date: str | None = None  # YYYY-MM-DD
+    # Per-round course (Cayden 2026-10-28): validated against the course
+    # database in the endpoint (unknown → 422); the round's pars are
+    # re-filled from the new course. Changing it after scores exist is
+    # allowed — gross scores stand, pars/to-par follow the new course.
+    course: str | None = None
+
+    @field_validator("course")
+    @classmethod
+    def _course_nonblank(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("must be non-empty")
+        return v[:80]
 
 
 @app.patch("/api/tournaments/{tournament_id}/rounds/{round_number}")
@@ -2710,12 +2804,24 @@ async def update_round(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unknown {field} '{v}'.",
             )
+    course = None
+    pars_csv = None
+    if patch.course is not None:
+        auto = gc.course_pars(patch.course, t["holes"])
+        if not auto:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Unknown course — pick one from the course list.",
+            )
+        course = patch.course
+        pars_csv = ",".join(str(p) for p in auto)
     rnd = await db.update_round(
         DB_PATH, t["id"], round_number,
         tee_position=patch.tee_position,
         pin_position=patch.pin_position,
         wind_strength=patch.wind_strength,
         start_date=start_iso, end_date=end_iso,
+        course=course, pars=pars_csv,
     )
     rounds = await db.list_rounds(DB_PATH, t["id"])
     return _tournament_json(t, registered=False, rounds=rounds)
@@ -2984,8 +3090,11 @@ async def archive_tournament_tee_times(user: AdminUser) -> dict:
                 continue
             players = await db.get_tee_time_players(DB_PATH, tt["id"])
             witnesses = await db.get_tee_time_witnesses(DB_PATH, tt["id"])
+            course, pars_csv = await _course_pars_for_round(
+                t, tt.get("round_number") or 1)
             entry = {
-                **_tee_time_json(tt, players, witnesses),
+                **_tee_time_json(tt, players, witnesses,
+                                 course=course, pars_csv=pars_csv),
                 "tournament_id": t["id"],
                 "tournament_name": t.get("name"),
             }
@@ -3349,7 +3458,8 @@ async def get_scorecard(
         )
         if not mine:
             return {"card": None}
-        return {"card": _card_json(mine, t.get("pars"))}
+        return {"card": _card_json(
+            mine, await _pars_for_round(t, mine.get("round_number") or 1))}
     target_id = player_discord_id or user["discord_id"]
     if player_discord_id is not None:
         # Only cards for players in this tee time are visible here.
@@ -3374,7 +3484,8 @@ async def get_scorecard(
     )
     if not mine:
         return {"card": None}
-    return {"card": _card_json(mine, t.get("pars"))}
+    return {"card": _card_json(
+        mine, await _pars_for_round(t, mine.get("round_number") or 1))}
 
 
 @app.put("/api/tee-times/{tee_time_id}/scorecard")
@@ -3744,7 +3855,8 @@ async def put_scorecard(
                 DB_PATH, tt["id"])
     except Exception:  # noqa: BLE001 - archive is best-effort
         pass
-    return {"card": _card_json(card, t.get("pars"))}
+    return {"card": _card_json(
+        card, await _pars_for_round(t, card.get("round_number") or 1))}
 
 
 # --------------------------------------------------------------------------
@@ -5399,6 +5511,10 @@ async def leaderboard(tournament_id: int, user: CurrentUser) -> dict:
                 "wind_strength": r["wind_strength"],
                 "start_date": r.get("start_date"),
                 "end_date": r.get("end_date"),
+                # Effective per-round course/pars, same resolution as
+                # the tournament JSON.
+                "course": r.get("course") or t["course"],
+                "pars": _parse_pars(r.get("pars") or t.get("pars")),
             }
             for r in rounds
         ],

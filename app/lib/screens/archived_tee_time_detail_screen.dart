@@ -106,7 +106,7 @@ class _ArchivedTeeTimeDetailScreenState
   }
 
   Widget _holeGrid(Scorecard card) {
-    final pars = widget.tournament.pars ?? [];
+    final pars = widget.tournament.parsForRound(card.roundNumber) ?? [];
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Table(

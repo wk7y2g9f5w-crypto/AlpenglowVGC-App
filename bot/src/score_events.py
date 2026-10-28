@@ -71,7 +71,16 @@ async def detect_score_events(
         if t is None:
             return fired
         n = t.get("holes") or 18
+        # Per-round course (Cayden 2026-10-28): the card's round may play
+        # a different course than the tournament default — its pars and
+        # name win for eagle/albatross detection and the message text.
+        rnd = await db.get_round(db_path, tournament_id,
+                                 new_card.get("round_number") or 1)
         pars = _pars_of(t)
+        if rnd is not None and rnd.get("pars"):
+            round_pars = _pars_of(rnd)
+            if round_pars:
+                pars = round_pars
         old_holes = _holes_of(old_card, n)
         new_holes = _holes_of(new_card, n)
 
@@ -80,7 +89,8 @@ async def detect_score_events(
         else:
             player = await db.get_player(db_path, player_discord_id)
             name = db.display_name_of(player, player_discord_id)
-        course = t.get("course") or "the course"
+        course = (rnd.get("course") if rnd else None) \
+            or t.get("course") or "the course"
 
         for i, (old, new) in enumerate(zip(old_holes, new_holes)):
             if new is None:

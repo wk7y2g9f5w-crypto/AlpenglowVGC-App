@@ -28,8 +28,15 @@ class _RoundSettings {
   DateTime? start;
   DateTime? end;
   bool datesCustom = false;
+  // Per-round course: starts as a copy of the tournament course and
+  // follows it until the user picks a different one for this round.
+  String? courseName;
+  bool courseCustom = false;
   _RoundSettings(
-      {this.tee = 'middle', this.pin = 'white', this.wind = 'moderate'});
+      {this.tee = 'middle',
+      this.pin = 'white',
+      this.wind = 'moderate',
+      this.courseName});
 }
 
 class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
@@ -217,13 +224,24 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
     }
   }
 
+  /// Points every round the user hasn't given its own course at the
+  /// tournament course (after the tournament course changes).
+  void _applyDefaultRoundCourses() {
+    for (final rs in _roundSettings) {
+      if (!rs.courseCustom) rs.courseName = _course?.name;
+    }
+  }
+
   void _setNumRounds(int n) {
     setState(() {
       if (n > _numRounds) {
         // New rounds start from the base settings — tune each below.
         for (var i = _numRounds; i < n; i++) {
           _roundSettings.add(_RoundSettings(
-              tee: _teePosition, pin: _pinPosition, wind: _windStrength));
+              tee: _teePosition,
+              pin: _pinPosition,
+              wind: _windStrength,
+              courseName: _course?.name));
         }
       } else {
         _roundSettings = _roundSettings.sublist(0, n);
@@ -285,6 +303,10 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
                 'tee_position': _roundSettings[i].tee,
                 'pin_position': _roundSettings[i].pin,
                 'wind_strength': _roundSettings[i].wind,
+                // Always send the round's course: rounds the user
+                // didn't customize carry the tournament course.
+                'course':
+                    _roundSettings[i].courseName ?? _course!.name,
                 if (_roundSettings[i].start != null)
                   'start_date': _iso(_roundSettings[i].start!),
                 if (_roundSettings[i].end != null)
@@ -352,6 +374,36 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
             Text('Round ${i + 1}',
                 style:
                     const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              // Keyed on the effective value: a non-custom round's
+              // course follows the tournament course, and the key
+              // forces the field to show the new value when it does.
+              key: ValueKey(
+                  'round-course-$i-${rs.courseName ?? _course?.name}'),
+              initialValue: rs.courseName ?? _course?.name,
+              decoration: const InputDecoration(
+                labelText: 'Course',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              isExpanded: true,
+              items: _courses
+                  .map((c) => DropdownMenuItem(
+                        value: c.name,
+                        child: Text(c.name,
+                            overflow: TextOverflow.ellipsis),
+                      ))
+                  .toList(),
+              onChanged: (v) {
+                if (v != null) {
+                  setState(() {
+                    rs.courseName = v;
+                    rs.courseCustom = true;
+                  });
+                }
+              },
+            ),
             const SizedBox(height: 8),
             Row(
               children: [
@@ -482,7 +534,10 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
                                         overflow: TextOverflow.ellipsis),
                                   ))
                               .toList(),
-                          onChanged: (v) => setState(() => _course = v),
+                          onChanged: (v) => setState(() {
+                            _course = v;
+                            _applyDefaultRoundCourses();
+                          }),
                         ),
                       ),
                     ],
@@ -551,8 +606,9 @@ class _CreateTournamentScreenState extends State<CreateTournamentScreen> {
                         style: TextStyle(color: Colors.grey, fontSize: 12)),
                   if (_numRounds > 1) ...[
                     const Text(
-                      'Same course and pars every round — only tee, pin and '
-                      'wind change. Green speed applies to all rounds.',
+                      'Each round starts on the tournament course — give any '
+                      'round its own course below and its pars follow. '
+                      'Green speed applies to all rounds.',
                       style: TextStyle(color: Colors.grey, fontSize: 12),
                     ),
                     const SizedBox(height: 8),

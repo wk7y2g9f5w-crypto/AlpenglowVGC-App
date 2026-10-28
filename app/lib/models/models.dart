@@ -72,8 +72,11 @@ String pacificTodayKey() {
   return '${pacific.year.toString().padLeft(4, '0')}-${two(pacific.month)}-${two(pacific.day)}';
 }
 
-/// One round of a multi-round tournament: same course as the tournament,
-/// with its own tee/pin/wind settings. Green speed is tournament-wide.
+/// One round of a multi-round tournament: its own course (which may
+/// differ per round) with its own pars, plus its own tee/pin/wind
+/// settings. Green speed is tournament-wide. The API sends the round's
+/// effective course/pars (already resolved against the tournament's),
+/// so [course]/[pars] are null only for payloads from older servers.
 class TournamentRound {
   final int roundNumber;
   final String? teePosition;
@@ -81,6 +84,8 @@ class TournamentRound {
   final String? windStrength;
   final String? startDate;
   final String? endDate;
+  final String? course;
+  final List<int>? pars;
 
   TournamentRound({
     required this.roundNumber,
@@ -89,6 +94,8 @@ class TournamentRound {
     this.windStrength,
     this.startDate,
     this.endDate,
+    this.course,
+    this.pars,
   });
 
   factory TournamentRound.fromJson(Map<String, dynamic> j) => TournamentRound(
@@ -98,6 +105,10 @@ class TournamentRound {
         windStrength: j['wind_strength']?.toString(),
         startDate: j['start_date']?.toString(),
         endDate: j['end_date']?.toString(),
+        course: j['course']?.toString(),
+        pars: (j['pars'] as List?)
+            ?.map((e) => (e as num).toInt())
+            .toList(growable: false),
       );
 
   /// True when the round's window has opened (or no window is set).
@@ -227,6 +238,22 @@ class Tournament {
   /// The season this tournament counts toward, or null for none.
   Season? get season => seasons.isEmpty ? null : seasons.first;
 
+  /// The round with this number, when the payload carries it.
+  TournamentRound? roundByNumber(int n) {
+    for (final r in rounds) {
+      if (r.roundNumber == n) return r;
+    }
+    return null;
+  }
+
+  /// Effective course for a round: the round's own course (rounds may
+  /// play different courses), else the tournament course.
+  String? courseForRound(int n) => roundByNumber(n)?.course ?? course;
+
+  /// Effective pars for a round: the round's own pars, else the
+  /// tournament's.
+  List<int>? parsForRound(int n) => roundByNumber(n)?.pars ?? pars;
+
   /// True when the tournament has more than one round configured.
   bool get isMultiRound => numRounds > 1 || rounds.length > 1;
 
@@ -319,6 +346,11 @@ class TeeTime {
   final bool witnessRule;
   final List<TeeTimeWitness> witnesses;
 
+  /// The tee time's round's effective course/pars (per-round course
+  /// selection), as resolved by the API. Null on older payloads.
+  final String? course;
+  final List<int>? pars;
+
   TeeTime({
     required this.id,
     required this.label,
@@ -331,6 +363,8 @@ class TeeTime {
     this.archivedAtUtc,
     this.witnessRule = false,
     this.witnesses = const [],
+    this.course,
+    this.pars,
   });
 
   static DateTime? _parseOpt(dynamic v) {
@@ -365,6 +399,10 @@ class TeeTime {
       witnesses: ((j['witnesses'] as List?) ?? [])
           .map((e) => TeeTimeWitness.fromJson(e as Map<String, dynamic>))
           .toList(),
+      course: j['course']?.toString(),
+      pars: (j['pars'] as List?)
+          ?.map((e) => (e as num).toInt())
+          .toList(growable: false),
     );
   }
 

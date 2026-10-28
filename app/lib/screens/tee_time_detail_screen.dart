@@ -422,7 +422,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
 
   /// The witness reviews the finished card and co-submits it.
   Future<void> _reviewAndCoSubmit(TeeTime tt, Scorecard card) async {
-    final pars = widget.tournament.pars;
+    final pars = widget.tournament.parsForRound(card.roundNumber);
     String fmtTime(String? iso) {
       final d = iso == null ? null : DateTime.tryParse(iso)?.toUtc();
       return d == null ? '—' : formatLocal(d);
@@ -732,7 +732,7 @@ class _TeeTimeDetailScreenState extends State<TeeTimeDetailScreen> {
                   ),
                 ),
               CourseArtHeader(
-                course: widget.tournament.course,
+                course: widget.tournament.courseForRound(tt.roundNumber),
                 children: [
                   Text(tt.label,
                       style: const TextStyle(
