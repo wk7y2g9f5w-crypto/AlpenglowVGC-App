@@ -118,6 +118,12 @@ COURSES = [
     dict(slug="paynes-valley", display="Payne's Valley",
          lat=36.5646859, lon=-93.2010533,
          boundaries=["Payne's Valley Golf Course", "Payne's Valley"]),
+    # Added to Golf+ 2026-10-28. Pars verified against Cayden's in-game
+    # GPS screenshots 2026-10-28 (in COURSE_PARS). OSM maps the North
+    # and South courses as separate boundaries sharing refs 1-18; the
+    # exact-name boundary keeps us on the North.
+    dict(slug="torrey-pines-north", display="Torrey Pines North Course",
+         lat=32.9075, lon=-117.2445, boundaries=["Torrey Pines North Course"]),
 ]
 
 # --------------------------------------------------------------------------
